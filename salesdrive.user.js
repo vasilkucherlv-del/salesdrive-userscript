@@ -1,0 +1,2283 @@
+// ==UserScript==
+// @name         SalesDrive — Допродажі + База знань
+// @namespace    lartek-komplektom
+// @version      0.58
+// @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
+// @author       Vasyl
+// @match        https://*.salesdrive.me/*
+// @run-at       document-idle
+// @grant        GM_xmlhttpRequest
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @connect      docs.google.com
+// @updateURL    https://raw.githubusercontent.com/vasilkucherlv-del/salesdrive-userscript/main/salesdrive.user.js
+// @downloadURL  https://raw.githubusercontent.com/vasilkucherlv-del/salesdrive-userscript/main/salesdrive.user.js
+// ==/UserScript==
+
+(function () {
+  "use strict";
+
+  // Спільна шина подій між цим (пісочниця Tampermonkey) і вкрапленим page-кодом
+  // (контекст сторінки). Обидва боки мусять користуватись ОДНИМ window сторінки.
+  var BUS = (typeof unsafeWindow !== "undefined" && unsafeWindow) ? unsafeWindow : window;
+
+  // ---- GM-сховище ----
+  function gmGet(key, def) { try { var v = GM_getValue(key, def); return v; } catch (e) { return def; } }
+  function gmSet(key, val) { try { GM_setValue(key, val); } catch (e) {} }
+  function gmGetJSON(key) {
+    try { var s = GM_getValue(key, null); if (s == null) return null; return (typeof s === "string") ? JSON.parse(s) : s; }
+    catch (e) { return null; }
+  }
+  function gmSetJSON(key, val) { try { GM_setValue(key, JSON.stringify(val)); } catch (e) {} }
+
+  // ---- завантаження таблиць через GM_xmlhttpRequest (без CORS) ----
+  var SHEET_ID = "1sx212HcKUols-fHREq6ktjmqaJdory-M7SO40w9F5zc"; // допродажі
+  var GID = "0";
+  var KB_SHEET_ID = "1ji2p3Nk0qcOy58vMu1312kO1LBrDqa7Ha5c8QvQvW7c"; // база знань
+  var KB_GID = "0";
+  var TTL_MS = 60 * 1000;
+
+  function gvizUrl(id, gid) {
+    return "https://docs.google.com/spreadsheets/d/" + id + "/gviz/tq?tqx=out:json&headers=1&gid=" + gid;
+  }
+
+  function gmFetch(url) {
+    return new Promise(function (resolve, reject) {
+      try {
+        GM_xmlhttpRequest({
+          method: "GET",
+          url: url,
+          onload: function (r) {
+            if (r.status >= 200 && r.status < 300) resolve(r.responseText);
+            else reject(new Error("HTTP " + r.status));
+          },
+          onerror: function () { reject(new Error("network")); },
+          ontimeout: function () { reject(new Error("timeout")); }
+        });
+      } catch (e) { reject(e); }
+    });
+  }
+
+  // Беремо відображене значення (f) — там коди з нулями; інакше сире (v).
+  function cellText(c) {
+    if (!c) return "";
+    if (c.f != null && String(c.f) !== "") return String(c.f).trim();
+    if (c.v != null) return String(c.v).trim();
+    return "";
+  }
+
+  function parseGviz(text) {
+    var s = text.indexOf("{");
+    var e = text.lastIndexOf("}");
+    if (s < 0 || e < 0) throw new Error("несподіваний формат відповіді");
+    var json = JSON.parse(text.slice(s, e + 1));
+    var rows = (json.table && json.table.rows) || [];
+    var out = [];
+    for (var i = 0; i < rows.length; i++) {
+      var c = rows[i].c || [];
+      // колонки: 0=код якоря, 1=назва якоря, 2=код супутнього, 3=назва супутнього, 4=скрипт
+      var anchorName = cellText(c[1]);
+      var compCode = cellText(c[2]);
+      var compName = cellText(c[3]);
+      var script = cellText(c[4]);
+      if (!anchorName || !compCode) continue;
+      out.push({ a: anchorName, sku: compCode, c: compName, s: script });
+    }
+    return out;
+  }
+
+  function parseKb(text) {
+    var s = text.indexOf("{");
+    var e = text.lastIndexOf("}");
+    if (s < 0 || e < 0) throw new Error("несподіваний формат відповіді");
+    var json = JSON.parse(text.slice(s, e + 1));
+    var rows = (json.table && json.table.rows) || [];
+    var out = [];
+    for (var i = 0; i < rows.length; i++) {
+      var c = rows[i].c || [];
+      // колонки: 0=категорія, 1=заголовок, 2=текст, 3=ключові слова
+      var cat = cellText(c[0]);
+      var title = cellText(c[1]);
+      var txt = cellText(c[2]);
+      var kw = cellText(c[3]);
+      if (!title) continue;
+      if (cat.toLowerCase() === "категорія" && title.toLowerCase() === "заголовок") continue;
+      out.push({ cat: cat, title: title, text: txt, kw: kw });
+    }
+    return out;
+  }
+
+  function getMap(force) {
+    var now = Date.now();
+    var cached = gmGetJSON("sd_upsell_cache_v1");
+    if (!force && cached && cached.pairs && cached.pairs.length && now - cached.ts < TTL_MS) {
+      return Promise.resolve({ pairs: cached.pairs, source: "cache" });
+    }
+    return gmFetch(gvizUrl(SHEET_ID, GID)).then(function (txt) {
+      var pairs = parseGviz(txt);
+      if (!pairs.length) throw new Error("у таблиці 0 придатних рядків");
+      gmSetJSON("sd_upsell_cache_v1", { ts: now, pairs: pairs });
+      return { pairs: pairs, source: "sheet" };
+    }).catch(function (err) {
+      if (cached && cached.pairs && cached.pairs.length) {
+        return { pairs: cached.pairs, source: "cache-after-error", error: String(err) };
+      }
+      return { pairs: [], source: "error", error: String(err) };
+    });
+  }
+
+  function getKb(force) {
+    var now = Date.now();
+    var cached = gmGetJSON("sd_kb_cache_v1");
+    if (!force && cached && cached.rows && cached.rows.length && now - cached.ts < TTL_MS) {
+      return Promise.resolve({ rows: cached.rows, source: "cache" });
+    }
+    return gmFetch(gvizUrl(KB_SHEET_ID, KB_GID)).then(function (txt) {
+      var rows = parseKb(txt);
+      if (!rows.length) throw new Error("у таблиці 0 придатних рядків");
+      gmSetJSON("sd_kb_cache_v1", { ts: now, rows: rows });
+      return { rows: rows, source: "sheet" };
+    }).catch(function (err) {
+      if (cached && cached.rows && cached.rows.length) {
+        return { rows: cached.rows, source: "cache-after-error", error: String(err) };
+      }
+      return { rows: [], source: "error", error: String(err) };
+    });
+  }
+
+  // ---- шим chrome.* — щоб перенесений код content.js/kb.js працював без змін ----
+  var chrome = {
+    runtime: {
+      lastError: null,
+      sendMessage: function (msg, cb) {
+        if (!msg) return;
+        if (msg.type === "sdGetUpsellMap") { getMap(!!msg.force).then(function (r) { if (cb) cb(r); }); return; }
+        if (msg.type === "sdGetKb") { getKb(!!msg.force).then(function (r) { if (cb) cb(r); }); return; }
+      }
+    },
+    storage: {
+      local: {
+        get: function (keys, cb) {
+          var out = {};
+          try {
+            var arr = (typeof keys === "string") ? [keys] : (Array.isArray(keys) ? keys : Object.keys(keys || {}));
+            arr.forEach(function (k) { var v = gmGet("ls_" + k, undefined); if (v !== undefined) out[k] = v; });
+          } catch (e) {}
+          if (cb) cb(out);
+        },
+        set: function (obj, cb) {
+          try { Object.keys(obj || {}).forEach(function (k) { gmSet("ls_" + k, obj[k]); }); } catch (e) {}
+          if (cb) cb();
+        }
+      }
+    }
+  };
+
+  // ====== далі — перенесені без змін модулі (карта-запас, content.js, kb.js)
+  // ====== і page-міст, що вкраплюється в контекст сторінки ======
+
+
+  // ====== карта-запас (вбудована, як у upsell_map.js) ======
+
+var UPSELL_MAP_DATA = [
+ {
+  "k": "мішок для пилососа samsung багат",
+  "a": "Мішок для пилососа Samsung багаторазовий VT-50 DJ69-00420B",
+  "c": "Передмоторний фільтр для пилососа Samsung SC4180 DJ63-00539A",
+  "sku": "104",
+  "c2": "Тримач мішка для пилососу Samsung DJ61-00935A",
+  "s": "До цього зазвичай беруть «Передмоторний фільтр для пилососа Samsung SC4180 DJ63-00539A». Додати одразу, щоб не замовляти окремо й не платити ще раз за доставку?"
+ },
+ {
+  "k": "набір фільтрів для пилососа thom",
+  "a": "Набір фільтрів для пилососа Thomas Twin Tiger T2 T1 Genius Овал (787203)",
+  "c": "HEPA фільтр для пилососа Thomas",
+  "sku": "106",
+  "c2": "Набір фільтрів мотора HEPA (2 шт) для пилососа Thomas",
+  "s": "До цього зазвичай беруть «HEPA фільтр для пилососа Thomas». Додати одразу, щоб не замовляти окремо й не платити ще раз за доставку?"
+ },
+ {
+  "k": "ніж для м'ясорубки zelmer №8 дво",
+  "a": "Ніж для м'ясорубки Zelmer №8 двосторонній 632543 86.3109 (ZMMA128X)",
+  "c": "Муфта, втулка для м'ясорубки Zelmer та Bosch",
+  "sku": "061",
+  "c2": "Шнек для м'ясорубки Zelmer двостороннього ножа №8",
+  "s": "До цього зазвичай беруть «Муфта, втулка для м'ясорубки Zelmer та Bosch». Додати одразу, щоб не замовляти окремо й не платити ще раз за доставку?"
+ },
+ {
+  "k": "муфта, втулка для м'ясорубки zel",
+  "a": "Муфта, втулка для м'ясорубки Zelmer та Bosch 86.1203, 00792328 (3шт)",
+  "c": "Ніж для м'ясорубки Zelmer №8 двосторонній",
+  "sku": "040",
+  "c2": "Ніж для м'ясорубки Zelmer #8 двосторонній ZMMA028X (A863109.00)",
+  "s": "До цього зазвичай беруть «Ніж для м'ясорубки Zelmer №8 двосторонній». Додати одразу, щоб не замовляти окремо й не платити ще раз за доставку?"
+ },
+ {
+  "k": "фільтр для пилососа karcher 6.41",
+  "a": "Фільтр для пилососа Karcher 6.414-552.0",
+  "c": "Мішок для пилососа Karcher",
+  "sku": "164",
+  "c2": "Мішки для пилососу Karcher",
+  "s": "До цього зазвичай беруть «Мішок для пилососа Karcher». Додати одразу, щоб не замовляти окремо й не платити ще раз за доставку?"
+ },
+ {
+  "k": "набір фільтрів для пилососа thom",
+  "a": "Набір фільтрів для пилососа Thomas XT/XS 787241",
+  "c": "HEPA фільтр для пилососа Thomas",
+  "sku": "134",
+  "c2": "Мішки для пилососу Thomas",
+  "s": "До цього зазвичай беруть «HEPA фільтр для пилососа Thomas». Додати одразу, щоб не замовляти окремо й не платити ще раз за доставку?"
+ },
+ {
+  "k": "корпус терок + защолка для м'ясо",
+  "a": "Корпус терок + защолка для м'ясорубки Zelmer 986.7001 + 986.7002",
+  "c": "Защолка корпусу-тримача терок Zelmer 986.7002",
+  "sku": "231",
+  "c2": "Барабан-терка для м'ясорубки Zelmer",
+  "s": "До цього зазвичай беруть «Защолка корпусу-тримача терок Zelmer». Додати одразу, щоб не замовляти окремо й не платити ще раз за доставку?"
+ },
+ {
+  "k": "щітка для пилососа універсальна ",
+  "a": "Щітка для пилососа універсальна паркетна D=30-37 мм",
+  "c": "Мішок багаторазовий для пилососа LG",
+  "sku": "013",
+  "c2": "",
+  "s": "До цього зазвичай беруть «Мішок багаторазовий для пилососа LG». Додати одразу, щоб не замовляти окремо й не платити ще раз за доставку?"
+ },
+ {
+  "k": "ріжучий блок і сітка для електро",
+  "a": "Ріжучий блок і сітка для електробритв Braun 10B",
+  "c": "Бриючий блок і сітка для бритви Braun 32B",
+  "sku": "020",
+  "c2": "",
+  "s": "До цього зазвичай беруть «Бриючий блок і сітка для бритви Braun 32B». Додати одразу, щоб не замовляти окремо й не платити ще раз за доставку?"
+ },
+ {
+  "k": "харчове мастило для кухонної тех",
+  "a": "Харчове мастило для кухонної техніки MOL Food Grease 2 (NLGI2) 50 мл",
+  "c": "Набір шестерень для м'ясорубок Zelmer (187.0003",
+  "sku": "210",
+  "c2": "",
+  "s": "До цього зазвичай беруть «Набір шестерень для м'ясорубок Zelmer (187.0003». Додати одразу, щоб не замовляти окремо й не платити ще раз за доставку?"
+ },
+ {
+  "k": "мішки для пилососа s-bag clasic ",
+  "a": "Мішки для пилососа S-bag Clasic long performance (4шт)",
+  "c": "Комплект фільтрів для пилососа Philips",
+  "sku": "01583",
+  "c2": "Фільтр для пилососа Philips EFS1W",
+  "s": "До цього зазвичай беруть «Комплект фільтрів для пилососа Philips». Додати одразу, щоб не замовляти окремо й не платити ще раз за доставку?"
+ },
+ {
+  "k": "мішок багаторазовий для пилососа",
+  "a": "Мішок багаторазовий для пилососа LG 5231FI2308C",
+  "c": "Мішок для пилососа Samsung багаторазовий VT-50 DJ69-00420B",
+  "sku": "122",
+  "c2": "Універсальний фільтр для пилососа (200 х 140мм)",
+  "s": "До цього зазвичай беруть «Мішок для пилососа Samsung багаторазовий VT-50 DJ69-00420B». Додати одразу, щоб не замовляти окремо й не платити ще раз за доставку?"
+ },
+ {
+  "k": "ніж двосторонній для м'ясорубки ",
+  "a": "Ніж двосторонній для м'ясорубки Zelmer №5 86.1009 (нержавіюча сталь)",
+  "c": "Шнек для м'ясорубки Zelmer №5",
+  "sku": "0287",
+  "c2": "Решітка для м'ясорубки Zelmer №5 (середня)",
+  "s": "До цього зазвичай беруть «Шнек для м'ясорубки Zelmer №5». Додати одразу, щоб не замовляти окремо й не платити ще раз за доставку?"
+ },
+ {
+  "k": "ручка дверей для холодильника су",
+  "a": "Ручка дверей для холодильника сумісна із Liebherr 743067000",
+  "c": "Комплект заглушок (накладок) для ручки для холодильника Liebherr",
+  "sku": "02595",
+  "c2": "",
+  "s": "До цього зазвичай беруть «Комплект заглушок (накладок) для ручки для холодильника Liebherr». Додати одразу, щоб не замовляти окремо й не платити ще раз за доставку?"
+ },
+ {
+  "k": "комплект фільтрів для пилососа p",
+  "a": "Комплект фільтрів для пилососа Philips 900167768 + 432200039731",
+  "c": "Мішок -пилозбірник для пилососа Philips s-bag (многоразовий)",
+  "sku": "0691",
+  "c2": "Мішки для пилососа S-bag Clasic long performance (4шт)",
+  "s": "До цього зазвичай беруть «Мішок -пилозбірник для пилососа Philips s-bag (многоразовий)». Додати одразу, щоб не замовляти окремо й не платити ще раз за доставку?"
+ },
+ {
+  "k": "набір фільтрів для пилососа sams",
+  "a": "Набір фільтрів для пилососа Samsung DJ97-00492A+DJ97-01159A",
+  "c": "Фільтр двигуна для пилососу Samsung DJ63-00599A SC6500",
+  "sku": "146",
+  "c2": "Фільтр для пилососу Samsung DJ97-01159A",
+  "s": "До цього зазвичай беруть «Фільтр двигуна для пилососу Samsung DJ63-00599A SC6500». Додати одразу, щоб не замовляти окремо й не платити ще раз за доставку?"
+ },
+ {
+  "k": "щітка для пилососа килимова d=32",
+  "a": "Щітка для пилососа килимова D=32 mm",
+  "c": "Труба телескоп для пилососа Ø 32мм",
+  "sku": "206",
+  "c2": "",
+  "s": "До цього зазвичай беруть «Труба телескоп для пилососа Ø 32мм». Додати одразу, щоб не замовляти окремо й не платити ще раз за доставку?"
+ },
+ {
+  "k": "мішки для пилососу karcher 6.959",
+  "a": "Мішки для пилососу Karcher 6.959-130.0 5шт.",
+  "c": "Фільтр для пилососа Karcher",
+  "sku": "0128",
+  "c2": "Мішок для пилососа Karcher",
+  "s": "До цього зазвичай беруть «Фільтр для пилососа Karcher». Додати одразу, щоб не замовляти окремо й не платити ще раз за доставку?"
+ },
+ {
+  "k": "комплект підшипників для прально",
+  "a": "Комплект підшипників для пральної машини Electrolux Zanussi EBI COD.098 + COD.099 (6203 - 2Z)",
+  "c": "Амортизатори для пральної машини Electrolux",
+  "sku": "01439",
+  "c2": "",
+  "s": "До цього зазвичай беруть «Амортизатори для пральної машини Electrolux». Додати одразу, щоб не замовляти окремо й не платити ще раз за доставку?"
+ },
+ {
+  "k": "шнек для м'ясорубки zelmer двост",
+  "a": "Шнек для м'ясорубки Zelmer двостороннього ножа №8 86.3140 12000524",
+  "c": "Ніж для м'ясорубки Zelmer №8 двосторонній",
+  "sku": "040",
+  "c2": "",
+  "s": "До цього зазвичай беруть «Ніж для м'ясорубки Zelmer №8 двосторонній». Додати одразу, щоб не замовляти окремо й не платити ще раз за доставку?"
+ },
+ {
+  "k": "комплект фільтрів для пилососа s",
+  "a": "Комплект фільтрів для пилососа Samsung DJ97-01040C+DJ63-00672D",
+  "c": "Вхідний фільтр для пилососа Samsung DJ63-00671A",
+  "sku": "0324",
+  "c2": "",
+  "s": "До цього зазвичай беруть «Вхідний фільтр для пилососа Samsung DJ63-00671A». Додати одразу, щоб не замовляти окремо й не платити ще раз за доставку?"
+ }
+];
+
+
+  // ====== content.js (підказки/ціни/рейтинг/ТТН) ======
+
+(function () {
+  "use strict";
+
+  var DEBUG = false; // увімкни true, щоб бачити детальні логи в консолі
+  function dbg() { if (DEBUG) console.log.apply(console, ["[SD Допродаж]"].concat([].slice.call(arguments))); }
+
+  function norm(s) {
+    return (s || "").toString().toLowerCase()
+      // Прибираємо апострофи ЗОВСІМ: одне й те саме слово в SalesDrive і в таблиці
+      // часто пишуть по-різному («м'ясорубки» / «мясорубки», «п'ять» / «пять»),
+      // тож апостроф не має заважати збігу якоря.
+      .replace(/[\u02bc\u2019\u2018\u0027\u00b4`]/g, "")
+      .replace(/\s+/g, " ").trim();
+  }
+
+  // ---- побудова груп: один якір -> кілька супутніх ----
+  // вхід: масив пар {a, sku, c, s}; вихід: масив {key, a, items:[{sku,c,s}]}
+  function buildGroups(pairs) {
+    var byKey = {};
+    (pairs || []).forEach(function (p) {
+      var a = (p && p.a || "").toString();
+      var key = norm(a).slice(0, 40);
+      if (key.length < 4) return;
+      var sku = String((p && p.sku) || "").trim();
+      if (!sku) return;
+      if (!byKey[key]) byKey[key] = { key: key, a: a, items: [] };
+      // не дублювати той самий супутній код у межах якоря
+      if (byKey[key].items.some(function (it) { return it.sku === sku; })) return;
+      byKey[key].items.push({
+        sku: sku,
+        c: (p.c || "").toString(),
+        s: (p.s || "").toString().trim()
+      });
+    });
+    var arr = Object.keys(byKey).map(function (k) { return byKey[k]; });
+    // довші ключі першими — щоб специфічніший якір мав пріоритет
+    arr.sort(function (x, y) { return y.key.length - x.key.length; });
+    return arr;
+  }
+
+  // вбудована карта як запас (стара структура UPSELL_MAP_DATA)
+  function bundledPairs() {
+    return (UPSELL_MAP_DATA || []).map(function (e) {
+      return { a: e.a, sku: e.sku, c: e.c, s: e.s };
+    });
+  }
+
+  var GROUPS = buildGroups(bundledPairs()); // миттєвий запас, поки вантажиться таблиця
+
+  // ---- завантаження карти з таблиці (через фоновий скрипт) ----
+  function requestSheet(force) {
+    try {
+      chrome.runtime.sendMessage(
+        { type: "sdGetUpsellMap", force: !!force },
+        function (resp) {
+          if (chrome.runtime.lastError) return;
+          if (resp && resp.pairs && resp.pairs.length) {
+            GROUPS = buildGroups(resp.pairs);
+            console.log(
+              "[SalesDrive Допродаж] карта з таблиці:",
+              resp.pairs.length, "пар,",
+              GROUPS.length, "товарів-якорів (джерело:", resp.source + ")"
+            );
+          } else if (resp && resp.error) {
+            console.log(
+              "[SalesDrive Допродаж] таблиця недоступна (",
+              resp.error, ") — працюю з вбудованою картою:",
+              GROUPS.length, "якорів"
+            );
+          }
+        }
+      );
+    } catch (e) {}
+  }
+
+  function cleanLabel(a) {
+    var clone = a.cloneNode(true);
+    clone
+      .querySelectorAll(".autocomplete-product-highlight, .pull-right")
+      .forEach(function (n) { n.remove(); });
+    return clone.textContent;
+  }
+
+  function matchGroup(label) {
+    var t = norm(label);
+    if (t.length < 4) return null;
+    for (var i = 0; i < GROUPS.length; i++) {
+      if (t.indexOf(GROUPS[i].key) !== -1) return GROUPS[i];
+    }
+    return null;
+  }
+
+  var hideTimer = null;
+  var busy = false; // серіалізуємо додавання, щоб кліки не змішувались
+  var lastTypeahead = 0;          // коли востаннє працювали з пошуком
+  var existingShownSig = null;    // підпис набору, показаного для товарів у заявці
+  var existingDismissedKey = null;// заявка, для якої авто-підказку закрили
+  var lastOrderKey = "";          // поточна заявка (щоб ловити перехід)
+
+  function removeHint() {
+    var old = document.getElementById("sd-upsell-hint");
+    if (old) old.remove();
+    if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
+  }
+  function armHideTimer() {
+    if (hideTimer) clearTimeout(hideTimer);
+    hideTimer = setTimeout(removeHint, 45000);
+  }
+
+  function truncate(s, n) {
+    s = (s || "").trim();
+    return s.length > n ? s.slice(0, n - 1) + "…" : s;
+  }
+
+  function showHint(items, headerText, opts) {
+    opts = opts || {};
+    removeHint();
+    if (!opts.existing) existingShownSig = null;
+
+    var box = document.createElement("div");
+    box.id = "sd-upsell-hint";
+
+    var x = document.createElement("button");
+    x.className = "sd-x";
+    x.textContent = "\u00d7";
+    x.title = "Сховати";
+    x.addEventListener("click", function () { removeHint(); if (opts.onClose) opts.onClose(); });
+    box.appendChild(x);
+
+    var top = document.createElement("div");
+    top.className = "sd-top";
+    top.textContent = headerText;
+    box.appendChild(top);
+
+    var slots = {}; // код -> { badge, img }
+    items.forEach(function (it) {
+      var item = document.createElement("div");
+      item.className = "sd-item";
+
+      // 1) фото супутнього (сховане, поки не завантажиться).
+      // ВАЖЛИВО: без loading="lazy" — інакше браузер не вантажить приховану картинку
+      var cimg = document.createElement("img");
+      cimg.className = "sd-comp-img";
+      cimg.alt = "";
+      cimg.loading = "eager";
+      cimg.style.display = "none";
+      cimg.onerror = function () { cimg.style.display = "none"; };
+      item.appendChild(cimg);
+
+      // 2) середня колонка: назва + причина + наявність
+      var main = document.createElement("div");
+      main.className = "sd-main";
+
+      if (it.c) {
+        var nameEl = document.createElement("div");
+        nameEl.className = "sd-name";
+        nameEl.textContent = it.c;
+        main.appendChild(nameEl);
+      }
+
+      var script = document.createElement("div");
+      script.className = "sd-script";
+      // назву показуємо окремим рядком, тож типова причина — без повтору назви
+      script.textContent = it.s || "Зазвичай беруть разом — щоб не замовляти окремо й не платити ще раз за доставку.";
+      main.appendChild(script);
+
+      var stock = null;
+      if (it.sku) {
+        stock = document.createElement("span");
+        stock.className = "sd-stock sd-stock-wait";
+        stock.textContent = "перевіряю залишок…";
+        main.appendChild(stock);
+      }
+      item.appendChild(main);
+
+      // 3) права колонка: блок ціни + кнопка
+      var action = document.createElement("div");
+      action.className = "sd-action";
+
+      var priceEl = null, priceLab = null, priceVal = null;
+      if (it.sku) {
+        priceEl = document.createElement("div");
+        priceEl.className = "sd-price";
+        priceEl.style.display = "none"; // показуємо лише коли є ціна
+        priceLab = document.createElement("div");
+        priceLab.className = "sd-price-lab";
+        priceVal = document.createElement("div");
+        priceVal.className = "sd-price-val";
+        priceEl.appendChild(priceLab);
+        priceEl.appendChild(priceVal);
+        action.appendChild(priceEl);
+      }
+
+      var addBtn = document.createElement("button");
+      addBtn.className = "sd-add";
+      addBtn.type = "button";
+      addBtn.appendChild(document.createTextNode("➕ Додати"));
+      if (it.sku) {
+        var sku = document.createElement("span");
+        sku.className = "sd-sku";
+        sku.textContent = "код " + it.sku;
+        addBtn.appendChild(document.createTextNode("  "));
+        addBtn.appendChild(sku);
+      }
+      addBtn.addEventListener("click", function () {
+        addCompanion(it.sku, addBtn);
+      });
+      action.appendChild(addBtn);
+
+      item.appendChild(action);
+
+      if (it.sku) {
+        slots[it.sku] = { badge: stock, img: cimg, item: item,
+          price: priceEl, priceLab: priceLab, priceVal: priceVal };
+      }
+
+      box.appendChild(item);
+    });
+
+    var spot = findInsertPoint();
+    if (spot && spot.parent) {
+      spot.parent.insertBefore(box, spot.ref ? spot.ref.nextSibling : null);
+    } else {
+      box.style.position = "fixed";
+      box.style.bottom = "20px";
+      box.style.left = "50%";
+      box.style.transform = "translateX(-50%)";
+      box.style.maxWidth = "820px";
+      box.style.width = "90%";
+      document.body.appendChild(box);
+    }
+
+    if (opts.scrollIntoView) { try { box.scrollIntoView({ block: "nearest", behavior: "smooth" }); } catch (e) {} }
+    requestStock(slots);
+    if (!opts.existing) armHideTimer();
+  }
+
+  function fmtQty(n) {
+    if (n == null) return "";
+    return (Math.abs(n - Math.round(n)) < 1e-9) ? String(Math.round(n)) : String(n);
+  }
+
+  function applyStockBadge(b, r) {
+    if (!b) return;
+    b.classList.remove("sd-stock-wait");
+    if (!r || r.found === false) {
+      b.className = "sd-stock sd-stock-no";
+      b.textContent = "⚠ нема в каталозі (перевір код)";
+      dbg("товар не знайдено, код:", r && r.code, r);
+      return;
+    }
+    if (r.qty == null) {
+      b.className = "sd-stock sd-stock-unk";
+      b.textContent = "залишок невідомий";
+      dbg("поле залишку не знайдено для коду", r.code, "— товар:", r.dump);
+      return;
+    }
+    if (r.qty > 0) {
+      b.className = "sd-stock sd-stock-yes";
+      b.textContent = "✓ В наявності: " + fmtQty(r.qty) + " шт";
+    } else {
+      b.className = "sd-stock sd-stock-no";
+      b.textContent = "✗ Немає в наявності";
+    }
+  }
+
+  // застосувати результат до блоку супутнього: залишок + картинка
+  function applyResult(slot, r) {
+    if (!slot) return;
+    applyStockBadge(slot.badge, r);
+    if (slot.price) {
+      if (r && r.found !== false && r.price && r.price.value != null) {
+        slot.priceLab.textContent = (r.price.label === "Rozetka") ? "Ціна Rozetka" : "Ціна";
+        slot.priceVal.textContent = pwMoney(r.price.value) + " ₴";
+        slot.price.style.display = "";
+      } else {
+        slot.price.style.display = "none";
+      }
+    }
+    if (!slot.img || !r) return;
+    if (r.img) {
+      slot.img.onload = function () { slot.img.style.display = ""; };
+      slot.img.onerror = function () { slot.img.style.display = "none"; };
+      slot.img.src = r.img;
+    } else {
+      slot.img.style.display = "none";
+    }
+  }
+
+  // запит залишків + фото у page-context для всіх супутніх одразу
+  function requestStock(slots) {
+    var codes = Object.keys(slots || {});
+    if (!codes.length) return;
+    var token = String(Date.now()) + "_" + Math.random().toString(36).slice(2);
+
+    function onRes() {
+      var raw = document.documentElement.getAttribute("data-sd-stock-result");
+      if (!raw) return;
+      var data;
+      try { data = JSON.parse(raw); } catch (e) { return; }
+      if (!data || data.token !== token) return;
+      BUS.removeEventListener("sdUpsellStockResult", onRes);
+      (data.results || []).forEach(function (r) { applyResult(slots[r.code], r); });
+    }
+
+    BUS.addEventListener("sdUpsellStockResult", onRes);
+    document.documentElement.setAttribute("data-sd-stock-codes", JSON.stringify(codes));
+    document.documentElement.setAttribute("data-sd-stock-token", token);
+    document.documentElement.removeAttribute("data-sd-stock-result");
+    BUS.dispatchEvent(new Event("sdUpsellStock"));
+
+    setTimeout(function () {
+      BUS.removeEventListener("sdUpsellStockResult", onRes);
+      codes.forEach(function (c) {
+        var b = slots[c] && slots[c].badge;
+        if (b && b.classList.contains("sd-stock-wait")) {
+          b.className = "sd-stock sd-stock-unk";
+          b.textContent = "залишок: —";
+        }
+      });
+    }, 4000);
+  }
+
+  function findInsertPoint() {
+    // точно: кнопка "+ Додати" має ng-click="viewModel.addOption()"
+    var ref = null;
+    var clicky = document.querySelectorAll('[ng-click]');
+    for (var i = 0; i < clicky.length; i++) {
+      var v = (clicky[i].getAttribute("ng-click") || "").replace(/\s+/g, "");
+      if (v === "viewModel.addOption()") { ref = clicky[i]; break; }
+    }
+    if (!ref) ref = document.getElementById("addCompleteProduct");
+    if (!ref) return null;
+
+    // КЛЮЧОВЕ: кнопка лежить у таблиці товарів. Якщо вставити банер у <tr>,
+    // таблиця сплющить його у вузький стовпчик. Тому ставимо банер ПІСЛЯ таблиці.
+    var tbl = ref.closest("table");
+    if (tbl && tbl.parentElement && tbl.parentElement !== document.body) {
+      return { parent: tbl.parentElement, ref: tbl };
+    }
+
+    // запас: найближчий блочний (НЕ табличний) контейнер достатньої ширини
+    var need = Math.min(700, Math.max(380, Math.round((window.innerWidth || 1000) * 0.55)));
+    var TABLEISH = { "table": 1, "table-row": 1, "table-row-group": 1, "table-cell": 1,
+      "table-header-group": 1, "table-footer-group": 1, "inline-table": 1 };
+    var wide = ref.parentElement;
+    while (wide && wide !== document.body) {
+      var disp = "";
+      try { disp = getComputedStyle(wide).display; } catch (e) {}
+      if (!TABLEISH[disp] && wide.offsetWidth >= need) break;
+      wide = wide.parentElement;
+    }
+    if (!wide || wide === document.body) wide = ref.parentElement;
+
+    var child = ref;
+    while (child && child.parentElement !== wide) child = child.parentElement;
+
+    return { parent: wide, ref: child };
+  }
+
+  function handleLabel(label) {
+    if (!label) return;
+    lastTypeahead = Date.now();
+    var group = matchGroup(label);
+    if (group) {
+      var many = group.items.length > 1;
+      showHint(group.items, "💡 Допродаж до: " + truncate(group.a, 52) +
+        (many ? "  (" + group.items.length + " варіанти)" : ""));
+    }
+  }
+
+  function setNativeValue(el, value) {
+    var proto = window.HTMLInputElement.prototype;
+    var setter = Object.getOwnPropertyDescriptor(proto, "value").set;
+    setter.call(el, value);
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  function fillFallback(code) {
+    var inp = document.getElementById("addCompleteProduct");
+    if (!inp) {
+      var c = document.querySelectorAll(
+        'input[ng-model*="newName"], input[id^="addCompleteProduct"]'
+      );
+      inp = c[c.length - 1];
+    }
+    if (!inp) return;
+    inp.focus();
+    setNativeValue(inp, String(code));
+  }
+
+  function markAdded(btn) {
+    if (!btn) return;
+    btn.classList.add("sd-done");
+    btn.disabled = true;
+    btn.textContent = "✓ Додано";
+  }
+
+  // один клік: просимо page-context додати через рідний Angular-метод SalesDrive;
+  // якщо не вдалось — просто вписуємо код у поле.
+  function addCompanion(code, btn) {
+    if (!code) return;
+    if (busy) return;
+    busy = true;
+    var done = false;
+
+    function finish(ok) {
+      if (done) return;
+      done = true;
+      busy = false;
+      BUS.removeEventListener("sdUpsellAddResult", onResult);
+      if (ok) { markAdded(btn); armHideTimer(); }
+      else { fillFallback(code); }
+    }
+    function onResult() {
+      var ok = document.documentElement.getAttribute("data-sd-upsell-result") === "ok";
+      finish(ok);
+    }
+
+    BUS.addEventListener("sdUpsellAddResult", onResult);
+    document.documentElement.setAttribute("data-sd-upsell-code", String(code));
+    document.documentElement.removeAttribute("data-sd-upsell-result");
+    BUS.dispatchEvent(new Event("sdUpsellAdd"));
+
+    setTimeout(function () { if (!done) finish(false); }, 2500);
+  }
+
+  // 1) клік/тап по пункту випадного списку
+  document.addEventListener(
+    "mousedown",
+    function (e) {
+      var a = e.target.closest(
+        'a[ng-bind-html*="match.label"], ul[id^="typeahead-"] a, .dropdown-menu a, [role="option"]'
+      );
+      if (a) handleLabel(cleanLabel(a));
+    },
+    true
+  );
+
+  // 2) вибір клавіатурою (Enter на підсвіченому пункті)
+  document.addEventListener(
+    "keydown",
+    function (e) {
+      if (e.key !== "Enter") return;
+      var active = document.querySelector(
+        'ul[id^="typeahead-"] li.active a, .dropdown-menu li.active a, .dropdown-menu .active a, li.active a[ng-bind-html*="match.label"]'
+      );
+      if (active) {
+        handleLabel(cleanLabel(active));
+      } else {
+        var inp = document.getElementById("addCompleteProduct");
+        if (inp && inp.value) setTimeout(function () { handleLabel(inp.value); }, 50);
+      }
+    },
+    true
+  );
+
+  // ---- підказка за товарами, що ВЖЕ є у відкритій заявці ----
+  function orderKey() {
+    var m = (location.hash || "").match(/order\/\w+\/(\d+)/);
+    return m ? m[1] : (location.hash || "");
+  }
+
+  function onOrderItems() {
+    var key = orderKey();
+    if (key !== lastOrderKey) { // перейшли в іншу заявку — скидаємо стани
+      lastOrderKey = key;
+      existingDismissedKey = null;
+      existingShownSig = null;
+    }
+    // якщо менеджер щойно вибирав товар у пошуку — не перебиваємо його підказку
+    if (Date.now() - lastTypeahead < 3000) return;
+
+    var items = [];
+    try { items = JSON.parse(document.documentElement.getAttribute("data-sd-order-items")) || []; }
+    catch (e) { return; }
+    if (!items.length) return;
+
+    // що вже є в заявці (щоб не пропонувати наявне)
+    var presentCodes = {}, presentNames = [];
+    items.forEach(function (it) {
+      (it.codes || []).forEach(function (c) { presentCodes[String(c).toLowerCase()] = 1; });
+      if (it.name) presentNames.push(norm(it.name));
+    });
+    function alreadyInOrder(comp) {
+      if (presentCodes[String(comp.sku).toLowerCase()]) return true;
+      // За назвою вважаємо «наявним» ЛИШЕ при повному збігу назви супутнього з
+      // товаром заявки (а не за спільним початком). Інакше різні товари з однаковим
+      // початком назви («Амортизатори для пральної машини …», «Мішок для пилососа …»)
+      // помилково ховались як «уже в заявці», коли в заявці був інший товар тієї ж родини.
+      var cn = norm(comp.c);
+      if (cn.length > 10) {
+        for (var i = 0; i < presentNames.length; i++) {
+          if (presentNames[i].indexOf(cn) !== -1) return true;
+        }
+      }
+      return false;
+    }
+
+    // знайти якорі серед товарів заявки і зібрати супутні
+    var seenAnchor = {}, seenComp = {}, companions = [];
+    items.forEach(function (it) {
+      var g = matchGroup(it.name || "");
+      if (!g || seenAnchor[g.key]) return;
+      seenAnchor[g.key] = 1;
+      g.items.forEach(function (ci) {
+        if (seenComp[ci.sku] || alreadyInOrder(ci)) return;
+        seenComp[ci.sku] = 1;
+        companions.push({ sku: ci.sku, c: ci.c, s: ci.s, anchor: g.a });
+      });
+    });
+
+    if (!companions.length) { // нема чого пропонувати — прибрати, якщо це наша авто-підказка
+      if (existingShownSig !== null) { removeHint(); existingShownSig = null; }
+      return;
+    }
+    if (existingDismissedKey === key) return; // закрито для цієї заявки
+
+    var sig = companions.map(function (c) { return c.sku; }).sort().join(",");
+    if (existingShownSig === sig && document.getElementById("sd-upsell-hint")) return; // вже показано
+
+    var anchors = {};
+    companions.forEach(function (c) { anchors[c.anchor] = 1; });
+    var names = Object.keys(anchors);
+    var header = names.length === 1
+      ? "💡 У заявці є «" + truncate(names[0], 46) + "» — допродаж:"
+      : "💡 Можливий допродаж до товарів заявки:";
+
+    showHint(companions, header, {
+      existing: true,
+      scrollIntoView: true,
+      onClose: function () { existingDismissedKey = key; existingShownSig = null; }
+    });
+    existingShownSig = sig;
+  }
+
+  BUS.addEventListener("sdOrderItems", onOrderItems);
+
+  // ---------- ПЕРЕДУПЕРЕДЖЕННЯ ПРО ЦІНУ ROZETKA ----------
+  function pwMoney(n) {
+    n = Math.round(Number(n) * 100) / 100;
+    var s = (n % 1 === 0) ? String(n) : n.toFixed(2);
+    return s.replace(".", ",");
+  }
+  function removePriceWarn() {
+    var old = document.getElementById("sd-price-warn");
+    if (old) old.remove();
+  }
+  function showPriceWarn(problems) {
+    removePriceWarn();
+    var box = document.createElement("div");
+    box.id = "sd-price-warn";
+
+    var x = document.createElement("button");
+    x.className = "sd-x";
+    x.textContent = "\u00d7";
+    x.title = "Сховати";
+    x.addEventListener("click", function () { removePriceWarn(); });
+    box.appendChild(x);
+
+    var top = document.createElement("div");
+    top.className = "sd-pw-top";
+    top.textContent = "⚠️ Замовлення Rozetka, але ціни не за прайсом ROZETKA:";
+    box.appendChild(top);
+
+    problems.forEach(function (p) {
+      var row = document.createElement("div");
+      row.className = "sd-pw-row" + (p.below ? " sd-pw-below" : "");
+      var nm = document.createElement("span");
+      nm.className = "sd-pw-name";
+      nm.textContent = p.name + (p.sku ? " (" + p.sku + ")" : "");
+      var info = document.createElement("span");
+      info.className = "sd-pw-info";
+      info.textContent = "стоїть " + pwMoney(p.charged) + " ₴ → прайс ROZETKA " + pwMoney(p.target) + " ₴";
+      row.appendChild(nm);
+      row.appendChild(info);
+      box.appendChild(row);
+    });
+
+    var spot = findInsertPoint();
+    if (spot && spot.parent) {
+      spot.parent.insertBefore(box, spot.ref || null); // ПЕРЕД таблицею — зверху
+    } else {
+      document.body.appendChild(box);
+    }
+  }
+  function removeRatingWarn() {
+    var old = document.getElementById("sd-rating-warn");
+    if (old) old.remove();
+  }
+  // Скрипт менеджеру при ризиковому клієнті (редагується тут)
+  var RISK_SCRIPT = [
+    { label: "Клієнту:", text: "Доброго дня! Замовлення можемо відправити, але по ньому потрібно внести передоплату." },
+    { label: "Якщо питає «Чому передоплата?»:", text: "Умови визначаються системою автоматично для окремих замовлень. Це правило діє, щоб зменшити кількість невикуплених відправок." },
+    { label: "Якщо вагається (дотиснути):", text: "Ми працюємо з післяплатою, але для деяких замовлень потрібна невелика передоплата як підтвердження. Це стандартна практика — щоб не затримувати інші замовлення і швидше відправити ваш товар." }
+  ];
+  function showRatingWarn(rating) {
+    removeRatingWarn();
+    var box = document.createElement("div");
+    box.id = "sd-rating-warn";
+
+    var x = document.createElement("button");
+    x.className = "sd-x";
+    x.textContent = "\u00d7";
+    x.title = "Сховати";
+    x.addEventListener("click", function () { removeRatingWarn(); });
+    box.appendChild(x);
+
+    var t = document.createElement("div");
+    t.className = "sd-rw-top";
+    var who = rating.name ? (" — " + rating.name) : "";
+    t.textContent = "⚠️ Ризиковий клієнт" + who + " · викуп " + (rating.value || "—") + " — потрібна передоплата";
+    box.appendChild(t);
+
+    var script = document.createElement("div");
+    script.className = "sd-rw-script";
+    RISK_SCRIPT.forEach(function (s) {
+      var block = document.createElement("div");
+      block.className = "sd-rw-block";
+
+      var head = document.createElement("div");
+      head.className = "sd-rw-label";
+      var lab = document.createElement("span");
+      lab.textContent = s.label;
+      head.appendChild(lab);
+
+      var copyBtn = document.createElement("button");
+      copyBtn.className = "sd-rw-copy";
+      copyBtn.type = "button";
+      copyBtn.textContent = "копіювати";
+      copyBtn.title = "Скопіювати текст";
+      copyBtn.addEventListener("click", function () {
+        try {
+          navigator.clipboard.writeText(s.text).then(function () {
+            copyBtn.textContent = "скопійовано ✓";
+            setTimeout(function () { copyBtn.textContent = "копіювати"; }, 1500);
+          }, function () {});
+        } catch (e) {}
+      });
+      head.appendChild(copyBtn);
+
+      var body = document.createElement("div");
+      body.className = "sd-rw-text";
+      body.textContent = s.text;
+
+      block.appendChild(head);
+      block.appendChild(body);
+      script.appendChild(block);
+    });
+    box.appendChild(script);
+
+    var spot = findInsertPoint();
+    if (spot && spot.parent) {
+      var anchor = document.getElementById("sd-price-warn") || spot.ref || null;
+      spot.parent.insertBefore(box, anchor); // над банером цін / над таблицею
+    } else {
+      document.body.appendChild(box);
+    }
+  }
+  // ---------- БАНЕР: ТТН ЗМІНЕНО на Rozetka/Refort-заявці ----------
+  function removeTtnWarn() {
+    var old = document.getElementById("sd-ttn-warn");
+    if (old) old.remove();
+  }
+  function showTtnWarn(oldTtn, curTtn, key) {
+    removeTtnWarn();
+    var box = document.createElement("div");
+    box.id = "sd-ttn-warn";
+    box.className = "sd-ttn-box";
+
+    var x = document.createElement("button");
+    x.className = "sd-x";
+    x.textContent = "\u00d7";
+    x.title = "Сховати";
+    x.addEventListener("click", function () { removeTtnWarn(); });
+    box.appendChild(x);
+
+    var t = document.createElement("div");
+    t.className = "sd-tw-top";
+    t.textContent = curTtn
+      ? "⚠️ На цій заявці міняли ТТН — перевір, що на Rozetka стоїть актуальний номер"
+      : "⚠️ ТТН видалили й не створили новий — зроби новий і онови на Rozetka";
+    box.appendChild(t);
+
+    var info = document.createElement("div");
+    info.className = "sd-tw-info";
+    info.textContent = curTtn
+      ? ("Старі: " + oldTtn + "   →   поточний: " + curTtn)
+      : ("Був: " + oldTtn + "   →   зараз ТТН немає");
+    box.appendChild(info);
+
+    var why = document.createElement("div");
+    why.className = "sd-tw-why";
+    why.textContent = "Інакше покупець відстежуватиме старий (недійсний) номер.";
+    box.appendChild(why);
+
+    var ack = document.createElement("button");
+    ack.className = "sd-tw-ack";
+    ack.type = "button";
+    ack.textContent = "✓ Оновив на Rozetka — більше не показувати";
+    ack.addEventListener("click", function () {
+      try { var o = {}; o[key] = curTtn; chrome.storage.local.set(o); } catch (e) {}
+      removeTtnWarn();
+    });
+    box.appendChild(ack);
+
+    var spot = findInsertPoint();
+    if (spot && spot.parent) {
+      // найвищий банер: над рейтингом/цінами/таблицею
+      var anchor = document.getElementById("sd-rating-warn")
+        || document.getElementById("sd-price-warn")
+        || spot.ref || null;
+      spot.parent.insertBefore(box, anchor);
+    } else {
+      document.body.appendChild(box);
+    }
+  }
+  // Банер «на заявці 2+ ТТН одночасно» — поточний стан, без історії, спрацьовує миттєво.
+  function removeTtnMulti() {
+    var old = document.getElementById("sd-ttn-multi");
+    if (old) old.remove();
+  }
+  function showTtnMulti(ens) {
+    removeTtnMulti();
+    var box = document.createElement("div");
+    box.id = "sd-ttn-multi";
+    box.className = "sd-ttn-box";
+
+    var x = document.createElement("button");
+    x.className = "sd-x";
+    x.textContent = "\u00d7";
+    x.title = "Сховати";
+    x.addEventListener("click", function () { removeTtnMulti(); });
+    box.appendChild(x);
+
+    var t = document.createElement("div");
+    t.className = "sd-tw-top";
+    t.textContent = "⚠️ На заявці " + ens.length + " ТТН одночасно — лиши одну й онови на Rozetka";
+    box.appendChild(t);
+
+    var info = document.createElement("div");
+    info.className = "sd-tw-info";
+    info.textContent = ens.join("   ·   ");
+    box.appendChild(info);
+
+    var why = document.createElement("div");
+    why.className = "sd-tw-why";
+    why.textContent = "Дві накладні на одне замовлення — зайва ТТН і плутанина з відстеженням.";
+    box.appendChild(why);
+
+    var spot = findInsertPoint();
+    if (spot && spot.parent) {
+      var anchor = document.getElementById("sd-ttn-warn")
+        || document.getElementById("sd-rating-warn")
+        || document.getElementById("sd-price-warn")
+        || spot.ref || null;
+      spot.parent.insertBefore(box, anchor);
+    } else {
+      document.body.appendChild(box);
+    }
+  }
+  // Порівнюємо поточний ТТН із збереженим по цій заявці.
+  // 1) Якщо ЗАРАЗ 2+ ТТН одночасно -> миттєвий банер (без історії).
+  // 2) Якщо один ТТН і він став ІНШИМ, ніж був раніше -> банер заміни.
+  // Перша поява заявки = базова лінія. Кнопка «оновив» підтверджує новий ТТН.
+  function handleTtn(info) {
+    if (!info || !info.orderId) { removeTtnWarn(); removeTtnMulti(); return; }
+    var ens = info.ens || [];
+    var oldTtns = info.oldTtns || [];
+    // 1) 2+ ТТН одночасно — показуємо одразу
+    if (ens.length >= 2) { removeTtnWarn(); showTtnMulti(ens); return; }
+    removeTtnMulti();
+    // 2) історія каже, що ТТН міняли (є старі номери, відмінні від поточного)
+    if (!oldTtns.length) { removeTtnWarn(); return; }
+    var key = "sd_ttn_" + info.orderId;
+    var current = ens.length === 1 ? ens[0] : "";
+    try {
+      chrome.storage.local.get(key, function (data) {
+        var ack = data ? data[key] : undefined;
+        // якщо менеджер уже підтвердив саме цей поточний ТТН — не нагадуємо
+        if (ack === current && current !== "") { removeTtnWarn(); return; }
+        showTtnWarn(oldTtns.join(", "), current, key);
+      });
+    } catch (e) {}
+  }
+  function onPriceWarn() {
+    var res;
+    try { res = JSON.parse(document.documentElement.getAttribute("data-sd-price-warn")) || {}; }
+    catch (e) { return; }
+    // ціни (банер під рейтингом)
+    if (res.rozetka && res.problems && res.problems.length) showPriceWarn(res.problems);
+    else removePriceWarn();
+    // рейтинг (банер зверху)
+    if (res.rating && res.rating.low) showRatingWarn(res.rating);
+    else removeRatingWarn();
+    // ТТН (найвищий банер) — порівняння з пам'яттю по заявці
+    handleTtn(res.ttn);
+  }
+  BUS.addEventListener("sdPriceWarn", onPriceWarn);
+
+  // ---------- ХОВАЄМО ПІДКАЗКУ, КОЛИ ВІДКРИТЕ МОДАЛЬНЕ ВІКНО ----------
+  // (напр. характеристики товару — Bootstrap .modal + .modal-backdrop).
+  // Поки вікно відкрите — підказка схована; закрив — знову зʼявляється.
+  function elVisible(el) {
+    if (!el) return false;
+    var cs;
+    try { cs = getComputedStyle(el); } catch (e) { return false; }
+    if (cs.display === "none" || cs.visibility === "hidden") return false;
+    var r = el.getBoundingClientRect();
+    return r.width > 0 && r.height > 0;
+  }
+  function anyModalOpen() {
+    if (elVisible(document.querySelector(".modal-backdrop"))) return true;
+    var ms = document.querySelectorAll(".modal");
+    for (var i = 0; i < ms.length; i++) if (elVisible(ms[i])) return true;
+    return false;
+  }
+  // Випадаючий список пошуку товару (Select2-стиль у .form-group-autocomplete /
+  // .change-products). Коли він відкритий — перекриває підказку, тому ховаємо її
+  // так само, як на модалці. Ознака «список випав»: усередині поля зʼявився
+  // видимий елемент, вищий за саме поле (>60px) і з кількома текстовими рядками.
+  function autocompleteOpen() {
+    var wraps = document.querySelectorAll(".form-group-autocomplete, .change-products");
+    for (var i = 0; i < wraps.length; i++) {
+      var kids = wraps[i].querySelectorAll("ul, ol, div, table");
+      for (var j = 0; j < kids.length; j++) {
+        var el = kids[j];
+        if (!elVisible(el)) continue;
+        var r = el.getBoundingClientRect();
+        if (r.height > 60 && r.width > 100) {
+          var rows = el.querySelectorAll("li, a, tr, div");
+          var n = 0;
+          for (var k = 0; k < rows.length && n < 2; k++) {
+            if ((rows[k].textContent || "").trim().length > 2) n++;
+          }
+          if (n >= 2) return true;
+        }
+      }
+    }
+    return false;
+  }
+  var _modalState = null;
+  function syncModalClass() {
+    var open = anyModalOpen() || autocompleteOpen();
+    if (open === _modalState) return;
+    _modalState = open;
+    document.documentElement.classList.toggle("sd-modal-open", open);
+  }
+  try {
+    if (document.body) new MutationObserver(syncModalClass).observe(document.body, { childList: true });
+  } catch (e) {}
+  // миттєва реакція: коли друкуєш у пошуку або фокус заходить/виходить із поля
+  ["input", "focusin", "focusout", "click"].forEach(function (ev) {
+    document.addEventListener(ev, function () { setTimeout(syncModalClass, 0); }, true);
+  });
+  setInterval(syncModalClass, 300);
+  syncModalClass();
+
+  // тягнемо карту з таблиці при завантаженні сторінки
+  requestSheet(false);
+
+  console.log("[SalesDrive Допродаж] активний. Якорів у вбудованій карті:", GROUPS.length);
+})();
+
+
+  // ====== kb.js (база знань) ======
+
+// База знань для SalesDrive: плаваюча кнопка «📖 База знань» + панель із пошуком.
+// Контент береться з Google-таблиці через фоновий скрипт (повідомлення "sdGetKb").
+// Колонки таблиці: Категорія | Заголовок | Текст | Ключові слова
+(function () {
+  "use strict";
+
+  var BTN_ID = "sd-kb-btn";
+  var PANEL_ID = "sd-kb-panel";
+
+  var rows = [];        // [{cat, title, text, kw}]
+  var loaded = false;   // дані успішно прийшли
+  var loadError = "";   // текст помилки, якщо не вийшло
+
+  function norm(s) {
+    return (s || "")
+      .toLowerCase()
+      .replace(/[\u02bc\u2019\u2018\u0027\u00b4`]/g, "") // прибрати апострофи
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  // ---- запит таблиці через фоновий скрипт ----
+  function requestKb(force) {
+    try {
+      chrome.runtime.sendMessage({ type: "sdGetKb", force: !!force }, function (resp) {
+        if (chrome.runtime.lastError) { loadError = "ext"; renderList(); return; }
+        if (resp && resp.rows && resp.rows.length) {
+          rows = resp.rows;
+          loaded = true;
+          loadError = "";
+          console.log("[SalesDrive База знань] записів:", rows.length, "(джерело:", resp.source + ")");
+        } else {
+          loadError = (resp && resp.error) ? resp.error : "empty";
+          console.log("[SalesDrive База знань] таблиця недоступна:", loadError);
+        }
+        renderList();
+      });
+    } catch (e) { loadError = String(e); renderList(); }
+  }
+
+  // ---- копіювання у буфер ----
+  function fallbackCopy(text) {
+    try {
+      var ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.left = "-9999px";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+    } catch (e) {}
+  }
+  function copyText(text, btn) {
+    function ok() {
+      var old = btn.textContent;
+      btn.textContent = "✓ Скопійовано";
+      btn.classList.add("sd-kb-copied");
+      setTimeout(function () { btn.textContent = old; btn.classList.remove("sd-kb-copied"); }, 1400);
+    }
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(ok, function () { fallbackCopy(text); ok(); });
+        return;
+      }
+    } catch (e) {}
+    fallbackCopy(text); ok();
+  }
+
+  // ---- побудова панелі (один раз) ----
+  function buildPanel() {
+    if (document.getElementById(BTN_ID)) return;
+
+    var btn = document.createElement("button");
+    btn.id = BTN_ID;
+    btn.type = "button";
+    btn.textContent = "📖 База знань";
+    btn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      togglePanel();
+    });
+    document.body.appendChild(btn);
+
+    var panel = document.createElement("div");
+    panel.id = PANEL_ID;
+    panel.style.display = "none";
+    panel.addEventListener("click", function (e) { e.stopPropagation(); });
+
+    var head = document.createElement("div");
+    head.className = "sd-kb-head";
+    var title = document.createElement("div");
+    title.className = "sd-kb-title";
+    title.textContent = "База знань";
+    head.appendChild(title);
+    var x = document.createElement("button");
+    x.className = "sd-kb-x";
+    x.type = "button";
+    x.textContent = "×";
+    x.addEventListener("click", function () { closePanel(); });
+    head.appendChild(x);
+    panel.appendChild(head);
+
+    var search = document.createElement("input");
+    search.id = "sd-kb-search";
+    search.type = "text";
+    search.placeholder = "Пошук… (напр. приват, коли повернення)";
+    search.addEventListener("input", function () { renderList(); });
+    panel.appendChild(search);
+
+    var list = document.createElement("div");
+    list.id = "sd-kb-list";
+    panel.appendChild(list);
+
+    document.body.appendChild(panel);
+
+    // клік поза панеллю — закрити
+    document.addEventListener("click", function (e) {
+      var p = document.getElementById(PANEL_ID);
+      if (!p || p.style.display === "none") return;
+      if (p.contains(e.target)) return;
+      var b = document.getElementById(BTN_ID);
+      if (b && b.contains(e.target)) return;
+      closePanel();
+    });
+    // Esc — закрити
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape") closePanel();
+    });
+  }
+
+  function togglePanel() {
+    var p = document.getElementById(PANEL_ID);
+    if (!p) return;
+    if (p.style.display === "none") openPanel();
+    else closePanel();
+  }
+  function openPanel() {
+    var p = document.getElementById(PANEL_ID);
+    if (!p) return;
+    p.style.display = "flex";
+    if (!loaded) requestKb(false);
+    renderList();
+    var s = document.getElementById("sd-kb-search");
+    if (s) setTimeout(function () { s.focus(); }, 30);
+  }
+  function closePanel() {
+    var p = document.getElementById(PANEL_ID);
+    if (p) p.style.display = "none";
+  }
+
+  // ---- рендер списку (з урахуванням пошуку) ----
+  function renderList() {
+    var list = document.getElementById("sd-kb-list");
+    if (!list) return;
+    list.textContent = "";
+
+    if (!loaded && !loadError) {
+      var w = document.createElement("div");
+      w.className = "sd-kb-msg";
+      w.textContent = "Завантаження…";
+      list.appendChild(w);
+      return;
+    }
+    if (loadError) {
+      var er = document.createElement("div");
+      er.className = "sd-kb-msg sd-kb-err";
+      er.textContent = "Не вдалося завантажити базу. Перевір, що таблиця відкрита «за посиланням». ";
+      var rt = document.createElement("button");
+      rt.type = "button";
+      rt.className = "sd-kb-retry";
+      rt.textContent = "Спробувати ще";
+      rt.addEventListener("click", function () { loadError = ""; renderList(); requestKb(true); });
+      er.appendChild(rt);
+      list.appendChild(er);
+      return;
+    }
+
+    var searchEl = document.getElementById("sd-kb-search");
+    var q = norm(searchEl ? searchEl.value : "");
+
+    var filtered = rows.filter(function (r) {
+      if (!q) return true;
+      return norm(r.title + " " + r.text + " " + r.kw + " " + r.cat).indexOf(q) !== -1;
+    });
+
+    if (!filtered.length) {
+      var nf = document.createElement("div");
+      nf.className = "sd-kb-msg";
+      nf.textContent = "Нічого не знайдено.";
+      list.appendChild(nf);
+      return;
+    }
+
+    // групуємо за категорією, зберігаючи порядок появи
+    var order = [];
+    var byCat = {};
+    filtered.forEach(function (r) {
+      var c = r.cat || "Інше";
+      if (!byCat[c]) { byCat[c] = []; order.push(c); }
+      byCat[c].push(r);
+    });
+
+    order.forEach(function (cat) {
+      var ch = document.createElement("div");
+      ch.className = "sd-kb-cat";
+      ch.textContent = cat;
+      list.appendChild(ch);
+
+      byCat[cat].forEach(function (r) {
+        var card = document.createElement("div");
+        card.className = "sd-kb-card";
+
+        var head = document.createElement("div");
+        head.className = "sd-kb-card-head";
+        var t = document.createElement("div");
+        t.className = "sd-kb-card-title";
+        t.textContent = r.title;
+        head.appendChild(t);
+        var caret = document.createElement("span");
+        caret.className = "sd-kb-caret";
+        head.appendChild(caret);
+        card.appendChild(head);
+
+        var body = document.createElement("div");
+        body.className = "sd-kb-card-body";
+        var expanded = !!q; // під час пошуку картки одразу розгорнуті
+        body.style.display = expanded ? "block" : "none";
+        caret.textContent = expanded ? "▾" : "▸";
+
+        var txt = document.createElement("div");
+        txt.className = "sd-kb-card-text";
+        txt.textContent = r.text;
+        body.appendChild(txt);
+
+        var copy = document.createElement("button");
+        copy.type = "button";
+        copy.className = "sd-kb-copy";
+        copy.textContent = "Копіювати";
+        copy.addEventListener("click", function (e) {
+          e.stopPropagation();
+          copyText(r.text, copy);
+        });
+        body.appendChild(copy);
+
+        card.appendChild(body);
+
+        head.addEventListener("click", function () {
+          var open = body.style.display !== "none";
+          body.style.display = open ? "none" : "block";
+          caret.textContent = open ? "▸" : "▾";
+        });
+
+        list.appendChild(card);
+      });
+    });
+  }
+
+  // ---- старт ----
+  function start() {
+    buildPanel();
+    requestKb(false); // підвантажуємо одразу, щоб пошук був готовий ще до відкриття
+  }
+  if (document.body) start();
+  else document.addEventListener("DOMContentLoaded", start);
+})();
+
+
+  // ====== page-міст (визначення; вкраплюється у сторінку нижче) ======
+
+// Runs in the PAGE context (has access to window.angular and SalesDrive's scope).
+// Listens for "sdUpsellAdd", reads the code from a DOM attribute, and adds the
+// product by calling SalesDrive's own typeahead-select handler.
+function __sdPageMain() {
+  "use strict";
+
+  var DEBUG = false; // увімкни true, щоб бачити детальні логи в консолі
+
+  function log() {
+    var a = ["[SD Допродаж]"].concat([].slice.call(arguments));
+    console.log.apply(console, a);
+  }
+  function dbg() { if (DEBUG) log.apply(null, [].slice.call(arguments)); }
+
+  function findInput() {
+    return (
+      document.getElementById("addCompleteProduct") ||
+      document.querySelector('input[ng-model*="newName"]')
+    );
+  }
+
+  function getVM(el) {
+    if (!window.angular) return null;
+    try {
+      var s = window.angular.element(el).scope();
+      while (s && !s.viewModel) s = s.$parent;
+      if (s && s.viewModel) return { scope: s, vm: s.viewModel };
+    } catch (e) {}
+    return null;
+  }
+
+  // кешований доступ до viewModel — щоб не шукати його щоразу заново
+  var _vmCache = null;
+  function getVMcached() {
+    if (_vmCache && _vmCache.scope && !_vmCache.scope.$$destroyed && _vmCache.scope.viewModel) {
+      return _vmCache;
+    }
+    var host = findBtnByClick("viewModel.addOption(true)") ||
+      findBtnByClick("viewModel.addOption()") || findInput();
+    var got = host && getVM(host);
+    _vmCache = got || null;
+    return _vmCache;
+  }
+
+  function asString(v) {
+    return v == null ? "" : String(v).toLowerCase();
+  }
+
+  function stripZeros(s) { return String(s == null ? "" : s).replace(/^0+/, ""); }
+
+  // choose the autocomplete item that matches the code we want to add
+  function pickItem(items, code) {
+    if (!items || !items.length) return null;
+    code = asString(code).trim();
+
+    var skuFields = ["sku", "SKU", "article", "code", "vendorCode", "id"];
+    var exact = items.filter(function (it) {
+      return skuFields.some(function (f) {
+        return it && it[f] != null && asString(it[f]) === code;
+      });
+    });
+    if (exact.length === 1) return exact[0];
+    if (exact.length > 1) return exact[0];
+
+    // співпадіння без урахування провідних нулів (Google Sheets іноді зрізає "0")
+    var zc = stripZeros(code);
+    if (zc) {
+      var zexact = items.filter(function (it) {
+        return skuFields.some(function (f) {
+          return it && it[f] != null && stripZeros(asString(it[f])) === zc;
+        });
+      });
+      if (zexact.length === 1) return zexact[0];
+      if (zexact.length > 1) return zexact[0];
+    }
+
+    var contains = items.filter(function (it) {
+      if (!it) return false;
+      var hay = [it.sku, it.code, it.article, it.name, it.label, it.title, it.text]
+        .map(asString)
+        .join(" | ");
+      return hay.indexOf(code) !== -1;
+    });
+    if (contains.length === 1) return contains[0];
+    if (items.length === 1) return items[0];
+    return null;
+  }
+
+  // знайти товар за кодом, стійко до загублених провідних нулів:
+  // пробуємо код як є, потім з відновленими "0" попереду
+  function getItemByCode(vm, code) {
+    var tries = [String(code)];
+    var zc = stripZeros(code);
+    if (zc === String(code)) { tries.push("0" + code); tries.push("00" + code); } // не було нулів — спробувати додати
+    function attempt(i) {
+      if (i >= tries.length) return Promise.resolve({ item: null, code: String(code) });
+      var c = tries[i];
+      return Promise.resolve(vm.getAutocomplete(c)).then(function (items) {
+        var it = pickItem(items, c);
+        if (it) return { item: it, code: c };
+        return attempt(i + 1);
+      }, function () { return attempt(i + 1); });
+    }
+    return attempt(0);
+  }
+
+  function safeApply(scope, fn) {
+    var root = scope.$root || scope;
+    if (root.$$phase || scope.$$phase) {
+      fn();
+    } else {
+      scope.$apply(fn);
+    }
+  }
+
+  function setResult(ok, reason) {
+    document.documentElement.setAttribute(
+      "data-sd-upsell-result",
+      ok ? "ok" : "fail"
+    );
+    window.dispatchEvent(new Event("sdUpsellAddResult"));
+    log(ok ? "додано ✓" : "не вдалось ✗", reason || "");
+  }
+
+  // find a button by its exact ng-click expression (whitespace-insensitive)
+  function findBtnByClick(exact) {
+    var bs = document.querySelectorAll("button[ng-click], a[ng-click]");
+    for (var i = 0; i < bs.length; i++) {
+      var v = (bs[i].getAttribute("ng-click") || "").replace(/\s+/g, "");
+      if (v === exact) return bs[i];
+    }
+    return null;
+  }
+
+  window.addEventListener("sdUpsellAdd", function () {
+    var code = document.documentElement.getAttribute("data-sd-upsell-code");
+    if (!code) return setResult(false, "no-code");
+
+    var got = getVMcached();
+    if (!got || !got.vm) return setResult(false, "no-viewModel");
+
+    var vm = got.vm,
+      scope = got.scope;
+    dbg("preSale=", vm.preSale, "| hasAddOption=", typeof vm.addOption);
+
+    if (
+      typeof vm.getAutocomplete !== "function" ||
+      typeof vm.addItemChangeAutoComplete !== "function"
+    ) {
+      return setResult(false, "no-method");
+    }
+
+    try {
+      getItemByCode(vm, code).then(
+        function (res) {
+          var item = res.item;
+          if (!item) return setResult(false, "no-item-match");
+          var label =
+            typeof vm.showAutocompleteItem === "function"
+              ? vm.showAutocompleteItem(item)
+              : "";
+
+          function pidOf(o) {
+            if (!o) return "";
+            return String(o.productId != null ? o.productId
+              : (o.id != null ? o.id : (o.value != null ? o.value : "")));
+          }
+          var ourPid = pidOf(item);
+
+          // Rozetka-заявка: ціна супутнього має бути ROZETKA (зі знижкою), а не базова.
+          // Підміняємо ДО додавання, щоб рядок одразу створився з правильною ціною.
+          var rozPrice = null;
+          try {
+            if (isRozetkaOrder(vm)) {
+              rozPrice = rozetkaPriceOf(priceSource(item));
+              if (rozPrice != null) {
+                item.defaultPrice = rozPrice;
+                if (item.price != null) item.price = rozPrice.toFixed(2).replace(".", ",");
+              }
+            }
+          } catch (e) {}
+          // підстрахування: проставити ROZETKA-ціну й перерахувати суму на доданому рядку
+          function fixRozPrice(newItem) {
+            if (rozPrice == null || !newItem) return;
+            try {
+              var s = rozPrice.toFixed(2).replace(".", ",");
+              newItem.defaultPrice = rozPrice;
+              newItem.price = s;
+              newItem.newDefaultPrice = s;
+              if (typeof vm.itemChange === "function") vm.itemChange(newItem, newItem.index);
+              else if (typeof vm.updateItems === "function") vm.updateItems();
+            } catch (e) {
+              try { if (typeof vm.updateItems === "function") vm.updateItems(); } catch (e2) {}
+            }
+          }
+
+          // "розігріваємо" рядок додавання (у відкритій заявці він холодний)
+          try { var inp = findInput(); if (inp) inp.focus(); } catch (e) {}
+
+          // одна спроба додати супутній; true — якщо зʼявився новий рядок
+          function attemptAdd() {
+            var added = false;
+            try {
+              safeApply(scope, function () {
+                // якщо в рядку додавання лежить САМЕ наш товар (залишок з минулої спроби) —
+                // просто фіксуємо його як допродаж, БЕЗ повторного додавання (захист від задвоєння)
+                if (vm.addAttribute && ourPid && pidOf(vm.addAttribute) === ourPid) {
+                  var b0 = (vm.items || []).length;
+                  vm.addOption(true);
+                  var a0 = (vm.items || []).length;
+                  if (a0 > b0) { vm.items[a0 - 1].preSale = 1; fixRozPrice(vm.items[a0 - 1]); added = true; return; }
+                  try { vm.addAttribute = {}; } catch (e) {} // не зафіксувати "хвіст" нижче
+                }
+                // якщо лежить ІНШИЙ товар (якір із пошуку) — зафіксувати його нормально
+                if (vm.addAttribute && vm.addAttribute.productId) vm.addOption();
+
+                var before = (vm.items || []).length;
+                vm.addItemChangeAutoComplete(item, item, label);
+                if (!vm.addAttribute || !vm.addAttribute.productId) vm.addAttribute = item;
+                vm.addOption(true);
+                var after = (vm.items || []).length;
+                if (after > before) { vm.items[after - 1].preSale = 1; fixRozPrice(vm.items[after - 1]); added = true; }
+              });
+            } catch (e) {}
+            return added;
+          }
+
+          // перша спроба одразу; якщо холодний рядок не додав — ще кілька спроб із паузою,
+          // щоб користувачу вистачало ОДНОГО кліку (розігрів робимо самі)
+          if (attemptAdd()) return setResult(true, "ok-1");
+          var tries = [90, 200, 350];
+          (function next(i) {
+            if (i >= tries.length) {
+              try {
+                var methods = [];
+                for (var k in vm) { try { if (typeof vm[k] === "function" && /add|item|option|product|preSale/i.test(k)) methods.push(k); } catch (e) {} }
+                log("ДОПРОДАЖ не додав після кількох спроб. Скинь це Клоду:",
+                  "| addAttribute:", safeDump(vm.addAttribute),
+                  "| товарів:", (vm.items || []).length,
+                  "| методи:", methods.join(", "));
+              } catch (e) {}
+              return setResult(false, "not-added");
+            }
+            setTimeout(function () {
+              if (attemptAdd()) return setResult(true, "ok-" + (i + 2));
+              next(i + 1);
+            }, tries[i]);
+          })(0);
+        },
+        function (err) {
+          setResult(false, "autocomplete-rejected: " + err);
+        }
+      );
+    } catch (e) {
+      setResult(false, "getAutocomplete-threw: " + e);
+    }
+  });
+
+  // ---------- ЗАЛИШКИ супутніх товарів ----------
+  function toNum(v) {
+    if (typeof v === "number") return v;
+    if (typeof v === "string") {
+      var n = parseFloat(v.replace(/\s/g, "").replace(",", "."));
+      return isNaN(n) ? null : n;
+    }
+    return null;
+  }
+
+  // чи схожа назва поля на "залишок"
+  function looksLikeStockKey(k) {
+    return /(balance|stock|rest|remain|ostat|quant|qty|amount|count|nalich|availab|sklad|залиш|склад|наявн|остат|кільк)/i.test(k || "");
+  }
+  function keyScore(k) {
+    k = (k || "").toLowerCase();
+    if (/balance/.test(k)) return 6;
+    if (/(rest|remain|ostat|остат|залиш)/.test(k)) return 5;
+    if (/(quant|кільк|count|amount)/.test(k)) return 4;
+    if (/(qty|nalich|наявн|availab)/.test(k)) return 3;
+    if (/(stock|sklad|склад)/.test(k)) return 2;
+    return 1;
+  }
+  function sumNumeric(v) {
+    var n = toNum(v);
+    if (n != null) return n;
+    if (Array.isArray(v)) {
+      var s = 0, f = false;
+      for (var i = 0; i < v.length; i++) {
+        var x = v[i];
+        var xn = (x && typeof x === "object")
+          ? toNum(x.balance != null ? x.balance : (x.quantity != null ? x.quantity : (x.rest != null ? x.rest : (x.count != null ? x.count : x.value))))
+          : toNum(x);
+        if (xn != null) { s += xn; f = true; }
+      }
+      return f ? s : null;
+    }
+    if (v && typeof v === "object") {
+      var s2 = 0, f2 = false;
+      for (var k in v) { var kn = toNum(v[k]); if (kn != null) { s2 += kn; f2 = true; } }
+      return f2 ? s2 : null;
+    }
+    return null;
+  }
+
+  // рекурсивно шукаємо в обʼєкті товару поле, схоже на "залишок", із числом
+  function findStock(it) {
+    if (!it || typeof it !== "object") return { qty: null };
+    var best = null, seen = [];
+    function walk(o, path, depth) {
+      if (o == null || typeof o !== "object" || depth > 4) return;
+      if (seen.indexOf(o) !== -1) return; seen.push(o);
+      for (var k in o) {
+        var v; try { v = o[k]; } catch (e) { continue; }
+        if (typeof v === "function") continue;
+        var p = path ? path + "." + k : k;
+        if (looksLikeStockKey(k)) {
+          var n = sumNumeric(v);
+          if (n != null) {
+            var composite = (v && typeof v === "object"); // масив/обʼєкт складів — це вже сума
+            var sc = keyScore(k) - depth * 0.1 + (composite ? 0.5 : 0);
+            if (!best || sc > best.score) best = { qty: n, field: p, score: sc };
+            if (composite) continue; // не спускатися всередину складів — сума вже врахована
+          }
+        }
+        if (v && typeof v === "object") walk(v, p, depth + 1);
+      }
+    }
+    walk(it, "", 0);
+    return best || { qty: null };
+  }
+
+  // безпечний дамп товару (для діагностики, з обмеженням глибини/розміру)
+  function safeDump(o, maxDepth) {
+    maxDepth = maxDepth == null ? 3 : maxDepth;
+    var seen = [];
+    function rec(v, d) {
+      if (v == null) return v;
+      var t = typeof v;
+      if (t === "number" || t === "boolean") return v;
+      if (t === "string") return v.length > 40 ? v.slice(0, 40) + "…" : v;
+      if (t === "function") return undefined;
+      if (t === "object") {
+        if (seen.indexOf(v) !== -1) return "[cyc]";
+        if (d >= maxDepth) return Array.isArray(v) ? "[array:" + v.length + "]" : "[object]";
+        seen.push(v);
+        if (Array.isArray(v)) return v.slice(0, 5).map(function (x) { return rec(x, d + 1); });
+        var out = {}, c = 0;
+        for (var k in v) {
+          if (c >= 30) break;
+          var val; try { val = v[k]; } catch (e) { continue; }
+          if (typeof val === "function") continue;
+          out[k] = rec(val, d + 1); c++;
+        }
+        return out;
+      }
+      return undefined;
+    }
+    try { return rec(o, 0); } catch (e) { return { dumpError: String(e) }; }
+  }
+
+  // короткий кеш залишку/фото за кодом (щоб не смикати SalesDrive при перемальовуванні)
+  var stockCache = {};
+  var STOCK_TTL = 30000;
+
+  window.addEventListener("sdUpsellStock", function () {
+    var token = document.documentElement.getAttribute("data-sd-stock-token");
+    var codes = [];
+    try { codes = JSON.parse(document.documentElement.getAttribute("data-sd-stock-codes")) || []; } catch (e) {}
+
+    function respond(results) {
+      document.documentElement.setAttribute(
+        "data-sd-stock-result",
+        JSON.stringify({ token: token, results: results })
+      );
+      window.dispatchEvent(new Event("sdUpsellStockResult"));
+    }
+
+    var got = getVMcached();
+    if (!got || !got.vm || typeof got.vm.getAutocomplete !== "function") {
+      return respond(codes.map(function (c) { return { code: c, found: false, qty: null }; }));
+    }
+    var vm = got.vm, now = Date.now();
+    var roz = isRozetkaOrder(vm);
+
+    Promise.all(codes.map(function (code) {
+      var ck = code + (roz ? "#r" : "#n");      // ціна залежить від джерела заявки
+      var cached = stockCache[ck];
+      if (cached && now - cached.t < STOCK_TTL) return Promise.resolve(cached.r);
+      return getItemByCode(vm, code).then(function (res) {
+        var r, it = res.item;
+        if (!it) {
+          r = { code: code, found: false, qty: null, img: getCachedImg(code) || null };
+        } else {
+          var st = findStock(it);
+          var img = findImageUrl(it) || getCachedImg(code) || buildFromTemplate(it) || null;
+          r = { code: code, found: true, qty: st.qty, field: st.field || null, img: img,
+                price: companionPrice(roz, it) };
+        }
+        stockCache[ck] = { t: Date.now(), r: r };
+        return r;
+      }).catch(function (e) {
+        return { code: code, found: false, qty: null, err: String(e) };
+      });
+    })).then(respond).catch(function () {
+      respond(codes.map(function (c) { return { code: c, found: false, qty: null }; }));
+    });
+  });
+
+  // ---------- МАЛЕНЬКІ КАРТИНКИ ТОВАРІВ У ВИПАДНОМУ СПИСКУ ----------
+  function imgToUrl(s) {
+    if (typeof s !== "string") return null;
+    s = s.trim();
+    if (!s) return null;
+    if (/^data:image\//i.test(s)) return s;
+    if (/^https?:\/\//i.test(s)) return s;
+    if (/^\/\//.test(s)) return location.protocol + s;
+    if (/^\//.test(s)) return location.origin + s;
+    if (/\.(jpe?g|png|webp|gif|bmp)(\?|$)/i.test(s)) return location.origin + "/" + s.replace(/^\.?\//, "");
+    return null;
+  }
+  function isImgKey(k) {
+    return /(image|img|photo|picture|thumb|preview|foto|зобр|картин|фото)/i.test(k || "");
+  }
+  // шукаємо посилання на фото в обʼєкті товару (поле наперед невідоме)
+  function findImageUrl(model) {
+    if (!model || typeof model !== "object") return null;
+    var seen = [], found = null;
+    function pick(v) {
+      if (typeof v === "string") return imgToUrl(v);
+      if (Array.isArray(v)) {
+        for (var i = 0; i < v.length; i++) {
+          var x = v[i];
+          var s = (typeof x === "string") ? x : (x && (x.url || x.src || x.path || x.image || x.thumb || x.thumbnail || x.preview));
+          var u = imgToUrl(s);
+          if (u) return u;
+        }
+      } else if (v && typeof v === "object") {
+        return imgToUrl(v.url || v.src || v.path || v.thumb || v.thumbnail || v.preview || v.image);
+      }
+      return null;
+    }
+    function walk(o, depth) {
+      if (found || o == null || typeof o !== "object" || depth > 3) return;
+      if (seen.indexOf(o) !== -1) return; seen.push(o);
+      for (var k in o) {
+        if (found) return;
+        var v; try { v = o[k]; } catch (e) { continue; }
+        if (typeof v === "function") continue;
+        if (isImgKey(k)) { var u = pick(v); if (u) { found = u; return; } }
+        if (v && typeof v === "object") walk(v, depth + 1);
+      }
+    }
+    walk(model, 0);
+    return found;
+  }
+  function imgDebug(model) {
+    var out = {}, c = 0, seen = [];
+    function consider(prefix, o, depth) {
+      if (!o || typeof o !== "object" || depth > 2 || c >= 60) return;
+      if (seen.indexOf(o) !== -1) return; seen.push(o);
+      for (var k in o) {
+        if (c >= 60) break;
+        var v; try { v = o[k]; } catch (e) { continue; }
+        var key = prefix ? prefix + "." + k : k;
+        if (typeof v === "string") {
+          var looksUrl = /\.(jpe?g|png|webp|gif|bmp)(\?|$)/i.test(v) || /^(https?:|\/\/|\/)/.test(v);
+          var keyHint = /(image|img|photo|picture|thumb|preview|foto|фото|зобр|картин|url|src|path|file|pic)/i.test(k);
+          if (looksUrl || keyHint) { out[key] = v.length > 200 ? v.slice(0, 200) + "…" : v; c++; }
+        } else if (Array.isArray(v) && v.length) {
+          out[key] = "[array:" + v.length + "] " + (typeof v[0] === "string" ? v[0] : JSON.stringify(v[0]).slice(0, 120));
+          c++;
+          consider(key + "[0]", v[0], depth + 1);
+        } else if (v && typeof v === "object") {
+          consider(key, v, depth + 1);
+        }
+      }
+    }
+    consider("", model, 0);
+    return out;
+  }
+
+  // кеш фото за кодом товару (наповнюється з робочого списку пошуку,
+  // використовується і в попапі допродажу)
+  var imgCache = {};
+  var imgTemplate = null; // вивчений шаблон URL: {field, tpl з плейсхолдером}
+  var CODE_FIELDS = ["sku", "SKU", "id", "productId", "article", "code", "vendorCode"];
+
+  function cacheImg(model, url) {
+    if (!model || !url) return;
+    CODE_FIELDS.forEach(function (f) {
+      if (model[f] != null) imgCache[asString(model[f])] = url;
+    });
+    learnTemplate(model, url);
+  }
+  function getCachedImg(code) { return imgCache[asString(code)] || null; }
+
+  // вивчаємо, де в робочому URL стоїть код товару, щоб будувати URL для інших
+  function learnTemplate(model, url) {
+    if (imgTemplate) return;
+    for (var i = 0; i < CODE_FIELDS.length; i++) {
+      var f = CODE_FIELDS[i], val = model[f];
+      if (val == null) continue;
+      val = String(val);
+      if (val.length >= 2 && url.indexOf(val) !== -1) {
+        imgTemplate = { field: f, tpl: url.split(val).join("\u0000") };
+        dbg("вивчено шаблон фото за полем '" + f + "':", url);
+        return;
+      }
+    }
+  }
+  function buildFromTemplate(item) {
+    if (!imgTemplate || !item) return null;
+    var val = item[imgTemplate.field];
+    if (val == null) return null;
+    return imgTemplate.tpl.split("\u0000").join(String(val));
+  }
+
+  function modelFromScope(a) {
+    var scope; try { scope = window.angular.element(a).scope(); } catch (e) { return null; }
+    if (!scope) return null;
+    if (scope.match) return scope.match.model != null ? scope.match.model : scope.match;
+    return scope.product || scope.item || scope.row || null;
+  }
+
+  // синхронізуємо картинку рядка з ПОТОЧНИМ товаром (li перевикористовуються
+  // при наборі, тож не можна ставити фото один раз — треба оновлювати)
+  function syncOption(a) {
+    if (!a || !window.angular) return;
+    var li = a.closest("li") || a.parentNode;
+    if (!li) return;
+
+    var model = modelFromScope(a);
+    var url = model ? findImageUrl(model) : null;
+    if (url && model) cacheImg(model, url); // запамʼятовуємо для попапа
+    var img = li.querySelector(":scope > img.sd-opt-img");
+
+    if (url) {
+      if (!img) {
+        img = document.createElement("img");
+        img.className = "sd-opt-img";
+        img.loading = "lazy";
+        img.alt = "";
+        img.onerror = function () { img.style.visibility = "hidden"; };
+        li.classList.add("sd-has-img");
+        li.insertBefore(img, li.firstChild);
+      }
+      if (img.getAttribute("data-src") !== url) {
+        img.setAttribute("data-src", url); // оновлюємо src лише коли реально змінився
+        img.style.visibility = "";
+        img.src = url;
+      }
+    } else {
+      if (img) img.remove();
+      li.classList.remove("sd-has-img");
+      if (model && !window.__sdImgLogged) {
+        window.__sdImgLogged = true;
+        log("фото не знайдено в товарі. Рядкові поля:", imgDebug(model),
+          "| весь товар (скинь Клоду):", safeDump(model));
+      }
+    }
+  }
+
+  function decorateAll() {
+    if (!window.angular) return;
+    var opts = document.querySelectorAll(
+      'ul[id^="typeahead-"] a[ng-bind-html*="match.label"], ul[id^="typeahead-"] li > a, .dropdown-menu li a[ng-bind-html*="match.label"]'
+    );
+    for (var i = 0; i < opts.length; i++) syncOption(opts[i]);
+  }
+
+  // чи додано у DOM саме випадний список (дешево, без closest по всьому застосунку)
+  function mutationAddsDropdown(m) {
+    for (var i = 0; i < m.addedNodes.length; i++) {
+      var n = m.addedNodes[i];
+      if (n.nodeType !== 1) continue;
+      if ((n.id && /^typeahead-/.test(n.id)) || /dropdown-menu/.test(n.className || "")) return true;
+      if (n.querySelector && n.querySelector('ul[id^="typeahead-"], a[ng-bind-html*="match.label"]')) return true;
+    }
+    return false;
+  }
+
+  var imgTimer = null;
+  function scheduleDecorate() {
+    if (imgTimer) return;
+    imgTimer = setTimeout(function () { imgTimer = null; try { decorateAll(); } catch (e) {} }, 80);
+  }
+  try {
+    new MutationObserver(function (muts) {
+      for (var i = 0; i < muts.length; i++) {
+        if (mutationAddsDropdown(muts[i])) { scheduleDecorate(); return; }
+      }
+    }).observe(document.documentElement, { childList: true, subtree: true });
+  } catch (e) {}
+
+  // ---------- ТОВАРИ, ЩО ВЖЕ В ЗАЯВЦІ (для підказки при відкритті) ----------
+  function onOrderPage() { return /\/order\//.test(location.hash || ""); }
+
+  function collectOrder() {
+    var got = getVMcached();
+    if (!got || !got.vm) return null;
+    var items = got.vm.items;
+    if (!Array.isArray(items)) return null;
+    var out = [];
+    for (var i = 0; i < items.length; i++) {
+      var it = items[i];
+      if (!it) continue;
+      var codes = [];
+      // лише поля-коди ТОВАРУ (без id рядка, щоб не виключити зайве)
+      ["sku", "SKU", "article", "vendorCode", "productCode", "productId"].forEach(function (f) {
+        if (it[f] != null) codes.push(String(it[f]));
+      });
+      var name = it.name || it.productName || it.title || it.text || "";
+      if (name || codes.length) out.push({ name: String(name), codes: codes });
+    }
+    return out;
+  }
+
+  var lastOrderSig = "";
+  function pushOrder() {
+    if (!onOrderPage()) { lastOrderSig = ""; return; } // працюємо тільки на сторінці заявки
+    var snap = collectOrder();
+    if (!snap) return;
+    var sig = JSON.stringify(snap);
+    if (sig === lastOrderSig) return;
+    lastOrderSig = sig;
+    document.documentElement.setAttribute("data-sd-order-items", sig);
+    window.dispatchEvent(new Event("sdOrderItems"));
+  }
+  // ---------- ПЕРЕВІРКА ЦІН ROZETKA ----------
+  function normName(s) { return String(s == null ? "" : s).trim().toLowerCase(); }
+  function effPrice(pt) {
+    var base = Number(pt.defaultPrice);
+    if (!isFinite(base)) return null;
+    var pd = Number(pt.percentDiscount) || 0;   // відсоткова знижка типу ціни
+    var d = Number(pt.discount) || 0;           // абсолютна знижка типу ціни
+    var eff = base;
+    if (pd > 0) eff = base * (1 - pd / 100);
+    else if (d > 0) eff = base - d;
+    return Math.round(eff * 100) / 100;
+  }
+  function rozetkaPriceOf(prod) {
+    if (!prod || !Array.isArray(prod.priceTypes)) return null;
+    for (var i = 0; i < prod.priceTypes.length; i++) {
+      var n = normName(prod.priceTypes[i].name);
+      if (n === "rozetka" || n === "розетка") return effPrice(prod.priceTypes[i]);
+    }
+    return null;
+  }
+  // де лежать прайси товару: на самому об'єкті чи в .product
+  function priceSource(it) {
+    if (it && Array.isArray(it.priceTypes)) return it;
+    if (it && it.product && Array.isArray(it.product.priceTypes)) return it.product;
+    return it;
+  }
+  function regularPriceOf(src) {
+    if (!src) return null;
+    var dp = Number(src.defaultPrice != null ? src.defaultPrice : src.price);
+    return isFinite(dp) ? Math.round(dp * 100) / 100 : null;
+  }
+  function isRozetkaOrder(vm) {
+    var o = vm && vm.order; if (!o) return false;
+    return normName(o.integrationType) === "rozetka" || normName(o.utmCampaign) === "rozetka";
+  }
+  // ціна супутнього, що відповідає джерелу заявки:
+  // Rozetka -> ціна ROZETKA (зі знижкою); інакше -> звичайна
+  function companionPrice(roz, it) {
+    var src = priceSource(it);
+    if (roz) {
+      var rp = rozetkaPriceOf(src);
+      return rp != null ? { label: "Rozetka", value: rp } : null;
+    }
+    var reg = regularPriceOf(src);
+    return reg != null ? { label: "Ціна", value: reg } : null;
+  }
+  function checkPrices(vm) {
+    var order = vm && vm.order;
+    if (!order) return { rozetka: false, problems: [] };
+    var isRoz = normName(order.integrationType) === "rozetka" ||
+                normName(order.utmCampaign) === "rozetka";
+    if (!isRoz) return { rozetka: false, problems: [] };
+    var probs = [], items = vm.items || [];
+    for (var i = 0; i < items.length; i++) {
+      var x = items[i]; if (!x) continue;
+      var target = rozetkaPriceOf(x.product);
+      if (target == null) continue;            // нема ROZETKA-ціни на товарі — не перевіряємо
+      var charged = Number(x.price);
+      if (!isFinite(charged)) continue;
+      if (Math.abs(charged - target) >= 0.01) {
+        probs.push({
+          name: String(x.name || x.documentName || ""),
+          sku: String(x.sku || ""),
+          charged: charged, target: target, below: charged < target
+        });
+      }
+    }
+    return { rozetka: true, problems: probs };
+  }
+
+  // ризиковий клієнт: 0 < відсоток викупу <= порога.
+  // 0% = новий клієнт без історії викупу -> НЕ ризик (передоплата не потрібна).
+  var RISK_BUYOUT_MAX = 59;
+  function checkRating(vm) {
+    var order = vm && vm.order;
+    var c = order && order.contacts && order.contacts[0];
+    if (!c) return { low: false };
+    var cr = c.clientRating;
+    var pct = cr ? Number(cr.buyoutPercent) : NaN;
+    if (!isFinite(pct)) return { low: false };   // нема даних викупу — не чіпаємо
+    var name = [c.lName, c.fName].filter(Boolean).join(" ").trim();
+    return { low: pct > 0 && pct <= RISK_BUYOUT_MAX, value: pct + "%", name: name };
+  }
+
+  var lastWarnSig = "";
+  // ТТН (номер НП) для Rozetka/Refort-заявок — щоб ловити заміну ТТН.
+  // EN лежить у ord_novaposhta[0].EN; integrationType="rozetka" покриває і Rozetka, і Refort.
+  function ttnInfo(vm) {
+    var o = vm && vm.order;
+    if (!o) return null;
+    var isRoz = normName(o.integrationType) === "rozetka" || normName(o.utmCampaign) === "rozetka";
+    if (!isRoz) return null;
+    var id = (o.id != null) ? String(o.id) : "";
+    if (!id) return null;
+    var np = o.ord_novaposhta;
+    var arr = Array.isArray(np) ? np : (np ? [np] : []);
+    var ens = [];
+    for (var i = 0; i < arr.length; i++) {
+      var d = arr[i];
+      var en = (d && d.EN != null) ? String(d.EN).trim() : "";
+      if (en && ens.indexOf(en) === -1) ens.push(en);
+    }
+    // Історія дій з ТТН зі стрічки коментарів: "Створена/Видалена ТТН <номер>".
+    // Дає змогу побачити заміну ретроспективно, незалежно від того, хто й коли міняв.
+    var hist = [];
+    function addFrom(text) {
+      var re = /(?:Створена|Видалена)\s+ТТН\s*(\d{6,})/gi, m;
+      while ((m = re.exec(text)) !== null) { if (hist.indexOf(m[1]) === -1) hist.push(m[1]); }
+    }
+    var cm = vm.comments;
+    if (Array.isArray(cm) && cm.length) {
+      for (var k = 0; k < cm.length; k++) addFrom((cm[k] && cm[k].body != null) ? String(cm[k].body) : "");
+    } else {
+      try {
+        var nodes = document.querySelectorAll(".comment-body");
+        for (var n = 0; n < nodes.length; n++) addFrom(nodes[n].textContent || "");
+      } catch (e) {}
+    }
+    // старі ТТН = згадані в історії, але відсутні серед поточних -> ознака заміни
+    var oldTtns = [];
+    for (var j = 0; j < hist.length; j++) {
+      if (ens.indexOf(hist[j]) === -1 && oldTtns.indexOf(hist[j]) === -1) oldTtns.push(hist[j]);
+    }
+    return { orderId: id, ens: ens, oldTtns: oldTtns };
+  }
+  function pushWarn() {
+    if (!onOrderPage()) { lastWarnSig = ""; return; }
+    var got = getVMcached();
+    if (!got || !got.vm) return;
+    var price = checkPrices(got.vm);
+    var rating = checkRating(got.vm);
+    var res = { rozetka: price.rozetka, problems: price.problems, rating: rating, ttn: ttnInfo(got.vm) };
+    var sig = JSON.stringify(res);
+    if (sig === lastWarnSig) return;           // міняємо банер лише коли щось змінилось
+    lastWarnSig = sig;
+    document.documentElement.setAttribute("data-sd-price-warn", sig);
+    window.dispatchEvent(new Event("sdPriceWarn"));
+  }
+
+  setInterval(function () { pushOrder(); pushWarn(); }, 2000);
+  setTimeout(function () { pushOrder(); pushWarn(); }, 800);
+  window.addEventListener("hashchange", function () {
+    _vmCache = null;        // інша заявка — viewModel може бути інший
+    lastOrderSig = "";      // примусово переоцінити склад заявки
+    lastWarnSig = "";
+    setTimeout(function () { pushOrder(); pushWarn(); }, 500);
+    setTimeout(function () { pushOrder(); pushWarn(); }, 1200);
+  });
+
+  log("page-міст активний (angular:", !!window.angular, ")");
+}
+
+
+  // ---- вкраплюємо page-міст у контекст сторінки (доступ до Angular) ----
+  try {
+    var __sdScript = document.createElement("script");
+    __sdScript.textContent = "(" + __sdPageMain.toString() + ")();";
+    (document.head || document.documentElement).appendChild(__sdScript);
+    if (__sdScript.parentNode) __sdScript.parentNode.removeChild(__sdScript);
+  } catch (e) {
+    console.log("[SalesDrive] не вдалося вкрапити page-міст:", e);
+  }
+
+})();
