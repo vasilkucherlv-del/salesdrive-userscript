@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      0.60
+// @version      0.61
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -492,10 +492,12 @@ var UPSELL_MAP_DATA = [
     x.addEventListener("click", function () { removeHint(); if (opts.onClose) opts.onClose(); });
     box.appendChild(x);
 
-    var top = document.createElement("div");
-    top.className = "sd-top";
-    top.textContent = headerText;
-    box.appendChild(top);
+    if (headerText) {
+      var top = document.createElement("div");
+      top.className = "sd-top";
+      top.textContent = headerText;
+      box.appendChild(top);
+    }
 
     var slots = {}; // код -> { badge, img }
     items.forEach(function (it) {
@@ -827,13 +829,7 @@ var UPSELL_MAP_DATA = [
     return m ? m[1] : (location.hash || "");
   }
 
-  // Вимикач авто-підказки допродажу для товарів, що ВЖЕ в заявці
-  // (текст «💡 У заявці є «…» — допродаж:»). false = не показувати взагалі.
-  // Підказка під час ДОДАВАННЯ товару (інший випадок) на це не зважає.
-  var ORDER_HINT_ENABLED = false;
-
   function onOrderItems() {
-    if (!ORDER_HINT_ENABLED) return; // вимкнено за бажанням — нічого не показуємо
     var key = orderKey();
     if (key !== lastOrderKey) { // перейшли в іншу заявку — скидаємо стани
       lastOrderKey = key;
@@ -891,14 +887,8 @@ var UPSELL_MAP_DATA = [
     var sig = companions.map(function (c) { return c.sku; }).sort().join(",");
     if (existingShownSig === sig && document.getElementById("sd-upsell-hint")) return; // вже показано
 
-    var anchors = {};
-    companions.forEach(function (c) { anchors[c.anchor] = 1; });
-    var names = Object.keys(anchors);
-    var header = names.length === 1
-      ? "💡 У заявці є «" + truncate(names[0], 46) + "» — допродаж:"
-      : "💡 Можливий допродаж до товарів заявки:";
-
-    showHint(companions, header, {
+    // Заголовок прибрано за бажанням — показуємо лише товари-допродажі, без тексту «У заявці є…»
+    showHint(companions, "", {
       existing: true,
       scrollIntoView: true,
       onClose: function () { existingDismissedKey = key; existingShownSig = null; }
