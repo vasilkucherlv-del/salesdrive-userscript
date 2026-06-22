@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      0.59
+// @version      0.75
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -10,6 +10,8 @@
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @connect      docs.google.com
+// @connect      railway.app
+// @grant        GM_setClipboard
 // @updateURL    https://raw.githubusercontent.com/vasilkucherlv-del/salesdrive-userscript/main/salesdrive.user.js
 // @downloadURL  https://raw.githubusercontent.com/vasilkucherlv-del/salesdrive-userscript/main/salesdrive.user.js
 // ==/UserScript==
@@ -478,6 +480,7 @@ var UPSELL_MAP_DATA = [
   }
 
   function showHint(items, headerText, opts) {
+    if (/\/document\/arrival-product\//.test(location.hash || "")) { removeHint(); return; }
     opts = opts || {};
     removeHint();
     if (!opts.existing) existingShownSig = null;
@@ -1634,6 +1637,77 @@ function __sdPageMain() {
     return null;
   }
 
+  // строгий збіг товару за артикулом (точний або без провідних нулів) — без "контейнс"/"перший-ліпший"
+  function _strictPick(items, code) {
+    if (!items || !items.length) return null;
+    var c = String(code).toLowerCase().trim(), zc = stripZeros(c);
+    var fields = ["sku", "SKU", "article", "code", "vendorCode"];
+    for (var i = 0; i < items.length; i++) { var it = items[i]; if (!it) continue;
+      for (var j = 0; j < fields.length; j++) { var v = it[fields[j]]; if (v != null && String(v).toLowerCase().trim() === c) return it; } }
+    if (zc) for (var i2 = 0; i2 < items.length; i2++) { var it2 = items[i2]; if (!it2) continue;
+      for (var j2 = 0; j2 < fields.length; j2++) { var v2 = it2[fields[j2]]; if (v2 != null && stripZeros(String(v2).toLowerCase().trim()) === zc) return it2; } }
+    return null;
+  }
+
+  function _resolveOpenItem(acFn, code) {
+    var queries = [String(code)];
+    var z = stripZeros(code);
+    if (z && z !== String(code)) queries.push(z);
+    var counts = [];
+    function attempt(i) {
+      if (i >= queries.length) { log("sdOpenProduct: точного збігу нема для", code, "| queries:", queries.join(","), "| counts:", counts.join(",")); return Promise.resolve(null); }
+      return Promise.resolve(acFn(queries[i])).then(function (items) {
+        counts.push((items && items.length) || 0);
+        var it = _strictPick(items, code);
+        return it || attempt(i + 1);
+      }, function () { counts.push("err"); return attempt(i + 1); });
+    }
+    return attempt(0);
+  }
+
+  // резолв внутрішнього id товару напряму з продуктового API SalesDrive
+  // (autocomplete не повертає товари-комплекти, тому беремо id з /products/data)
+  function _findRowBySku(rows, code) {
+    if (!rows || !rows.length) return null;
+    var c = String(code).trim();
+    for (var i = 0; i < rows.length; i++) { if (rows[i] && String(rows[i].sku).trim() === c) return rows[i]; }
+    var zc = stripZeros(c);
+    if (zc) for (var k = 0; k < rows.length; k++) { if (rows[k] && stripZeros(String(rows[k].sku).trim()) === zc) return rows[k]; }
+    return null;
+  }
+  function _resolveIdViaApi(code) {
+    var url = "/products/data/?active=1&filter[sku]=" + encodeURIComponent(code) + "&formId=1";
+    // заголовок "when" обовʼязковий — інакше СРМ віддає 200, але порожній список
+    return fetch(url, { credentials: "include", headers: { "accept": "application/json, text/plain, */*", "when": "product/index" } })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (j) {
+        try {
+          // товари лежать у response.meta.option.option[]
+          var rows = j && j.response && j.response.meta && j.response.meta.option && j.response.meta.option.option;
+          var row = _findRowBySku(rows || [], code);
+          return row && row.id != null ? row.id : null;
+        } catch (e) { return null; }
+      })
+      .catch(function () { return null; });
+  }
+
+  window.addEventListener("sdOpenProduct", function () {
+    var code = document.documentElement.getAttribute("data-sd-open-sku");
+    if (!code) return;
+    var got = getVMcached();
+    if (!got || !got.vm) { log("sdOpenProduct: no viewModel"); return; }
+    var vm = got.vm, scope = got.scope;
+    var showItemFn = (vm && typeof vm.showItem === "function") ? vm.showItem.bind(vm)
+      : (scope && typeof scope.showItem === "function") ? scope.showItem.bind(scope) : null;
+    if (!showItemFn) { log("sdOpenProduct: showItem недоступний"); return; }
+    _resolveIdViaApi(code).then(function (pid) {
+      if (pid == null) { log("sdOpenProduct: id не знайдено для", code); return; }
+      var fakeEvt = { preventDefault: function () {}, stopPropagation: function () {} };
+      try { safeApply(scope, function () { showItemFn(pid, fakeEvt); }); }
+      catch (e) { log("sdOpenProduct showItem err", e); }
+    });
+  });
+
   window.addEventListener("sdUpsellAdd", function () {
     var code = document.documentElement.getAttribute("data-sd-upsell-code");
     if (!code) return setResult(false, "no-code");
@@ -2231,10 +2305,14 @@ function __sdPageMain() {
     }
     // Історія дій з ТТН зі стрічки коментарів: "Створена/Видалена ТТН <номер>".
     // Дає змогу побачити заміну ретроспективно, незалежно від того, хто й коли міняв.
-    var hist = [];
+    // розрізняємо створення і видалення ТТН (важливо для не-НП перевізників)
+    var created = [], deleted = [];
     function addFrom(text) {
-      var re = /(?:Створена|Видалена)\s+ТТН\s*(\d{6,})/gi, m;
-      while ((m = re.exec(text)) !== null) { if (hist.indexOf(m[1]) === -1) hist.push(m[1]); }
+      var re = /(Створена|Видалена)\s+ТТН\s*(\d{6,})/gi, m;
+      while ((m = re.exec(text)) !== null) {
+        var num = m[2], bucket = /Видален/i.test(m[1]) ? deleted : created;
+        if (bucket.indexOf(num) === -1) bucket.push(num);
+      }
     }
     var cm = vm.comments;
     if (Array.isArray(cm) && cm.length) {
@@ -2245,12 +2323,22 @@ function __sdPageMain() {
         for (var n = 0; n < nodes.length; n++) addFrom(nodes[n].textContent || "");
       } catch (e) {}
     }
-    // старі ТТН = згадані в історії, але відсутні серед поточних -> ознака заміни
-    var oldTtns = [];
-    for (var j = 0; j < hist.length; j++) {
-      if (ens.indexOf(hist[j]) === -1 && oldTtns.indexOf(hist[j]) === -1) oldTtns.push(hist[j]);
+    // активні з історії = створені й не видалені (покриває Укрпошту: номер не в НП-полі, але чинний)
+    var activeHist = [];
+    for (var a = 0; a < created.length; a++) {
+      if (deleted.indexOf(created[a]) === -1 && activeHist.indexOf(created[a]) === -1) activeHist.push(created[a]);
     }
-    return { orderId: id, ens: ens, oldTtns: oldTtns };
+    // поточні (effective) = НП-ТТН + активні з історії
+    var effective = ens.slice();
+    for (var e = 0; e < activeHist.length; e++) {
+      if (effective.indexOf(activeHist[e]) === -1) effective.push(activeHist[e]);
+    }
+    // старі = реально видалені, яких немає серед поточних -> ознака заміни/видалення
+    var oldTtns = [];
+    for (var d = 0; d < deleted.length; d++) {
+      if (effective.indexOf(deleted[d]) === -1 && oldTtns.indexOf(deleted[d]) === -1) oldTtns.push(deleted[d]);
+    }
+    return { orderId: id, ens: effective, oldTtns: oldTtns };
   }
   function pushWarn() {
     if (!onOrderPage()) { lastWarnSig = ""; return; }
@@ -2290,4 +2378,151 @@ function __sdPageMain() {
     console.log("[SalesDrive] не вдалося вкрапити page-міст:", e);
   }
 
+})();
+
+/* ===== Набори: позначка «входить у набори» в рядках заявки (джерело: баркод) ===== */
+(function lkNaboryInline() {
+  'use strict';
+
+  // ---------- НАЛАШТУВАННЯ ----------
+  const APP_URL = 'https://barcode-printer-production-2b32.up.railway.app';
+  const TOKEN   = 'nab_8Kx2pQ7mLr4tW9vZ';
+  const TTL_MS  = 6 * 60 * 60 * 1000;
+  // картка товару в SalesDrive за внутрішнім ID:
+  const CAT_URL = sku => 'https://komplektom.salesdrive.me/ua/index.html?formId=1#/product/index?filter%5Bsku%5D=' + encodeURIComponent(sku);
+  // ----------------------------------
+  const PAGE = (typeof unsafeWindow !== 'undefined' && unsafeWindow) || window;
+  function openProduct(sku) {
+    try { document.documentElement.setAttribute('data-sd-open-sku', String(sku)); PAGE.dispatchEvent(new Event('sdOpenProduct')); } catch (_) {}
+  }
+
+  let comp2kits = null, loading = false;
+  const norm = s => String(s == null ? '' : s).trim();
+  const esc = s => String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+  function build(kitsObj) {
+    const m = new Map();
+    for (const kitSku of Object.keys(kitsObj || {})) {
+      const info = kitsObj[kitSku] || {};
+      for (const c of (info.comps || [])) {
+        const cs = norm(c.sku);
+        if (!m.has(cs)) m.set(cs, []);
+        m.get(cs).push({ code: kitSku, name: info.name || '', qty: c.qty || 1, id: info.id || '' });
+      }
+    }
+    return m;
+  }
+
+  function fetchKits() {
+    const url = APP_URL.replace(/\/+$/, '') + '/api/kits?token=' + encodeURIComponent(TOKEN);
+    return new Promise((resolve, reject) => {
+      const done = t => { try { const d = JSON.parse(t); d.ok ? resolve(d.kits || {}) : reject(new Error(d.error || 'no')); } catch (e) { reject(e); } };
+      if (typeof GM_xmlhttpRequest !== 'undefined') {
+        GM_xmlhttpRequest({
+          method: 'GET', url,
+          onload: r => (r.status >= 200 && r.status < 300) ? done(r.responseText) : reject(new Error('HTTP ' + r.status)),
+          onerror: () => reject(new Error('net'))
+        });
+      } else { fetch(url).then(r => r.text()).then(done).catch(reject); }
+    });
+  }
+
+  async function ensureData() {
+    if (comp2kits || loading) return;
+    try { const c = GM_getValue('lknb_cache2', null); if (c) { const o = JSON.parse(c); if (Date.now() - o.ts < TTL_MS && o.kits) { comp2kits = build(o.kits); return; } } } catch (_) {}
+    loading = true;
+    try { const kits = await fetchKits(); comp2kits = build(kits); try { GM_setValue('lknb_cache2', JSON.stringify({ ts: Date.now(), kits })); } catch (_) {} }
+    catch (e) { /* мовчки — спробуємо при наступному скані */ }
+    finally { loading = false; }
+  }
+
+  const css = `
+  .lknb-plus{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;
+    margin-left:6px;border-radius:50%;background:#ef8a1f;color:#fff;font:700 12px/1 sans-serif;
+    cursor:pointer;vertical-align:middle;user-select:none}
+  .lknb-plus:hover{background:#d97a12}
+  .lknb-exp{margin:4px 0 2px;padding:6px 9px;border-left:3px solid #ef8a1f;background:#fff7ec;
+    border-radius:4px;font:12px/1.45 -apple-system,Segoe UI,Roboto,sans-serif;color:#333}
+  .lknb-exp .h{color:#8a5a12;font-weight:600;margin-bottom:3px}
+  .lknb-exp .r{padding:1px 0;font-family:ui-monospace,Menlo,Consolas,monospace}
+  .lknb-exp .r b{color:#c8730f}
+  .lknb-exp .r a.lk{color:#0a58ca;text-decoration:underline;font-weight:700;cursor:pointer}
+  .lknb-exp .r a.lk:hover{color:#0843a0}
+  .lknb-exp .r .nm{color:#888;font-family:-apple-system,Segoe UI,Roboto,sans-serif}`;
+  const st = document.createElement('style'); st.textContent = css;
+  (document.head || document.documentElement).appendChild(st);
+
+  function extractSku(cell) {
+    let sku = '';
+    cell.querySelectorAll('span').forEach(sp => {
+      const m = sp.textContent.trim().match(/^\(([\w\-]+)\)$/);
+      if (m) sku = m[1];
+    });
+    return sku;
+  }
+
+  function buildExp(sku) {
+    const list = comp2kits.get(sku) || [];
+    let h = '<div class="h">Входить у набори:</div>';
+    for (const k of list) {
+      const codeHtml = '<a class="lk" data-sku="' + esc(k.code) + '" href="' + CAT_URL(k.code) + '" target="_blank" rel="noopener">' + esc(k.code) + '</a>';
+      h += '<div class="r">' + codeHtml + ' · <span class="nm">' + esc(k.name) + '</span> ×' + k.qty + '</div>';
+    }
+    return h;
+  }
+
+  function inject(cell, sku) {
+    const skuSpan = [...cell.querySelectorAll('span')].reverse()
+      .find(sp => /^\([\w\-]+\)$/.test(sp.textContent.trim()));
+    const plus = document.createElement('span');
+    plus.className = 'lknb-plus'; plus.textContent = '+'; plus.title = 'Показати набори';
+    const exp = document.createElement('div');
+    exp.className = 'lknb-exp'; exp.style.display = 'none'; exp.innerHTML = buildExp(sku);
+    plus.addEventListener('click', e => {
+      e.preventDefault(); e.stopPropagation();
+      const open = exp.style.display !== 'none';
+      exp.style.display = open ? 'none' : 'block';
+      plus.textContent = open ? '+' : '–';
+    });
+    // клік по коду набору: відкрити картку товару в SalesDrive (модал), не чіпаючи заявку
+    exp.addEventListener('click', e => {
+      const a = e.target.closest('a.lk'); if (!a) return;
+      e.stopPropagation();
+      const sku = a.getAttribute('data-sku');
+      if (sku) { e.preventDefault(); openProduct(sku); }
+    });
+    if (skuSpan) skuSpan.insertAdjacentElement('afterend', plus);
+    else cell.appendChild(plus);
+    cell.appendChild(exp);
+  }
+
+  function processCell(cell) {
+    if (!comp2kits) return;
+    const sku = extractSku(cell);
+    const prev = cell.getAttribute('data-lknb');
+    const should = !!(sku && comp2kits.has(sku));
+    const hasPlus = !!cell.querySelector('.lknb-plus');
+    if (prev === (sku || '') && hasPlus === should) return;
+    cell.querySelectorAll('.lknb-plus,.lknb-exp').forEach(n => n.remove());
+    cell.setAttribute('data-lknb', sku || '');
+    if (should) inject(cell, sku);
+  }
+
+  function scan() {
+    if (!comp2kits) return;
+    document.querySelectorAll('a.link-product-field').forEach(a => {
+      const cell = a.closest('.editing-hide') || a.parentElement;
+      if (cell) processCell(cell);
+    });
+  }
+
+  let t = null;
+  function scanSoon() { clearTimeout(t); t = setTimeout(scan, 250); }
+
+  (async function init() {
+    await ensureData();
+    scan();
+    new MutationObserver(scanSoon).observe(document.body, { childList: true, subtree: true });
+  })();
 })();
