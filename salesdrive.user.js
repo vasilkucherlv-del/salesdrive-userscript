@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      0.75
+// @version      0.79
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -2523,6 +2523,193 @@ function __sdPageMain() {
   (async function init() {
     await ensureData();
     scan();
+    new MutationObserver(scanSoon).observe(document.body, { childList: true, subtree: true });
+  })();
+})();
+
+
+/* ===== Картка товару (модалка): рядок «Входить у набори» (джерело: баркод, ключ — ID) ===== */
+(function lkModalKits() {
+  'use strict';
+
+  // ---------- НАЛАШТУВАННЯ ----------
+  const APP_URL   = 'https://barcode-printer-production-2b32.up.railway.app';
+  const TOKEN     = 'nab_8Kx2pQ7mLr4tW9vZ';
+  const TTL_MS    = 6 * 60 * 60 * 1000;
+  const CACHE_KEY = 'lknb_cache2'; // спільний кеш із модулем «в рядках заявки» — не качаємо двічі
+  // картка набору в SalesDrive за SKU (той самий шлях, що в рядках заявки):
+  const CAT_URL = sku => 'https://komplektom.salesdrive.me/ua/index.html?formId=1#/product/index?filter%5Bsku%5D=' + encodeURIComponent(sku);
+  // ----------------------------------
+
+  const PAGE = (typeof unsafeWindow !== 'undefined' && unsafeWindow) || window;
+  function openProduct(sku) {
+    try { document.documentElement.setAttribute('data-sd-open-sku', String(sku)); PAGE.dispatchEvent(new Event('sdOpenProduct')); } catch (_) {}
+  }
+
+  const norm = s => String(s == null ? '' : s).replace(/\u00A0/g, ' ').trim();
+  const esc  = s => String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+  let id2kits = null, loading = false;
+
+  // мапа: ID складової -> [набори, в які вона входить]
+  function build(kitsObj) {
+    const m = new Map();
+    for (const kitSku of Object.keys(kitsObj || {})) {
+      const info = kitsObj[kitSku] || {};
+      for (const c of (info.comps || [])) {
+        const cid = norm(c.id);
+        if (!cid) continue;
+        if (!m.has(cid)) m.set(cid, []);
+        m.get(cid).push({ code: kitSku, name: info.name || '' });
+      }
+    }
+    return m;
+  }
+
+  function fetchKits() {
+    const url = APP_URL.replace(/\/+$/, '') + '/api/kits?token=' + encodeURIComponent(TOKEN);
+    return new Promise((resolve, reject) => {
+      const done = t => { try { const d = JSON.parse(t); d.ok ? resolve(d.kits || {}) : reject(new Error(d.error || 'no')); } catch (e) { reject(e); } };
+      if (typeof GM_xmlhttpRequest !== 'undefined') {
+        GM_xmlhttpRequest({
+          method: 'GET', url,
+          onload: r => (r.status >= 200 && r.status < 300) ? done(r.responseText) : reject(new Error('HTTP ' + r.status)),
+          onerror: () => reject(new Error('net'))
+        });
+      } else { fetch(url).then(r => r.text()).then(done).catch(reject); }
+    });
+  }
+
+  async function ensureData() {
+    if (id2kits || loading) return;
+    try { const c = GM_getValue(CACHE_KEY, null); if (c) { const o = JSON.parse(c); if (Date.now() - o.ts < TTL_MS && o.kits) { id2kits = build(o.kits); return; } } } catch (_) {}
+    loading = true;
+    try { const kits = await fetchKits(); id2kits = build(kits); try { GM_setValue(CACHE_KEY, JSON.stringify({ ts: Date.now(), kits })); } catch (_) {} }
+    catch (e) { /* мовчки — спробуємо при наступному скані */ }
+    finally { loading = false; }
+  }
+
+  // ---------- стилі (незалежні, з префіксом lkmk-) ----------
+  const css = `
+  .lkmk-plus{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;
+    border-radius:50%;background:#ef8a1f;color:#fff;font:700 12px/1 sans-serif;
+    cursor:pointer;vertical-align:middle;user-select:none}
+  .lkmk-plus:hover{background:#d97a12}
+  .lkmk-cnt{margin-left:6px;color:#8a5a12;font:600 12px/1 -apple-system,Segoe UI,Roboto,sans-serif;vertical-align:middle}
+  .lkmk-val{position:relative}
+  .lkmk-exp{position:absolute;top:100%;left:0;margin-top:4px;z-index:9999;display:none;
+    box-sizing:border-box;width:560px;max-width:72vw;columns:200px;column-gap:20px;
+    padding:10px 14px;border:1px solid #f0c98a;border-left:3px solid #ef8a1f;background:#fffdf8;
+    border-radius:6px;box-shadow:0 8px 22px rgba(0,0,0,.13);
+    font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;color:#222;
+    -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+  .lkmk-exp .r{break-inside:avoid;-webkit-column-break-inside:avoid;padding:4px 0;margin-bottom:2px}
+  .lkmk-exp .r a.lk{color:#0a58ca;text-decoration:none;font-weight:700;cursor:pointer}
+  .lkmk-exp .r a.lk:hover{color:#0843a0;text-decoration:underline}
+  .lkmk-exp .r .nm{color:#444}`;
+  const st = document.createElement('style'); st.textContent = css;
+  (document.head || document.documentElement).appendChild(st);
+
+  // ---------- пошук модалки товару та поля ID ----------
+  function findModalInfo() {
+    const incs = document.querySelectorAll('[ng-include]');
+    for (const el of incs) {
+      if ((el.getAttribute('ng-include') || '').indexOf('product-view-info') !== -1) return el;
+    }
+    return null;
+  }
+
+  function findIdRow(root) {
+    const labels = root.querySelectorAll('label.control-label-24');
+    for (const lb of labels) {
+      if (norm(lb.textContent) === 'ID') {
+        const valDiv = lb.parentElement ? lb.parentElement.querySelector('.width-200px-important') : null;
+        const outer  = lb.closest('.left.p-right10') || lb.closest('.p-right10');
+        return { valDiv, outer };
+      }
+    }
+    return null;
+  }
+
+  function buildExp(kits) {
+    let h = '';
+    for (const k of kits) {
+      h += '<div class="r"><a class="lk" data-sku="' + esc(k.code) + '" href="' + CAT_URL(k.code) +
+           '" target="_blank" rel="noopener">' + esc(k.code) + '</a> · <span class="nm">' + esc(k.name) + '</span></div>';
+    }
+    return h;
+  }
+
+  function buildRow(kits, id) {
+    const outer = document.createElement('div');
+    outer.className = 'left p-right10 width-350 lkmk-row';
+    outer.setAttribute('data-id', id);
+
+    const fg = document.createElement('div');
+    fg.className = 'form-group m-bot0 m-top0';
+
+    const label = document.createElement('label');
+    label.className = 'left text-right m-right7 control-label control-label-24 m-top5';
+    label.innerHTML = 'Входить у набори&nbsp;';
+
+    const val = document.createElement('div');
+    val.className = 'left width-200px-important m-top7 lkmk-val';
+
+    const plus = document.createElement('span');
+    plus.className = 'lkmk-plus'; plus.textContent = '+'; plus.title = 'Показати набори';
+
+    const cnt = document.createElement('span');
+    cnt.className = 'lkmk-cnt'; cnt.textContent = kits.length;
+
+    const exp = document.createElement('div');
+    exp.className = 'lkmk-exp'; exp.innerHTML = buildExp(kits);
+
+    plus.addEventListener('click', e => {
+      e.preventDefault(); e.stopPropagation();
+      const open = exp.style.display === 'block';
+      exp.style.display = open ? 'none' : 'block';
+      plus.textContent = open ? '+' : '–';
+    });
+    // клік по коду набору — відкрити картку набору в SalesDrive (той самий міст, що в рядках заявки)
+    exp.addEventListener('click', e => {
+      const a = e.target.closest('a.lk'); if (!a) return;
+      e.stopPropagation();
+      const sku = a.getAttribute('data-sku');
+      if (sku) { e.preventDefault(); openProduct(sku); }
+    });
+
+    val.appendChild(plus); val.appendChild(cnt); val.appendChild(exp);
+    fg.appendChild(label); fg.appendChild(val);
+    outer.appendChild(fg);
+    return outer;
+  }
+
+  function process() {
+    if (!id2kits) return;
+    const root = findModalInfo();
+    if (!root) return;
+    const idRow = findIdRow(root);
+    if (!idRow || !idRow.outer || !idRow.valDiv) return;
+    const id = norm(idRow.valDiv.textContent);
+    if (!id) return;
+
+    const existing = root.querySelector('.lkmk-row');
+    if (existing && existing.getAttribute('data-id') === id) return; // вже стоїть для цього товару
+    root.querySelectorAll('.lkmk-row').forEach(n => n.remove());     // інший товар / дубль — прибрати
+
+    const kits = id2kits.get(id) || [];
+    if (!kits.length) return;                                        // не входить у жоден набір — рядка немає
+
+    idRow.outer.insertAdjacentElement('afterend', buildRow(kits, id));
+  }
+
+  let t = null;
+  function scanSoon() { clearTimeout(t); t = setTimeout(process, 200); }
+
+  (async function init() {
+    await ensureData();
+    process();
     new MutationObserver(scanSoon).observe(document.body, { childList: true, subtree: true });
   })();
 })();
