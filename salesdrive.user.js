@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      0.81
+// @version      0.82
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -495,10 +495,7 @@ var UPSELL_MAP_DATA = [
     x.addEventListener("click", function () { removeHint(); if (opts.onClose) opts.onClose(); });
     box.appendChild(x);
 
-    var top = document.createElement("div");
-    top.className = "sd-top";
-    top.textContent = headerText;
-    box.appendChild(top);
+    // верхній рядок-заголовок прибрано — одразу йдуть товари
 
     var slots = {}; // код -> { badge, img }
     items.forEach(function (it) {
@@ -525,6 +522,11 @@ var UPSELL_MAP_DATA = [
         nameEl.textContent = it.c;
         main.appendChild(nameEl);
       }
+
+      var say = document.createElement("div");
+      say.className = "sd-say";
+      say.textContent = "Скажіть клієнту";
+      main.appendChild(say);
 
       var script = document.createElement("div");
       script.className = "sd-script";
@@ -2717,4 +2719,24 @@ function __sdPageMain() {
     process();
     new MutationObserver(scanSoon).observe(document.body, { childList: true, subtree: true });
   })();
+})();
+
+/* ===== Новий вигляд картки допродажу: скрипт-репліка = головний акцент ===== */
+(function lkUpsellRedesign() {
+  'use strict';
+  var css = ''
+    + '#sd-upsell-hint{padding-top:30px !important}'
+    + '#sd-upsell-hint .sd-item{gap:10px 14px}'
+    + '#sd-upsell-hint .sd-name{font-size:12.5px;font-weight:700;letter-spacing:.2px;'
+    + '  color:#6b5e2a;line-height:1.3;margin-bottom:0;text-transform:uppercase}'
+    + '#sd-upsell-hint .sd-say{display:inline-block;font-size:11px;font-weight:800;'
+    + '  letter-spacing:.5px;text-transform:uppercase;color:#2E7D32;margin:2px 0 3px 0}'
+    + '#sd-upsell-hint .sd-say::before{content:"💬 "}'
+    + '#sd-upsell-hint .sd-script{font-size:16.5px;font-weight:600;line-height:1.5;color:#16240f;'
+    + '  background:#ffffff;border:1px solid #bfe0c1;border-left:5px solid #2E7D32;'
+    + '  border-radius:9px;padding:11px 14px;overflow-wrap:anywhere;'
+    + '  box-shadow:0 1px 4px rgba(46,125,50,.12)}';
+  var st = document.createElement('style');
+  st.textContent = css;
+  (document.head || document.documentElement).appendChild(st);
 })();
