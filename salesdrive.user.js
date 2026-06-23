@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      0.79
+// @version      0.81
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -2561,7 +2561,7 @@ function __sdPageMain() {
         const cid = norm(c.id);
         if (!cid) continue;
         if (!m.has(cid)) m.set(cid, []);
-        m.get(cid).push({ code: kitSku, name: info.name || '' });
+        m.get(cid).push({ code: kitSku, name: info.name || '', id: info.id || '' });
       }
     }
     return m;
@@ -2607,7 +2607,9 @@ function __sdPageMain() {
   .lkmk-exp .r{break-inside:avoid;-webkit-column-break-inside:avoid;padding:4px 0;margin-bottom:2px}
   .lkmk-exp .r a.lk{color:#0a58ca;text-decoration:none;font-weight:700;cursor:pointer}
   .lkmk-exp .r a.lk:hover{color:#0843a0;text-decoration:underline}
-  .lkmk-exp .r .nm{color:#444}`;
+  .lkmk-exp .r .nm{color:#444}
+  .lkmk-exp .r a.led{color:#6b8e23;margin:0 2px 0 5px;text-decoration:none;font-weight:400}
+  .lkmk-exp .r a.led:hover{color:#ef8a1f}`;
   const st = document.createElement('style'); st.textContent = css;
   (document.head || document.documentElement).appendChild(st);
 
@@ -2635,8 +2637,11 @@ function __sdPageMain() {
   function buildExp(kits) {
     let h = '';
     for (const k of kits) {
+      const eid = String(k.id || '').replace(/^id_/, '');
+      const edit = eid ? ' <a class="led" href="#/product/update/' + esc(eid) + '" title="Редагувати товар"><i class="fa fa-pencil"></i></a>' : '';
       h += '<div class="r"><a class="lk" data-sku="' + esc(k.code) + '" href="' + CAT_URL(k.code) +
-           '" target="_blank" rel="noopener">' + esc(k.code) + '</a> · <span class="nm">' + esc(k.name) + '</span></div>';
+           '" target="_blank" rel="noopener">' + esc(k.code) + '</a>' + edit +
+           ' · <span class="nm">' + esc(k.name) + '</span></div>';
     }
     return h;
   }
