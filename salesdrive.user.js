@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      0.83
+// @version      0.85
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -2756,7 +2756,7 @@ function __sdPageMain() {
   var SAFE_IDS = { 96:1, 100:1, 44:1, 21:1, 26:1, 81:1 };
 
   function norm(s){ return String(s==null?'':s).replace(/\u00A0/g,' ').trim(); }
-  function onOrderPage(){ return /\/order\//.test(location.hash||''); }
+  function onOrderPage(){ return /\/order\/\w+\/\d+/.test(location.hash||''); } // лише картка заявки з ID, не список
   function orderKey(){ var m=(location.hash||'').match(/order\/\w+\/(\d+)/); return m?m[1]:(location.hash||''); }
 
   function paymentId(){
@@ -2810,6 +2810,8 @@ function __sdPageMain() {
     + '#sd-stockpay-warn .sp-row{padding:3px 0;border-top:1px dashed #eccf9a;display:flex;flex-wrap:wrap;gap:2px 10px}'
     + '#sd-stockpay-warn .sp-name{flex:1 1 280px;min-width:0;font-weight:600}'
     + '#sd-stockpay-warn .sp-rest{white-space:nowrap;font-weight:800;color:#c0392b}'
+    + '#sd-stockpay-warn .sp-esc{font-weight:800;color:#b71c1c;background:#fdecea;border:1px solid #f5b7b1;'
+    + '  border-radius:5px;padding:5px 9px;margin-bottom:7px}'
     + 'html.sd-modal-open #sd-stockpay-warn{display:none !important}';
   var st=document.createElement('style'); st.textContent=css;
   (document.head||document.documentElement).appendChild(st);
@@ -2834,8 +2836,6 @@ function __sdPageMain() {
     return orderKey()+'|'+(isWarnPayment()?'1':'0')+'|'+(document.documentElement.getAttribute('data-sd-order-items')||'');
   }
 
-  var dismissedSig=null;
-
   function render(low){
     var sig=curSig();
     var existing=document.getElementById('sd-stockpay-warn');
@@ -2846,11 +2846,6 @@ function __sdPageMain() {
     box.id='sd-stockpay-warn';
     box.setAttribute('data-sig',sig);
 
-    var x=document.createElement('button');
-    x.className='sd-x'; x.type='button'; x.textContent='\u00d7'; x.title='Сховати';
-    x.addEventListener('click', function(){ dismissedSig=curSig(); removeWarn(); });
-    box.appendChild(x);
-
     var top=document.createElement('div');
     top.className='sp-top';
     top.textContent='📦 Перевір фізичну наявність на складі!';
@@ -2858,8 +2853,15 @@ function __sdPageMain() {
 
     var why=document.createElement('div');
     why.className='sp-why';
-    why.textContent='Оплата передоплатна (гроші наперед), а в замовленні є товар із малим залишком. Переконайся, що він реально є на складі, перш ніж брати оплату.';
+    why.textContent='У замовленні є товар із малим залишком. Переконайся, що він реально є на складі — особливо якщо оплата передоплатна (на рахунок, карта, онлайн).';
     box.appendChild(why);
+
+    if(isWarnPayment()){
+      var esc=document.createElement('div');
+      esc.className='sp-esc';
+      esc.textContent='⚠️ Зараз обрана передоплатна оплата — перевір склад обовʼязково.';
+      box.appendChild(esc);
+    }
 
     low.forEach(function(p){
       var row=document.createElement('div'); row.className='sp-row';
@@ -2881,16 +2883,15 @@ function __sdPageMain() {
   function evaluate(){
     if(!onOrderPage()){ removeWarn(); return; }
     if(document.documentElement.classList.contains('sd-modal-open')) return; // не заважаємо модалці
-    if(!isWarnPayment()){ removeWarn(); return; }
     var low=lowStock();
     if(low===null) return;            // даних ще нема
     if(!low.length){ removeWarn(); return; }
-    if(dismissedSig===curSig()) return; // закрито для цього стану
-    render(low);
+    render(low);                       // показуємо завжди, коли є малий залишок (стало)
   }
 
   var BUS=(typeof unsafeWindow!=='undefined' && unsafeWindow) ? unsafeWindow : window;
   BUS.addEventListener('sdOrderItems', evaluate);
+  window.addEventListener('hashchange', evaluate); // миттєво прибрати при виході із заявки
   setInterval(evaluate, 1500);        // ловить зміну способу оплати
   setTimeout(evaluate, 800);
 })();
