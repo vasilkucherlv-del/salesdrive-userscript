@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      0.82
+// @version      0.83
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -2187,7 +2187,11 @@ function __sdPageMain() {
         if (it[f] != null) codes.push(String(it[f]));
       });
       var name = it.name || it.productName || it.title || it.text || "";
-      if (name || codes.length) out.push({ name: String(name), codes: codes });
+      var rest = null;
+      var prod = it.product || null;
+      if (prod && prod.restCountInitial != null) rest = Number(prod.restCountInitial);
+      else if (it.restCountInitial != null) rest = Number(it.restCountInitial);
+      if (name || codes.length) out.push({ name: String(name), codes: codes, rest: rest });
     }
     return out;
   }
@@ -2739,4 +2743,154 @@ function __sdPageMain() {
   var st = document.createElement('style');
   st.textContent = css;
   (document.head || document.documentElement).appendChild(st);
+})();
+
+/* ===== Банер: передоплатна оплата + малий залишок → перевір склад ===== */
+(function lkStockPayWarn() {
+  'use strict';
+
+  var THRESHOLD = 2; // залишок ≤2 (0 і мінус теж) = сигнал
+  // ID способів оплати (number:XX). Передоплата/гроші наперед → показуємо банер:
+  var WARN_IDS = { 88:1, 62:1, 132:1, 18:1, 58:1, 42:1, 20:1, 84:1, 28:1, 136:1 };
+  // Оплата при отриманні / самовивіз / накладений платіж → банер НЕ потрібен:
+  var SAFE_IDS = { 96:1, 100:1, 44:1, 21:1, 26:1, 81:1 };
+
+  function norm(s){ return String(s==null?'':s).replace(/\u00A0/g,' ').trim(); }
+  function onOrderPage(){ return /\/order\//.test(location.hash||''); }
+  function orderKey(){ var m=(location.hash||'').match(/order\/\w+\/(\d+)/); return m?m[1]:(location.hash||''); }
+
+  function paymentId(){
+    var sel=document.getElementById('payment_method-wk');
+    if(sel && 'value' in sel){ var m=String(sel.value||'').match(/(\d+)/); if(m) return parseInt(m[1],10); }
+    var alt=document.querySelector('select[id*="payment_method"],select[name*="payment"]');
+    if(alt && 'value' in alt){ var m2=String(alt.value||'').match(/(\d+)/); if(m2) return parseInt(m2[1],10); }
+    return null;
+  }
+  function paymentText(){
+    var c=document.getElementById('select2-payment_method-wk-container')
+        || document.querySelector('[id^="select2-payment_method"][id$="-container"]');
+    return c ? norm(c.getAttribute('title')||c.textContent) : '';
+  }
+  function isWarnPayment(){
+    var id=paymentId();
+    if(id!=null){ if(WARN_IDS[id]) return true; if(SAFE_IDS[id]) return false; }
+    var t=paymentText().toLowerCase();
+    if(!t || t==='---') return false;
+    var SAFE_RE=[/при отриманн/,/наложен/,/готівк/,/термінал/,/зворотн/,/самовив/];
+    for(var i=0;i<SAFE_RE.length;i++){ if(SAFE_RE[i].test(t)) return false; }
+    var WARN_RE=[/розрахунков/,/передоплат/,/частинами|частями/,/приват/,/monobank|моно/,/олх/,/пром-?оплат/,/liqpay/,/wayforpay/,/googlepay|apple ?pay/];
+    for(var j=0;j<WARN_RE.length;j++){ if(WARN_RE[j].test(t)) return true; }
+    return false;
+  }
+
+  function lowStock(){
+    var items;
+    try{ items=JSON.parse(document.documentElement.getAttribute('data-sd-order-items'))||[]; }
+    catch(e){ return null; }
+    var low=[];
+    items.forEach(function(it){
+      if(!it) return;
+      var r=it.rest;
+      if(r==null || isNaN(r)) return;     // невідомий залишок — не чіпаємо
+      if(r<=THRESHOLD) low.push({ name: it.name||'', rest: r });
+    });
+    return low;
+  }
+
+  // ---- стиль (жовто-помаранчевий банер угорі, як про рейтинг) ----
+  var css = ''
+    + '#sd-stockpay-warn{position:relative;margin:10px 0;padding:11px 34px 11px 12px;'
+    + '  border:1px solid #e0a500;border-left:4px solid #e07b00;background:#fff6e6;border-radius:6px;'
+    + '  font:13px/1.5 -apple-system,"Segoe UI",Roboto,Arial,sans-serif;color:#6b3e00;max-width:980px;box-sizing:border-box}'
+    + '#sd-stockpay-warn .sd-x{position:absolute;top:6px;right:8px;border:none;background:transparent;cursor:pointer;'
+    + '  font-size:18px;line-height:1;color:#a05a00;opacity:.6}'
+    + '#sd-stockpay-warn .sd-x:hover{opacity:1}'
+    + '#sd-stockpay-warn .sp-top{font-weight:800;font-size:14.5px;color:#c0392b;margin-bottom:3px}'
+    + '#sd-stockpay-warn .sp-why{margin-bottom:7px;color:#7a4a00}'
+    + '#sd-stockpay-warn .sp-row{padding:3px 0;border-top:1px dashed #eccf9a;display:flex;flex-wrap:wrap;gap:2px 10px}'
+    + '#sd-stockpay-warn .sp-name{flex:1 1 280px;min-width:0;font-weight:600}'
+    + '#sd-stockpay-warn .sp-rest{white-space:nowrap;font-weight:800;color:#c0392b}'
+    + 'html.sd-modal-open #sd-stockpay-warn{display:none !important}';
+  var st=document.createElement('style'); st.textContent=css;
+  (document.head||document.documentElement).appendChild(st);
+
+  function removeWarn(){ var o=document.getElementById('sd-stockpay-warn'); if(o) o.remove(); }
+
+  function insertPoint(){
+    var btn=null, all=document.querySelectorAll('[ng-click]');
+    for(var i=0;i<all.length;i++){
+      if((all[i].getAttribute('ng-click')||'').replace(/\s+/g,'')==='viewModel.addOption()'){ btn=all[i]; break; }
+    }
+    if(!btn) btn=document.getElementById('addCompleteProduct');
+    if(!btn) return null;
+    var tbl=btn.closest('table');
+    if(tbl && tbl.parentElement && tbl.parentElement!==document.body) return { parent: tbl.parentElement, ref: tbl };
+    return null;
+  }
+
+  function fmtRest(r){ return (Math.abs(r-Math.round(r))<1e-9 ? String(Math.round(r)) : String(r)); }
+
+  function curSig(){
+    return orderKey()+'|'+(isWarnPayment()?'1':'0')+'|'+(document.documentElement.getAttribute('data-sd-order-items')||'');
+  }
+
+  var dismissedSig=null;
+
+  function render(low){
+    var sig=curSig();
+    var existing=document.getElementById('sd-stockpay-warn');
+    if(existing && existing.getAttribute('data-sig')===sig) return; // вже намальовано для цього стану
+    removeWarn();
+
+    var box=document.createElement('div');
+    box.id='sd-stockpay-warn';
+    box.setAttribute('data-sig',sig);
+
+    var x=document.createElement('button');
+    x.className='sd-x'; x.type='button'; x.textContent='\u00d7'; x.title='Сховати';
+    x.addEventListener('click', function(){ dismissedSig=curSig(); removeWarn(); });
+    box.appendChild(x);
+
+    var top=document.createElement('div');
+    top.className='sp-top';
+    top.textContent='📦 Перевір фізичну наявність на складі!';
+    box.appendChild(top);
+
+    var why=document.createElement('div');
+    why.className='sp-why';
+    why.textContent='Оплата передоплатна (гроші наперед), а в замовленні є товар із малим залишком. Переконайся, що він реально є на складі, перш ніж брати оплату.';
+    box.appendChild(why);
+
+    low.forEach(function(p){
+      var row=document.createElement('div'); row.className='sp-row';
+      var nm=document.createElement('span'); nm.className='sp-name'; nm.textContent=p.name;
+      var rs=document.createElement('span'); rs.className='sp-rest'; rs.textContent='залишок: '+fmtRest(p.rest)+' шт';
+      row.appendChild(nm); row.appendChild(rs);
+      box.appendChild(row);
+    });
+
+    var sp=insertPoint();
+    if(sp && sp.parent){
+      var anchor=document.getElementById('sd-rating-warn')||document.getElementById('sd-price-warn')||sp.ref;
+      sp.parent.insertBefore(box, anchor); // найвище — над іншими банерами/таблицею
+    } else {
+      document.body.appendChild(box);
+    }
+  }
+
+  function evaluate(){
+    if(!onOrderPage()){ removeWarn(); return; }
+    if(document.documentElement.classList.contains('sd-modal-open')) return; // не заважаємо модалці
+    if(!isWarnPayment()){ removeWarn(); return; }
+    var low=lowStock();
+    if(low===null) return;            // даних ще нема
+    if(!low.length){ removeWarn(); return; }
+    if(dismissedSig===curSig()) return; // закрито для цього стану
+    render(low);
+  }
+
+  var BUS=(typeof unsafeWindow!=='undefined' && unsafeWindow) ? unsafeWindow : window;
+  BUS.addEventListener('sdOrderItems', evaluate);
+  setInterval(evaluate, 1500);        // ловить зміну способу оплати
+  setTimeout(evaluate, 800);
 })();
