@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      0.85
+// @version      0.86
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -2836,7 +2836,7 @@ function __sdPageMain() {
     return orderKey()+'|'+(isWarnPayment()?'1':'0')+'|'+(document.documentElement.getAttribute('data-sd-order-items')||'');
   }
 
-  function render(low){
+  function render(low, sp){
     var sig=curSig();
     var existing=document.getElementById('sd-stockpay-warn');
     if(existing && existing.getAttribute('data-sig')===sig) return; // вже намальовано для цього стану
@@ -2871,22 +2871,18 @@ function __sdPageMain() {
       box.appendChild(row);
     });
 
-    var sp=insertPoint();
-    if(sp && sp.parent){
-      var anchor=document.getElementById('sd-rating-warn')||document.getElementById('sd-price-warn')||sp.ref;
-      sp.parent.insertBefore(box, anchor); // найвище — над іншими банерами/таблицею
-    } else {
-      document.body.appendChild(box);
-    }
+    var anchor=document.getElementById('sd-rating-warn')||document.getElementById('sd-price-warn')||sp.ref;
+    sp.parent.insertBefore(box, anchor); // найвище — над іншими банерами/таблицею
   }
 
   function evaluate(){
-    if(!onOrderPage()){ removeWarn(); return; }
-    if(document.documentElement.classList.contains('sd-modal-open')) return; // не заважаємо модалці
+    if(document.documentElement.classList.contains('sd-modal-open')) return; // не заважаємо модалці товару
+    var sp=insertPoint();              // якір — таблиця товарів картки заявки (як у допродажах)
+    if(!sp || !onOrderPage()){ removeWarn(); return; } // нема картки заявки → банера нема (і на списку теж)
     var low=lowStock();
     if(low===null) return;            // даних ще нема
     if(!low.length){ removeWarn(); return; }
-    render(low);                       // показуємо завжди, коли є малий залишок (стало)
+    render(low, sp);                   // показуємо завжди, коли є малий залишок (стало)
   }
 
   var BUS=(typeof unsafeWindow!=='undefined' && unsafeWindow) ? unsafeWindow : window;
