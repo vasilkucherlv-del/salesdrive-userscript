@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      0.88
+// @version      0.89
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -2892,13 +2892,13 @@ function __sdPageMain() {
   setTimeout(evaluate, 800);
 })();
 
-/* ===== 💰 Каса самовивозу — готівка / термінал / залишок (накопичувально) ===== */
+/* ===== 💰 Каса самовивозу — день / тиждень / місяць / період ===== */
 (function lkCashRegister(){
   'use strict';
 
   var API_KEY   = '9yC3JYj4MlYitQ8J3KUf-uy_qPDYkFzwoITQSUeiWEDMZntbQ4uj0NxNcHrqAg8VAB6wDmkdXJZ1LMFgnQbuivTSrzutQbVB66wN';
-  var ORDERS    = '/api/order/list/';                 // продажі (Form-Api-Key)
-  var CASHORD   = '/document-cash-order/index/';       // касові ордери (сесія)
+  var ORDERS    = '/api/order/list/';
+  var CASHORD   = '/document-cash-order/index/';
   var STATUS_ID = 5;     // Оплачено САМОВИВІЗ
   var CASH_ID   = 44;    // Готівкою 💵
   var CARD_ID   = 100;   // Термінал 💳
@@ -2911,8 +2911,49 @@ function __sdPageMain() {
   function num(v){ var m=String(v==null?'':v).replace(',','.').match(/-?[\d.]+/); return m?parseFloat(m[0]):0; }
   function sleep(ms){ return new Promise(function(r){ setTimeout(r,ms); }); }
   function dstr(d){ return d.split('-').reverse().join('.'); }
+  function startOfDay(d){ var x=new Date(d); x.setHours(0,0,0,0); return x; }
 
-  var cur = new Date();
+  // режим: 'day' | 'week' | 'month' | 'range'
+  var mode='day';
+  var anchor=new Date();           // опорна дата для day/week/month
+  var rangeFrom=null, rangeTo=null;// для 'range' (рядки ymd)
+
+  // Поточний понеділок тижня опорної дати
+  function weekBounds(d){
+    var x=startOfDay(d); var wd=(x.getDay()+6)%7; // 0=Пн
+    var mon=new Date(x); mon.setDate(x.getDate()-wd);
+    var sun=new Date(mon); sun.setDate(mon.getDate()+6);
+    return [mon,sun];
+  }
+  function monthBounds(d){
+    var first=new Date(d.getFullYear(),d.getMonth(),1);
+    var last=new Date(d.getFullYear(),d.getMonth()+1,0);
+    return [first,last];
+  }
+  // повертає {from,to,label} у форматі ymd
+  function currentSpan(){
+    if(mode==='range' && rangeFrom && rangeTo){
+      var a=rangeFrom, b=rangeTo; if(a>b){ var t=a;a=b;b=t; }
+      return {from:a,to:b,label:dstr(a)+' — '+dstr(b)};
+    }
+    if(mode==='week'){
+      var w=weekBounds(anchor);
+      return {from:ymd(w[0]),to:ymd(w[1]),label:'тиждень '+dstr(ymd(w[0]))+' — '+dstr(ymd(w[1]))};
+    }
+    if(mode==='month'){
+      var m=monthBounds(anchor);
+      var nm=anchor.toLocaleDateString('uk-UA',{month:'long',year:'numeric'});
+      return {from:ymd(m[0]),to:ymd(m[1]),label:nm};
+    }
+    var s=ymd(anchor);
+    return {from:s,to:s,label:dstr(s)};
+  }
+  function shift(dir){
+    if(mode==='day')   anchor.setDate(anchor.getDate()+dir);
+    else if(mode==='week')  anchor.setDate(anchor.getDate()+7*dir);
+    else if(mode==='month') anchor.setMonth(anchor.getMonth()+dir);
+    // range стрілками не листаємо
+  }
 
   /* ---- стартовий залишок (barcode-app) ---- */
   function gmGet(url){
@@ -2927,8 +2968,7 @@ function __sdPageMain() {
   function gmPost(url,body){
     return new Promise(function(res,rej){
       if(typeof GM_xmlhttpRequest!=='undefined'){
-        GM_xmlhttpRequest({method:'POST',url:url,
-          headers:{'Content-Type':'application/json'},
+        GM_xmlhttpRequest({method:'POST',url:url,headers:{'Content-Type':'application/json'},
           data:JSON.stringify(body),
           onload:function(r){ (r.status>=200&&r.status<300)?res(r.responseText):rej(new Error('HTTP '+r.status)); },
           onerror:function(){ rej(new Error('net')); }});
@@ -2939,10 +2979,8 @@ function __sdPageMain() {
     });
   }
   async function getBaseline(){
-    try{
-      var t=await gmGet(BARCODE_URL+'/api/cash-baseline?token='+encodeURIComponent(BARCODE_TOKEN));
-      var d=JSON.parse(t); return d&&d.ok?d.baseline:null;
-    }catch(e){ return null; }
+    try{ var t=await gmGet(BARCODE_URL+'/api/cash-baseline?token='+encodeURIComponent(BARCODE_TOKEN));
+      var d=JSON.parse(t); return d&&d.ok?d.baseline:null; }catch(e){ return null; }
   }
   async function setBaseline(amount){
     var body={amount:amount,date:ymd(new Date()),by:''};
@@ -2950,66 +2988,48 @@ function __sdPageMain() {
     var d=JSON.parse(t); if(!d.ok) throw new Error(d.error||'err'); return d.baseline;
   }
 
-  /* ---- продажі (заявки статус 5) за діапазон дат ---- */
-  function payId(o){
-    var v=o.payment_method!=null?o.payment_method:(o.paymentMethod!=null?o.paymentMethod:o.payment_method_id);
-    var m=String(v==null?'':v).match(/(\d+)/); return m?parseInt(m[1],10):null;
-  }
+  /* ---- продажі ---- */
+  function payId(o){ var v=o.payment_method!=null?o.payment_method:(o.paymentMethod!=null?o.paymentMethod:o.payment_method_id);
+    var m=String(v==null?'':v).match(/(\d+)/); return m?parseInt(m[1],10):null; }
   function amount(o){ return num(o.paymentAmount!=null?o.paymentAmount:o.restPay); }
   function payDate(o){ return String(o.paymentDate||'').slice(0,10); }
-  function clientName(o){
-    var c=(o.contacts&&o.contacts[0])||o;
-    var n=[c.lName||c.lname||'',c.fName||c.fname||''].join(' ').trim();
-    return n||('№'+o.id);
-  }
+  function clientName(o){ var c=(o.contacts&&o.contacts[0])||o;
+    var n=[c.lName||c.lname||'',c.fName||c.fname||''].join(' ').trim(); return n||('№'+o.id); }
   async function fetchOrders(from,to){
     var page=1,all=[],guard=0;
-    while(guard++<30){
-      var url=ORDERS+'?page='+page+'&limit=100'
-        +'&filter[statusId]='+STATUS_ID
-        +'&filter[paymentDate][from]='+from
-        +'&filter[paymentDate][to]='+to;
-      var r;
-      try{ r=await fetch(url,{headers:{'Form-Api-Key':API_KEY,'Accept':'application/json'}}); }
-      catch(e){ break; }
+    while(guard++<40){
+      var url=ORDERS+'?page='+page+'&limit=100&filter[statusId]='+STATUS_ID
+        +'&filter[paymentDate][from]='+from+'&filter[paymentDate][to]='+to;
+      var r; try{ r=await fetch(url,{headers:{'Form-Api-Key':API_KEY,'Accept':'application/json'}}); }catch(e){ break; }
       if(r.status===400){ await sleep(65000); continue; }
       var j=await r.json().catch(function(){return {};});
-      var arr=j.data||j.orders||[];
-      all=all.concat(arr);
-      if(arr.length<100) break;
-      page++; await sleep(6500);
+      var arr=j.data||j.orders||[]; all=all.concat(arr);
+      if(arr.length<100) break; page++; await sleep(6500);
     }
     return all;
   }
 
-  /* ---- видаткові касові ордери (сесія), newest-first, стоп на from ---- */
+  /* ---- видаткові касові ордери: newest-first, стоп на from ---- */
   async function fetchOutcoming(from,to){
     var page=1,items=[],sum=0,guard=0,stop=false;
-    while(guard++<60 && !stop){
+    while(guard++<80 && !stop){
       var url=CASHORD+'?active=1&formId=1&type=outcoming&page='+page;
-      var r;
-      try{ r=await fetch(url,{headers:{'Accept':'application/json'},credentials:'same-origin'}); }
-      catch(e){ break; }
+      var r; try{ r=await fetch(url,{headers:{'Accept':'application/json'},credentials:'same-origin'}); }catch(e){ break; }
       var j=await r.json().catch(function(){return {};});
-      var arr=j.data||[];
-      if(!arr.length) break;
+      var arr=j.data||[]; if(!arr.length) break;
       for(var i=0;i<arr.length;i++){
-        var o=arr[i], dt=String(o.date||'').slice(0,10);
-        if(!dt) continue;
-        if(dt<from){ stop=true; break; }       // вийшли за межу — далі лише старіші
-        if(dt>to) continue;                     // ще не дійшли до вікна
-        var a=num(o.totalSum);
-        sum+=a;
+        var o=arr[i], dt=String(o.date||'').slice(0,10); if(!dt) continue;
+        if(dt<from){ stop=true; break; }
+        if(dt>to) continue;
+        var a=num(o.totalSum); sum+=a;
         items.push({date:dt,amount:a,comment:String(o.comment||'').trim(),number:o.number});
       }
-      var pg=j.pagination||{};
-      if(pg.currentPage>=pg.pageCount) break;
+      var pg=j.pagination||{}; if(pg.currentPage>=pg.pageCount) break;
       page++; await sleep(300);
     }
     return {sum:sum,items:items};
   }
 
-  /* ---- стилі ---- */
   function ensureStyles(){
     if(document.getElementById('lk-cash-css')) return;
     var s=document.createElement('style'); s.id='lk-cash-css';
@@ -3018,16 +3038,23 @@ function __sdPageMain() {
     +'background:#ad2fb6;color:#fff;border:none;font-size:24px;cursor:pointer;box-shadow:0 3px 10px rgba(0,0,0,.3)}'
     +'#lk-cash-btn:hover{filter:brightness(1.08)}'
     +'#lk-cash-ov{position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center}'
-    +'#lk-cash-box{background:#fff;width:440px;max-width:94vw;max-height:90vh;overflow:auto;border-radius:12px;'
+    +'#lk-cash-box{background:#fff;width:460px;max-width:94vw;max-height:90vh;overflow:auto;border-radius:12px;'
     +'font-family:system-ui,Arial,sans-serif;box-shadow:0 10px 40px rgba(0,0,0,.3)}'
     +'#lk-cash-box .h{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid #eee}'
     +'#lk-cash-box .h b{font-size:17px}'
     +'#lk-cash-box .x{border:none;background:none;font-size:22px;cursor:pointer;color:#888;line-height:1}'
-    +'#lk-cash-nav{display:flex;align-items:center;justify-content:center;gap:14px;padding:11px;font-size:16px;font-weight:600}'
-    +'#lk-cash-nav button{border:1px solid #ddd;background:#fafafa;border-radius:7px;width:34px;height:34px;cursor:pointer;font-size:18px}'
+    +'#lk-cash-modes{display:flex;gap:6px;padding:11px 16px 4px;flex-wrap:wrap}'
+    +'#lk-cash-modes button{border:1px solid #ddd;background:#fafafa;border-radius:7px;padding:5px 12px;cursor:pointer;font-size:13px;color:#555}'
+    +'#lk-cash-modes button.on{background:#ad2fb6;border-color:#ad2fb6;color:#fff;font-weight:700}'
+    +'#lk-cash-range{display:none;gap:8px;align-items:center;padding:4px 16px 2px;font-size:13px;color:#555}'
+    +'#lk-cash-range.show{display:flex}'
+    +'#lk-cash-range input{border:1px solid #ccc;border-radius:6px;padding:4px 6px;font-size:13px}'
+    +'#lk-cash-range button{border:1px solid #ad2fb6;background:#ad2fb6;color:#fff;border-radius:6px;padding:5px 10px;cursor:pointer;font-size:13px}'
+    +'#lk-cash-nav{display:flex;align-items:center;justify-content:center;gap:12px;padding:8px;font-size:14px;font-weight:600}'
+    +'#lk-cash-nav button{border:1px solid #ddd;background:#fafafa;border-radius:7px;width:32px;height:32px;cursor:pointer;font-size:18px}'
     +'#lk-cash-nav .today{font-size:12px;color:#ad2fb6;cursor:pointer;text-decoration:underline;width:auto;height:auto;border:none;background:none}'
-    +'#lk-cash-bal{margin:2px 16px 6px;padding:15px 16px;border-radius:11px;background:#fbeffc;border:1px solid #e8b9ed;'
-    +'display:flex;justify-content:space-between;align-items:baseline}'
+    +'#lk-cash-nav #lk-cash-span{min-width:150px;text-align:center;color:#333}'
+    +'#lk-cash-bal{margin:2px 16px 6px;padding:15px 16px;border-radius:11px;background:#fbeffc;border:1px solid #e8b9ed;display:flex;justify-content:space-between;align-items:baseline}'
     +'#lk-cash-bal .l{font-size:14px;color:#7a2a80;font-weight:600}'
     +'#lk-cash-bal .v{font-size:24px;font-weight:800;color:#7a2a80}'
     +'#lk-cash-bal .sub{font-size:11px;color:#a06aa6;font-weight:400}'
@@ -3040,14 +3067,16 @@ function __sdPageMain() {
     +'#lk-cash-day-sum .val{font-size:18px;font-weight:800}'
     +'#lk-cash-day-sum .cnt{font-size:11px;color:#888;font-weight:400}'
     +'#lk-cash-out-list{padding:0 16px}'
-    +'#lk-cash-out-list .it{display:flex;justify-content:space-between;gap:8px;padding:6px 12px;font-size:13px;color:#a8432a;border-bottom:1px dashed #f0d4cc}'
+    +'#lk-cash-out-list .it{display:flex;justify-content:space-between;gap:8px;padding:6px 12px;font-size:13px;border-bottom:1px dashed #f0d4cc}'
     +'#lk-cash-out-list .cm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#7a3b28}'
-    +'#lk-cash-out-list .am{white-space:nowrap;font-weight:700}'
+    +'#lk-cash-out-list .dt{color:#b08;font-size:11px;margin-right:4px}'
+    +'#lk-cash-out-list .am{white-space:nowrap;font-weight:700;color:#a8432a}'
     +'#lk-cash-list{padding:8px 16px 16px}'
     +'#lk-cash-list .ttl{font-size:12px;color:#999;text-transform:uppercase;letter-spacing:.5px;margin:8px 0 6px}'
     +'#lk-cash-list a{display:flex;justify-content:space-between;gap:8px;padding:7px 10px;border-bottom:1px solid #f1f1f1;text-decoration:none;color:#222;font-size:13px}'
     +'#lk-cash-list a:hover{background:#faf5fb}'
     +'#lk-cash-list .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}'
+    +'#lk-cash-list .dt{color:#aaa;font-size:11px;margin-right:4px}'
     +'#lk-cash-list .am{white-space:nowrap;font-weight:700}'
     +'#lk-cash-adj{margin:4px 16px 16px;padding:9px;border:1px dashed #ccc;border-radius:9px;text-align:center;font-size:13px;color:#666;cursor:pointer}'
     +'#lk-cash-adj:hover{background:#fafafa}'
@@ -3055,71 +3084,78 @@ function __sdPageMain() {
     document.head.appendChild(s);
   }
 
+  function syncModeUI(){
+    var box=document.getElementById('lk-cash-box'); if(!box) return;
+    box.querySelectorAll('#lk-cash-modes button').forEach(function(b){
+      b.classList.toggle('on', b.getAttribute('data-m')===mode);
+    });
+    box.querySelector('#lk-cash-range').classList.toggle('show', mode==='range');
+    box.querySelector('#lk-cash-nav').style.display = (mode==='range')?'none':'flex';
+  }
+
   async function render(){
     var box=document.getElementById('lk-cash-box'); if(!box) return;
-    var sel=ymd(cur);
-    box.querySelector('#lk-cash-day').textContent=dstr(sel);
+    syncModeUI();
+    if(mode==='range' && !(rangeFrom&&rangeTo)){
+      box.querySelector('#lk-cash-body').innerHTML='<div style="padding:18px 16px;color:#888;font-size:14px">Оберіть дати «від» і «до» та натисніть «Показати».</div>';
+      return;
+    }
+    var span=currentSpan();
+    box.querySelector('#lk-cash-span').textContent=span.label;
     box.querySelector('#lk-cash-body').innerHTML='<div id="lk-cash-load">Рахую…</div>';
 
     var base=await getBaseline();
     if(!base){
       box.querySelector('#lk-cash-body').innerHTML=
-        '<div style="padding:18px 16px;color:#555;font-size:14px;line-height:1.5">'
-        +'Стартовий залишок каси ще не задано.<br>Порахуйте готівку в коробці й натисніть нижче — далі залишок рахуватиметься сам.</div>'
+        '<div style="padding:18px 16px;color:#555;font-size:14px;line-height:1.5">Стартовий залишок каси ще не задано.<br>Порахуйте готівку в коробці й натисніть нижче.</div>'
         +'<div id="lk-cash-adj">➕ Задати поточний залишок каси</div>';
-      box.querySelector('#lk-cash-adj').onclick=adjust;
-      return;
+      box.querySelector('#lk-cash-adj').onclick=adjust; return;
+    }
+    var bdate=String(base.date).slice(0,10);
+
+    // Залишок завжди накопичувально від стартової точки до КІНЦЯ періоду
+    var balFrom=bdate, balTo=span.to;
+    var balanceTxt;
+    if(span.to<bdate){
+      balanceTxt='<div style="padding:2px 16px 8px;color:#999;font-size:13px">Період раніше за стартову точку каси ('+dstr(bdate)+') — залишок не рахується.</div>';
+    } else {
+      var balOrders=await fetchOrders(balFrom,balTo);
+      var balOut=await fetchOutcoming(balFrom,balTo);
+      var cashCum=0; balOrders.forEach(function(o){ if(payId(o)===CASH_ID) cashCum+=amount(o); });
+      var balance=num(base.amount)+cashCum-balOut.sum;
+      balanceTxt='<div id="lk-cash-bal"><span class="l">💰 Готівка в касі<br><span class="sub">станом на '+dstr(span.to)+'</span></span><span class="v">'+fmt(balance)+'</span></div>';
     }
 
-    var from=String(base.date).slice(0,10);
-    if(sel<from){ // вибраний день раніше за стартову точку — рахувати нічого
-      box.querySelector('#lk-cash-body').innerHTML=
-        '<div style="padding:18px 16px;color:#999;font-size:14px">Цей день раніше за стартову точку каси ('+dstr(from)+').</div>'
-        +'<div id="lk-cash-adj">⚙️ Скоригувати залишок ('+fmt(base.amount)+' на '+dstr(from)+')</div>';
-      box.querySelector('#lk-cash-adj').onclick=adjust;
-      return;
-    }
-
-    var orders=await fetchOrders(from,sel);
-    var out=await fetchOutcoming(from,sel);
-
-    // накопичувально від стартової точки до вибраного дня
-    var cashCum=0;
-    orders.forEach(function(o){ if(payId(o)===CASH_ID) cashCum+=amount(o); });
-    var balance=num(base.amount)+cashCum-out.sum;
-
-    // за вибраний день
-    var dayCash=0,dayCashN=0,dayCard=0,dayCardN=0,dayRows=[];
+    // Обороти за вибраний період
+    var orders=await fetchOrders(span.from,span.to);
+    var out=await fetchOutcoming(span.from,span.to);
+    var pCash=0,pCashN=0,pCard=0,pCardN=0,rows=[];
     orders.forEach(function(o){
-      if(payDate(o)!==sel) return;
-      var p=payId(o), a=amount(o);
-      if(p===CASH_ID){ dayCash+=a; dayCashN++; }
-      else if(p===CARD_ID){ dayCard+=a; dayCardN++; }
-      if(p===CASH_ID||p===CARD_ID){
-        var ic=p===CASH_ID?'💵':'💳';
-        dayRows.push('<a href="/ua/index.html?formId=1#/order/update/'+o.id+'"><span class="nm">'+ic+' №'+o.id+' · '+clientName(o)+'</span><span class="am">'+fmt(a)+'</span></a>');
-      }
+      var p=payId(o), a=amount(o), d=payDate(o);
+      if(p===CASH_ID){ pCash+=a; pCashN++; } else if(p===CARD_ID){ pCard+=a; pCardN++; } else return;
+      var ic=p===CASH_ID?'💵':'💳';
+      var dd=(span.from!==span.to)?'<span class="dt">'+dstr(d)+'</span>':'';
+      rows.push('<a href="/ua/index.html?formId=1#/order/update/'+o.id+'"><span class="nm">'+dd+ic+' №'+o.id+' · '+clientName(o)+'</span><span class="am">'+fmt(a)+'</span></a>');
     });
-    var dayOut=out.items.filter(function(x){ return x.date===sel; });
-    var dayOutSum=dayOut.reduce(function(s,x){ return s+x.amount; },0);
-
+    var multi=(span.from!==span.to);
     var outHtml='';
-    if(dayOut.length){
-      outHtml='<div id="lk-cash-out-list">'+dayOut.map(function(x){
-        return '<div class="it"><span class="cm">📤 '+(x.comment||'видаток №'+x.number)+'</span><span class="am">−'+fmt(x.amount)+'</span></div>';
+    if(out.items.length){
+      outHtml='<div id="lk-cash-out-list">'+out.items.map(function(x){
+        var dd=multi?'<span class="dt">'+dstr(x.date)+'</span>':'';
+        return '<div class="it"><span class="cm">'+dd+'📤 '+(x.comment||'видаток №'+x.number)+'</span><span class="am">−'+fmt(x.amount)+'</span></div>';
       }).join('')+'</div>';
     }
 
     box.querySelector('#lk-cash-body').innerHTML=
-      '<div id="lk-cash-bal"><span class="l">💰 Готівка в касі<br><span class="sub">станом на '+dstr(sel)+'</span></span><span class="v">'+fmt(balance)+'</span></div>'
+      balanceTxt
       +'<div id="lk-cash-day-sum">'
-      +' <div class="row cash"><span class="lbl">💵 Готівка продажі <span class="cnt">'+dayCashN+' зам.</span></span><span class="val">'+fmt(dayCash)+'</span></div>'
-      +' <div class="row card"><span class="lbl">💳 Термінал <span class="cnt">'+dayCardN+' зам.</span></span><span class="val">'+fmt(dayCard)+'</span></div>'
-      +(dayOut.length?' <div class="row out"><span class="lbl">📤 Видатки <span class="cnt">'+dayOut.length+' шт.</span></span><span class="val">−'+fmt(dayOutSum)+'</span></div>':'')
+      +' <div class="row cash"><span class="lbl">💵 Готівка продажі <span class="cnt">'+pCashN+' зам.</span></span><span class="val">'+fmt(pCash)+'</span></div>'
+      +' <div class="row card"><span class="lbl">💳 Термінал <span class="cnt">'+pCardN+' зам.</span></span><span class="val">'+fmt(pCard)+'</span></div>'
+      +(out.items.length?' <div class="row out"><span class="lbl">📤 Видатки <span class="cnt">'+out.items.length+' шт.</span></span><span class="val">−'+fmt(out.sum)+'</span></div>':'')
       +'</div>'
       +outHtml
-      +'<div id="lk-cash-list"><div class="ttl">Замовлення за день ('+(dayCashN+dayCardN)+')</div>'+(dayRows.join('')||'<div style="color:#999;padding:6px 0">Немає</div>')+'</div>'
-      +'<div id="lk-cash-adj">⚙️ Скоригувати залишок (зараз '+fmt(base.amount)+' від '+dstr(from)+')</div>';
+      +'<div id="lk-cash-list"><div class="ttl">Замовлення за період ('+(pCashN+pCardN)+')</div>'+(rows.join('')||'<div style="color:#999;padding:6px 0">Немає</div>')+'</div>'
+      +'<div id="lk-cash-adj">⚙️ Скоригувати залишок (зараз '+fmt(base.amount)+' від '+dstr(bdate)+')</div>';
     box.querySelector('#lk-cash-adj').onclick=adjust;
   }
 
@@ -3130,26 +3166,47 @@ function __sdPageMain() {
     if(isNaN(n)){ alert('Введіть число.'); return; }
     var box=document.getElementById('lk-cash-box');
     if(box) box.querySelector('#lk-cash-body').innerHTML='<div id="lk-cash-load">Зберігаю…</div>';
-    try{ await setBaseline(n); cur=new Date(); await render(); }
+    try{ await setBaseline(n); mode='day'; anchor=new Date(); await render(); }
     catch(e){ alert('Не вдалося зберегти: '+e.message); render(); }
+  }
+
+  function setMode(m){
+    mode=m;
+    if(m!=='range'){ anchor=new Date(); }
+    render();
   }
 
   function open(){
     ensureStyles();
     if(document.getElementById('lk-cash-ov')) return;
+    var today=ymd(new Date());
     var ov=document.createElement('div'); ov.id='lk-cash-ov';
     ov.innerHTML=''
      +'<div id="lk-cash-box">'
-     +' <div class="h"><b>💰 Каса самовивозу</b><button class="x">&times;</button></div>'
-     +' <div id="lk-cash-nav"><button class="prev">‹</button><span id="lk-cash-day"></span><button class="next">›</button><button class="today">сьогодні</button></div>'
+     +' <div class="h"><b>💰 Каса самовивозу</b><div><button class="rf" title="Оновити" style="border:none;background:none;font-size:18px;cursor:pointer;color:#888;margin-right:6px">🔄</button><button class="x">&times;</button></div></div>'
+     +' <div id="lk-cash-modes">'
+     +'   <button data-m="day">День</button><button data-m="week">Тиждень</button>'
+     +'   <button data-m="month">Місяць</button><button data-m="range">Період</button>'
+     +' </div>'
+     +' <div id="lk-cash-range"><label>від <input type="date" id="lk-rf" value="'+today+'"></label><label>до <input type="date" id="lk-rt" value="'+today+'"></label><button class="go">Показати</button></div>'
+     +' <div id="lk-cash-nav"><button class="prev">‹</button><span id="lk-cash-span"></span><button class="next">›</button><button class="today">зараз</button></div>'
      +' <div id="lk-cash-body"></div>'
      +'</div>';
     document.body.appendChild(ov);
     ov.addEventListener('click',function(e){ if(e.target===ov) ov.remove(); });
     ov.querySelector('.x').onclick=function(){ ov.remove(); };
-    ov.querySelector('.prev').onclick=function(){ cur.setDate(cur.getDate()-1); render(); };
-    ov.querySelector('.next').onclick=function(){ cur.setDate(cur.getDate()+1); render(); };
-    ov.querySelector('.today').onclick=function(){ cur=new Date(); render(); };
+    ov.querySelector('.rf').onclick=function(){ render(); };
+    ov.querySelectorAll('#lk-cash-modes button').forEach(function(b){
+      b.onclick=function(){ setMode(b.getAttribute('data-m')); };
+    });
+    ov.querySelector('.go').onclick=function(){
+      rangeFrom=ov.querySelector('#lk-rf').value; rangeTo=ov.querySelector('#lk-rt').value;
+      if(!rangeFrom||!rangeTo){ alert('Оберіть обидві дати.'); return; }
+      render();
+    };
+    ov.querySelector('.prev').onclick=function(){ shift(-1); render(); };
+    ov.querySelector('.next').onclick=function(){ shift(1); render(); };
+    ov.querySelector('.today').onclick=function(){ anchor=new Date(); render(); };
     render();
   }
 
@@ -3157,7 +3214,7 @@ function __sdPageMain() {
     if(document.getElementById('lk-cash-btn')) return;
     ensureStyles();
     var b=document.createElement('button'); b.id='lk-cash-btn'; b.textContent='💰'; b.title='Каса самовивозу';
-    b.onclick=function(){ cur=new Date(); open(); };
+    b.onclick=function(){ mode='day'; anchor=new Date(); open(); };
     document.body.appendChild(b);
   }
   setInterval(addBtn,1500); addBtn();
