@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.10
+// @version      1.11
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -491,16 +491,23 @@ var UPSELL_MAP_DATA = [
 
   // ---- аналоги (окрема таблиця): якір -> список товарів-замін ----
   var ANALOG_GROUPS = [];
-  // карта «код якоря -> [аналоги]» для інлайн-значка в рядку товару
+  // карта «код товару -> [аналоги]» (ВЗАЄМНА) для інлайн-значка в рядку товару
   function buildAnalogBySku(pairs) {
     var m = {};
+    function add(key, item) {
+      key = String(key || "").trim();
+      if (!key || !item.sku) return;
+      if (!m[key]) m[key] = [];
+      if (m[key].some(function (it) { return it.sku === item.sku; })) return;
+      m[key].push(item);
+    }
     (pairs || []).forEach(function (p) {
-      var ak = String((p && p.ak) || "").trim();
-      var sku = String((p && p.sku) || "").trim();
+      var ak = String((p && p.ak) || "").trim();   // код якоря
+      var sku = String((p && p.sku) || "").trim(); // код аналога
       if (!ak || !sku) return;
-      if (!m[ak]) m[ak] = [];
-      if (m[ak].some(function (it) { return it.sku === sku; })) return;
-      m[ak].push({ sku: sku, c: String(p.c || ""), s: String(p.s || "") });
+      // взаємно: на якорі показуємо аналог, на аналозі — якір
+      add(ak, { sku: sku, c: String(p.c || ""), s: String(p.s || "") });
+      add(sku, { sku: ak, c: String(p.a || ""), s: String(p.s || "") });
     });
     return m;
   }
