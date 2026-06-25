@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.03
+// @version      1.04
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -3060,28 +3060,28 @@ function __sdPageMain() {
 (function lkUpsellRedesign() {
   'use strict';
   var css = ''
-    // контейнер: легший, вужчий, мʼяка тінь, системний шрифт
-    + '#sd-upsell-hint{padding:12px 40px 12px 14px;max-width:740px;'
+    // контейнер: вужчий і витягнутий по вертикалі (краще довгий, ніж широкий)
+    + '#sd-upsell-hint{padding:14px 40px 14px 14px;max-width:480px;'
     + '  background:#FFFDF6;border:1px solid #F0CE72;border-left:5px solid #F0A800;'
     + '  border-radius:13px;box-shadow:0 8px 24px rgba(0,0,0,.09);'
     + '  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif}'
-    // рядок товару: тонкий розділювач замість жирного пунктиру, менші відступи
-    + '#sd-upsell-hint .sd-item{gap:7px 12px;padding:11px 0;margin-top:0;'
+    // рядок товару: більше «повітря» по вертикалі → карта довша
+    + '#sd-upsell-hint .sd-item{gap:9px 12px;padding:16px 0;margin-top:0;'
     + '  border-top:1px solid rgba(0,0,0,.07)}'
-    + '#sd-upsell-hint .sd-item:first-of-type{border-top:none;padding-top:2px}'
+    + '#sd-upsell-hint .sd-item:first-of-type{border-top:none;padding-top:4px}'
     // фото
     + '#sd-upsell-hint .sd-comp-img{width:42px;height:42px;border-radius:9px;border:1px solid #ece0bf}'
-    // середня колонка
-    + '#sd-upsell-hint .sd-main{flex:1 1 280px;gap:4px}'
+    // середня колонка: вужча основа → текст переноситься на більше рядків (вище)
+    + '#sd-upsell-hint .sd-main{flex:1 1 210px;gap:6px}'
     + '#sd-upsell-hint .sd-name{font-size:11.5px;font-weight:700;letter-spacing:.3px;'
     + '  color:#9b7d23;line-height:1.25;margin:0;text-transform:uppercase}'
     + '#sd-upsell-hint .sd-say{display:inline-block;font-size:10px;font-weight:800;'
     + '  letter-spacing:.5px;text-transform:uppercase;color:#2E7D32;margin:0}'
     + '#sd-upsell-hint .sd-say::before{content:"💬 "}'
     // головний акцент — репліка, але компактніше
-    + '#sd-upsell-hint .sd-script{font-size:14px;font-weight:500;line-height:1.4;color:#1f2d17;'
+    + '#sd-upsell-hint .sd-script{font-size:14px;font-weight:500;line-height:1.5;color:#1f2d17;'
     + '  background:#fff;border:1px solid #dcebd6;border-left:3px solid #2E7D32;'
-    + '  border-radius:9px;padding:8px 11px;overflow-wrap:anywhere;box-shadow:none}'
+    + '  border-radius:9px;padding:10px 13px;overflow-wrap:anywhere;box-shadow:none}'
     // бейдж залишку — пігулка
     + '#sd-upsell-hint .sd-stock{font-size:11px;font-weight:600;padding:3px 9px;border-radius:999px}'
     // права колонка
