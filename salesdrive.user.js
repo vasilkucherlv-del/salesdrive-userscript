@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.08
+// @version      1.09
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -104,12 +104,13 @@
     for (var i = 0; i < rows.length; i++) {
       var c = rows[i].c || [];
       // колонки: 0=код якоря, 1=назва якоря, 2=код аналога, 3=назва аналога, 4=примітка
+      var anchorCode = cellText(c[0]);
       var anchorName = cellText(c[1]);
       var compCode = cellText(c[2]);
       var compName = cellText(c[3]);
       var script = cellText(c[4]);
       if (!anchorName || !compCode) continue;
-      out.push({ a: anchorName, sku: compCode, c: compName, s: script });
+      out.push({ ak: anchorCode, a: anchorName, sku: compCode, c: compName, s: script });
     }
     return out;
   }
@@ -490,6 +491,19 @@ var UPSELL_MAP_DATA = [
 
   // ---- аналоги (окрема таблиця): якір -> список товарів-замін ----
   var ANALOG_GROUPS = [];
+  // карта «код якоря -> [аналоги]» для інлайн-значка в рядку товару
+  function buildAnalogBySku(pairs) {
+    var m = {};
+    (pairs || []).forEach(function (p) {
+      var ak = String((p && p.ak) || "").trim();
+      var sku = String((p && p.sku) || "").trim();
+      if (!ak || !sku) return;
+      if (!m[ak]) m[ak] = [];
+      if (m[ak].some(function (it) { return it.sku === sku; })) return;
+      m[ak].push({ sku: sku, c: String(p.c || ""), s: String(p.s || "") });
+    });
+    return m;
+  }
   function requestAnalogSheet(force) {
     try {
       chrome.runtime.sendMessage(
@@ -498,6 +512,11 @@ var UPSELL_MAP_DATA = [
           if (chrome.runtime.lastError) return;
           if (resp && resp.pairs && resp.pairs.length) {
             ANALOG_GROUPS = buildGroups(resp.pairs);
+            // міст для інлайн-модуля: карта код якоря -> аналоги
+            try {
+              BUS.__sdAnalogBySku = buildAnalogBySku(resp.pairs);
+              BUS.dispatchEvent(new Event("sdAnalogReady"));
+            } catch (e) {}
             console.log(
               "[SalesDrive Аналоги] карта з таблиці:",
               resp.pairs.length, "пар,",
@@ -2865,6 +2884,152 @@ function __sdPageMain() {
 })();
 
 
+/* ===== Інлайн-значок «🔁 аналог» у рядку товару (праворуч від «+» комплектів) ===== */
+(function lkAnalogInline() {
+  'use strict';
+  var PAGE = (typeof unsafeWindow !== 'undefined' && unsafeWindow) || window;
+
+  var css = ''
+    + '.lkan-plus{display:inline-flex;align-items:center;justify-content:center;height:17px;'
+    + '  margin-left:8px;padding:0 7px;border-radius:9px;background:#00897B;color:#fff;'
+    + '  font:700 11px/1 sans-serif;cursor:pointer;vertical-align:middle;user-select:none;white-space:nowrap}'
+    + '.lkan-plus:hover{background:#00695C}'
+    + '.lkan-exp{margin:5px 0 3px;padding:8px 11px;border-left:3px solid #00897B;background:#f2fbfa;'
+    + '  border-radius:6px;font:12px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;color:#0f3d39}'
+    + '.lkan-exp .h{color:#00695c;font-weight:700;margin-bottom:5px;text-transform:uppercase;'
+    + '  letter-spacing:.3px;font-size:11px}'
+    + '.lkan-exp .r{padding:4px 0;display:flex;flex-wrap:wrap;align-items:center;gap:8px}'
+    + '.lkan-exp .r+.r{border-top:1px dashed rgba(0,137,123,.25)}'
+    + '.lkan-exp .r .nm{color:#0f2b29;font-weight:600;flex:1 1 180px;min-width:0}'
+    + '.lkan-exp .r .code{color:#00695c;font:700 11px/1 ui-monospace,Menlo,Consolas,monospace}'
+    + '.lkan-exp .r .s{flex-basis:100%;color:#3a5e5a;font-style:italic;font-size:11.5px}'
+    + '.lkan-add{border:none;border-radius:6px;background:#00897B;color:#fff;font:700 11px/1 sans-serif;'
+    + '  padding:6px 10px;cursor:pointer;white-space:nowrap}'
+    + '.lkan-add:hover{background:#00695c}'
+    + '.lkan-add.done{background:#9e9e9e;cursor:default}';
+  var st = document.createElement('style'); st.textContent = css;
+  (document.head || document.documentElement).appendChild(st);
+
+  var BYSKU = PAGE.__sdAnalogBySku || null;
+  PAGE.addEventListener('sdAnalogReady', function () {
+    BYSKU = PAGE.__sdAnalogBySku || BYSKU;
+    scanSoon();
+  });
+
+  function extractSku(cell) {
+    var sku = '';
+    cell.querySelectorAll('span').forEach(function (sp) {
+      var m = sp.textContent.trim().match(/^\(([\w\-]+)\)$/);
+      if (m) sku = m[1];
+    });
+    return sku;
+  }
+
+  function addAnalog(code, btn) {
+    if (!code || btn.classList.contains('done')) return;
+    try {
+      document.documentElement.setAttribute('data-sd-upsell-code', String(code));
+      document.documentElement.removeAttribute('data-sd-upsell-result');
+      PAGE.dispatchEvent(new Event('sdUpsellAdd'));
+    } catch (e) {}
+    btn.classList.add('done');
+    btn.textContent = '✓ Додано';
+  }
+
+  function inject(cell, list) {
+    var skuSpan = [].slice.call(cell.querySelectorAll('span')).reverse()
+      .find(function (sp) { return /^\([\w\-]+\)$/.test(sp.textContent.trim()); });
+
+    var plus = document.createElement('span');
+    plus.className = 'lkan-plus';
+    plus.textContent = '🔁 аналог';
+    plus.title = 'Показати аналог-заміну';
+
+    var exp = document.createElement('div');
+    exp.className = 'lkan-exp';
+    exp.style.display = 'none';
+
+    var head = document.createElement('div');
+    head.className = 'h';
+    head.textContent = 'Аналог / заміна:';
+    exp.appendChild(head);
+
+    list.forEach(function (it) {
+      var r = document.createElement('div');
+      r.className = 'r';
+
+      var nm = document.createElement('span');
+      nm.className = 'nm';
+      nm.textContent = it.c || ('код ' + it.sku);
+      r.appendChild(nm);
+
+      var code = document.createElement('span');
+      code.className = 'code';
+      code.textContent = '(' + it.sku + ')';
+      r.appendChild(code);
+
+      var add = document.createElement('button');
+      add.className = 'lkan-add';
+      add.type = 'button';
+      add.textContent = '➕ Додати';
+      add.addEventListener('click', function (e) {
+        e.preventDefault(); e.stopPropagation();
+        addAnalog(it.sku, add);
+      });
+      r.appendChild(add);
+
+      if (it.s) {
+        var s = document.createElement('span');
+        s.className = 's';
+        s.textContent = it.s;
+        r.appendChild(s);
+      }
+      exp.appendChild(r);
+    });
+
+    plus.addEventListener('click', function (e) {
+      e.preventDefault(); e.stopPropagation();
+      var open = exp.style.display !== 'none';
+      exp.style.display = open ? 'none' : 'block';
+    });
+
+    // ставимо одразу ПРАВОРУЧ від помаранчевого «+» комплектів (якщо є), інакше — після коду
+    var orange = cell.querySelector('.lknb-plus');
+    if (orange) orange.insertAdjacentElement('afterend', plus);
+    else if (skuSpan) skuSpan.insertAdjacentElement('afterend', plus);
+    else cell.appendChild(plus);
+    cell.appendChild(exp);
+  }
+
+  function processCell(cell) {
+    if (!BYSKU) return;
+    var sku = extractSku(cell);
+    var list = sku ? BYSKU[sku] : null;
+    var should = !!(list && list.length);
+    var hasPlus = !!cell.querySelector('.lkan-plus');
+    var prev = cell.getAttribute('data-lkan');
+    if (prev === (sku || '') && hasPlus === should) return;
+    cell.querySelectorAll('.lkan-plus,.lkan-exp').forEach(function (n) { n.remove(); });
+    cell.setAttribute('data-lkan', sku || '');
+    if (should) inject(cell, list);
+  }
+
+  function scan() {
+    if (!BYSKU) return;
+    document.querySelectorAll('a.link-product-field').forEach(function (a) {
+      var cell = a.closest('.editing-hide') || a.parentElement;
+      if (cell) processCell(cell);
+    });
+  }
+
+  var t = null;
+  function scanSoon() { clearTimeout(t); t = setTimeout(scan, 250); }
+
+  scan();
+  new MutationObserver(scanSoon).observe(document.body, { childList: true, subtree: true });
+})();
+
+
 /* ===== Картка товару (модалка): рядок «Входить у набори» (джерело: баркод, ключ — ID) ===== */
 (function lkModalKits() {
   'use strict';
@@ -3061,7 +3226,7 @@ function __sdPageMain() {
   'use strict';
   var css = ''
     // контейнер: тягнеться вправо на всю ширину, тонкий, невеликі поля
-    + '#sd-upsell-hint{padding:9px 36px 9px 12px;max-width:none;width:100%;'
+    + '#sd-upsell-hint{padding:9px 36px 9px 12px;max-width:none;width:100%;margin:10px 0 6px 0;'
     + '  background:#FFFDF6;border:1px solid #F0CE72;border-left:5px solid #F0A800;'
     + '  border-radius:11px;box-shadow:0 6px 18px rgba(0,0,0,.08);'
     + '  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif}'
@@ -3657,7 +3822,7 @@ function __sdPageMain() {
   'use strict';
   var css = ''
     + '#sd-analog-hint{position:relative;box-sizing:border-box;width:100%;'
-    + '  max-width:none;margin:10px 0 14px 0;'
+    + '  max-width:none;margin:6px 0 14px 0;'
     + '  padding:9px 36px 9px 12px;background:#F2FBFA;border:1px solid #7FCBC2;'
     + '  border-left:5px solid #00897B;border-radius:11px;'
     + '  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;'
