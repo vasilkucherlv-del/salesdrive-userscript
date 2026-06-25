@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.13
+// @version      1.14
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -3524,10 +3524,11 @@ function __sdPageMain() {
     try{ var t=await gmGet(BARCODE_URL+'/api/cash-baseline?token='+encodeURIComponent(BARCODE_TOKEN));
       var d=JSON.parse(t); return d&&d.ok?d.baseline:null; }catch(e){ return null; }
   }
-  async function setBaseline(amount,pin){
-    // зберігаємо МОМЕНТ перерахунку (дата+час); ts — резерв, якщо сервер обріже date
+  async function setBaseline(amount,pin,lastId,lastOutId){
+    // зберігаємо МОМЕНТ перерахунку (дата+час) + «водяні знаки» останніх номерів
+    // (замовлення та видаткового ордера) — щоб відсікати за номером, а не за часом
     var nowStr=ymdhms(new Date());
-    var body={amount:amount,date:nowStr,ts:nowStr,by:'',pin:pin};
+    var body={amount:amount,date:nowStr,ts:nowStr,lastId:lastId||0,lastOutId:lastOutId||0,by:'',pin:pin};
     var t=await gmPost(BARCODE_URL+'/api/cash-baseline?token='+encodeURIComponent(BARCODE_TOKEN),body);
     var d=JSON.parse(t); if(!d.ok) throw new Error(d.error||'err'); return d.baseline;
   }
@@ -3709,7 +3710,9 @@ function __sdPageMain() {
       box.querySelector('#lk-cash-adj').onclick=adjust; return;
     }
     var bdate=String(base.date).slice(0,10);
-    var bts=dtnorm(base.ts||base.date); // МОМЕНТ перерахунку (дата+час) для відсікання
+    var bts=dtnorm(base.ts||base.date);        // резерв: момент перерахунку (для старих точок без номерів)
+    var lastId=num(base.lastId);               // останній № замовлення на момент перерахунку
+    var lastOutId=num(base.lastOutId);         // останній № видаткового ордера
 
     // ── Один запит на обʼєднаний діапазон, далі рахуємо і залишок, і період ──
     var hasBal=(span.to>=bdate);
@@ -3731,10 +3734,16 @@ function __sdPageMain() {
     if(!hasBal){
       balanceTxt='<div style="padding:2px 16px 8px;color:#999;font-size:13px">Період раніше за стартову точку каси ('+dstr(bdate)+') — залишок не рахується.</div>';
     } else {
-      // рахуємо лише те, що сталося ПІСЛЯ моменту перерахунку (за часом, не лише датою),
-      // інакше сьогоднішні продажі/видатки до перерахунку зарахувались би двічі
-      var cashCum=0; allOrders.forEach(function(o){ if(payId(o)===CASH_ID && dtnorm(o.paymentDate)>bts) cashCum+=amount(o); });
-      var outCum=0; allOut.items.forEach(function(x){ if(dtnorm(x.ts||x.date)>bts) outCum+=x.amount; });
+      // рахуємо лише те, що зʼявилося ПІСЛЯ моменту перерахунку.
+      // У день перерахунку відсікаємо за НОМЕРОМ (надійно, не залежить від часу оплати);
+      // для днів після — беремо все; для старих точок без номера — резерв за часом.
+      function afterBase(d, id, lastNo){
+        if(d<bdate) return false;          // раніше за день перерахунку
+        if(d>bdate) return true;           // наступні дні — все
+        return lastNo>0 ? (Number(id)>lastNo) : (dtnorm(d)>bts); // день перерахунку
+      }
+      var cashCum=0; allOrders.forEach(function(o){ if(payId(o)===CASH_ID && afterBase(payDate(o),o.id,lastId)) cashCum+=amount(o); });
+      var outCum=0; allOut.items.forEach(function(x){ if(afterBase(x.date,x.id,lastOutId)) outCum+=x.amount; });
       var balance=num(base.amount)+cashCum-outCum;
       balanceTxt='<div id="lk-cash-bal"><span class="l">💰 Готівка в касі<br><span class="sub">станом на '+dstr(span.to)+'</span></span><span class="v">'+fmt(balance)+'</span></div>';
     }
@@ -3785,7 +3794,14 @@ function __sdPageMain() {
     if(pin==null) return;
     var box=document.getElementById('lk-cash-box');
     if(box) box.querySelector('#lk-cash-body').innerHTML='<div id="lk-cash-load">Зберігаю…</div>';
-    try{ await setBaseline(n,pin); mode='day'; anchor=new Date(); await render(); }
+    try{
+      // запамʼятовуємо останні номери на момент коригування (сьогоднішні)
+      var today=ymd(new Date());
+      var wm=await Promise.all([fetchOrders(today,today), fetchOutcoming(today,today)]);
+      var maxId=0; wm[0].forEach(function(o){ var id=Number(o.id)||0; if(id>maxId) maxId=id; });
+      var maxOut=0; wm[1].items.forEach(function(x){ var id=Number(x.id)||0; if(id>maxOut) maxOut=id; });
+      await setBaseline(n,pin,maxId,maxOut); mode='day'; anchor=new Date(); await render();
+    }
     catch(e){
       if(/HTTP 403|bad pin/.test(e.message)) alert('Невірний PIN — залишок не змінено.');
       else alert('Не вдалося зберегти: '+e.message);
