@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.11
+// @version      1.12
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -725,6 +725,11 @@ var UPSELL_MAP_DATA = [
   // Банер аналогів-замін. Структура й логіка — як у showHint (допродаж),
   // але окремий банер (#sd-analog-hint) і свій підпис «аналог/заміна».
   function showAnalogHint(items, headerText, opts) {
+    // Банер аналогів вимкнено: аналоги показуються інлайн-значком «🔁 аналог»
+    // прямо в рядку товару (модуль lkAnalogInline). Нижній банер більше не потрібен.
+    removeAnalogHint();
+    return;
+    /* eslint-disable no-unreachable */
     if (/\/document\/arrival-product\//.test(location.hash || "")) { removeAnalogHint(); return; }
     opts = opts || {};
     removeAnalogHint();
