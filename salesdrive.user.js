@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.02
+// @version      1.03
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -3056,21 +3056,44 @@ function __sdPageMain() {
   })();
 })();
 
-/* ===== Новий вигляд картки допродажу: скрипт-репліка = головний акцент ===== */
+/* ===== Компактний сучасний вигляд картки допродажу ===== */
 (function lkUpsellRedesign() {
   'use strict';
   var css = ''
-    + '#sd-upsell-hint{padding-top:30px !important}'
-    + '#sd-upsell-hint .sd-item{gap:10px 14px}'
-    + '#sd-upsell-hint .sd-name{font-size:12.5px;font-weight:700;letter-spacing:.2px;'
-    + '  color:#6b5e2a;line-height:1.3;margin-bottom:0;text-transform:uppercase}'
-    + '#sd-upsell-hint .sd-say{display:inline-block;font-size:11px;font-weight:800;'
-    + '  letter-spacing:.5px;text-transform:uppercase;color:#2E7D32;margin:2px 0 3px 0}'
+    // контейнер: легший, вужчий, мʼяка тінь, системний шрифт
+    + '#sd-upsell-hint{padding:12px 40px 12px 14px;max-width:740px;'
+    + '  background:#FFFDF6;border:1px solid #F0CE72;border-left:5px solid #F0A800;'
+    + '  border-radius:13px;box-shadow:0 8px 24px rgba(0,0,0,.09);'
+    + '  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif}'
+    // рядок товару: тонкий розділювач замість жирного пунктиру, менші відступи
+    + '#sd-upsell-hint .sd-item{gap:7px 12px;padding:11px 0;margin-top:0;'
+    + '  border-top:1px solid rgba(0,0,0,.07)}'
+    + '#sd-upsell-hint .sd-item:first-of-type{border-top:none;padding-top:2px}'
+    // фото
+    + '#sd-upsell-hint .sd-comp-img{width:42px;height:42px;border-radius:9px;border:1px solid #ece0bf}'
+    // середня колонка
+    + '#sd-upsell-hint .sd-main{flex:1 1 280px;gap:4px}'
+    + '#sd-upsell-hint .sd-name{font-size:11.5px;font-weight:700;letter-spacing:.3px;'
+    + '  color:#9b7d23;line-height:1.25;margin:0;text-transform:uppercase}'
+    + '#sd-upsell-hint .sd-say{display:inline-block;font-size:10px;font-weight:800;'
+    + '  letter-spacing:.5px;text-transform:uppercase;color:#2E7D32;margin:0}'
     + '#sd-upsell-hint .sd-say::before{content:"💬 "}'
-    + '#sd-upsell-hint .sd-script{font-size:16.5px;font-weight:600;line-height:1.5;color:#16240f;'
-    + '  background:#ffffff;border:1px solid #bfe0c1;border-left:5px solid #2E7D32;'
-    + '  border-radius:9px;padding:11px 14px;overflow-wrap:anywhere;'
-    + '  box-shadow:0 1px 4px rgba(46,125,50,.12)}';
+    // головний акцент — репліка, але компактніше
+    + '#sd-upsell-hint .sd-script{font-size:14px;font-weight:500;line-height:1.4;color:#1f2d17;'
+    + '  background:#fff;border:1px solid #dcebd6;border-left:3px solid #2E7D32;'
+    + '  border-radius:9px;padding:8px 11px;overflow-wrap:anywhere;box-shadow:none}'
+    // бейдж залишку — пігулка
+    + '#sd-upsell-hint .sd-stock{font-size:11px;font-weight:600;padding:3px 9px;border-radius:999px}'
+    // права колонка
+    + '#sd-upsell-hint .sd-action{width:118px;gap:6px}'
+    + '#sd-upsell-hint .sd-price{padding:4px 6px;border-radius:9px}'
+    + '#sd-upsell-hint .sd-price-lab{font-size:10px}'
+    + '#sd-upsell-hint .sd-price-val{font-size:17px;font-weight:800}'
+    + '#sd-upsell-hint .sd-add{padding:8px 10px;font-size:13px;font-weight:700;border-radius:9px;'
+    + '  display:flex;align-items:center;justify-content:center;gap:5px;flex-wrap:wrap;line-height:1.2}'
+    + '#sd-upsell-hint .sd-sku{font-size:11px;padding:1px 6px;margin-left:0;border-radius:5px;'
+    + '  background:rgba(255,255,255,.22)}'
+    + '#sd-upsell-hint .sd-x{top:7px;right:11px;font-size:19px}';
   var st = document.createElement('style');
   st.textContent = css;
   (document.head || document.documentElement).appendChild(st);
@@ -3634,50 +3657,52 @@ function __sdPageMain() {
   'use strict';
   var css = ''
     + '#sd-analog-hint{position:relative;box-sizing:border-box;width:100%;'
-    + '  min-width:min(560px,100%);max-width:980px;margin:10px 0 14px 0;'
-    + '  padding:14px 44px 16px 18px;background:#E8F5F4;border:2px solid #00897B;'
-    + '  border-left:7px solid #00897B;border-radius:10px;font-family:Arial,sans-serif;'
-    + '  color:#0f3d39;box-shadow:0 3px 12px rgba(0,0,0,.15);z-index:9999;animation:sdpop .18s ease-out}'
-    + '#sd-analog-hint .sd-top{font-size:13px;opacity:.9;font-weight:700;margin-bottom:8px;'
-    + '  color:#00695C;text-transform:uppercase;letter-spacing:.3px}'
-    + '#sd-analog-hint .sd-item{display:flex;flex-wrap:wrap;align-items:flex-start;gap:10px 14px;'
-    + '  padding:12px 0 2px 0;margin-top:12px;border-top:1px dashed rgba(0,137,123,.45)}'
-    + '#sd-analog-hint .sd-main{flex:1 1 300px;min-width:0;display:flex;flex-direction:column;'
-    + '  align-items:flex-start;gap:6px}'
-    + '#sd-analog-hint .sd-name{font-size:12.5px;font-weight:700;letter-spacing:.2px;color:#33514e;'
-    + '  line-height:1.3;text-transform:uppercase;overflow-wrap:anywhere}'
-    + '#sd-analog-hint .sd-say{display:inline-block;font-size:11px;font-weight:800;letter-spacing:.5px;'
-    + '  text-transform:uppercase;color:#00897B;margin:2px 0 3px 0}'
+    + '  min-width:min(540px,100%);max-width:740px;margin:10px 0 14px 0;'
+    + '  padding:12px 40px 12px 14px;background:#F2FBFA;border:1px solid #7FCBC2;'
+    + '  border-left:5px solid #00897B;border-radius:13px;'
+    + '  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;'
+    + '  color:#0f3d39;box-shadow:0 8px 24px rgba(0,0,0,.09);z-index:9999;animation:sdpop .18s ease-out}'
+    + '#sd-analog-hint .sd-top{font-size:11.5px;opacity:.95;font-weight:800;margin-bottom:6px;'
+    + '  color:#00695C;text-transform:uppercase;letter-spacing:.4px}'
+    + '#sd-analog-hint .sd-item{display:flex;flex-wrap:wrap;align-items:flex-start;gap:7px 12px;'
+    + '  padding:11px 0;margin-top:0;border-top:1px solid rgba(0,137,123,.16)}'
+    + '#sd-analog-hint .sd-main{flex:1 1 280px;min-width:0;display:flex;flex-direction:column;'
+    + '  align-items:flex-start;gap:4px}'
+    + '#sd-analog-hint .sd-name{font-size:11.5px;font-weight:700;letter-spacing:.3px;color:#3a5e5a;'
+    + '  line-height:1.25;text-transform:uppercase;overflow-wrap:anywhere}'
+    + '#sd-analog-hint .sd-say{display:inline-block;font-size:10px;font-weight:800;letter-spacing:.5px;'
+    + '  text-transform:uppercase;color:#00897B;margin:0}'
     + '#sd-analog-hint .sd-say::before{content:"🔁 "}'
-    + '#sd-analog-hint .sd-script{font-size:15px;font-weight:600;line-height:1.5;color:#0f2b29;'
-    + '  background:#fff;border:1px solid #9fd8d2;border-left:5px solid #00897B;border-radius:9px;'
-    + '  padding:10px 13px;overflow-wrap:anywhere;box-shadow:0 1px 4px rgba(0,137,123,.12)}'
-    + '#sd-analog-hint .sd-action{flex:0 0 auto;width:150px;max-width:100%;display:flex;'
-    + '  flex-direction:column;align-items:stretch;gap:8px}'
+    + '#sd-analog-hint .sd-script{font-size:14px;font-weight:500;line-height:1.4;color:#0f2b29;'
+    + '  background:#fff;border:1px solid #c8e7e2;border-left:3px solid #00897B;border-radius:9px;'
+    + '  padding:8px 11px;overflow-wrap:anywhere;box-shadow:none}'
+    + '#sd-analog-hint .sd-action{flex:0 0 auto;width:118px;max-width:100%;display:flex;'
+    + '  flex-direction:column;align-items:stretch;gap:6px}'
     + '#sd-analog-hint .sd-add{width:100%;box-sizing:border-box;white-space:normal;word-break:break-word;'
-    + '  text-align:center;padding:11px 14px;background:#00897B;color:#fff;border:none;border-radius:7px;'
-    + '  font-size:15px;font-weight:bold;cursor:pointer;font-family:Arial,sans-serif}'
+    + '  display:flex;align-items:center;justify-content:center;gap:5px;flex-wrap:wrap;line-height:1.2;'
+    + '  padding:8px 10px;background:#00897B;color:#fff;border:none;border-radius:9px;'
+    + '  font-size:13px;font-weight:700;cursor:pointer}'
     + '#sd-analog-hint .sd-add:hover{background:#00695C}'
     + '#sd-analog-hint .sd-add:active{transform:translateY(1px)}'
     + '#sd-analog-hint .sd-add.sd-done{background:#9e9e9e;cursor:default}'
     + '#sd-analog-hint .sd-add.sd-done:hover{background:#9e9e9e}'
-    + '#sd-analog-hint .sd-sku{background:rgba(255,255,255,.3);padding:2px 8px;border-radius:4px;'
-    + '  font-size:13px;margin-left:6px}'
-    + '#sd-analog-hint .sd-x{position:absolute;top:8px;right:12px;cursor:pointer;font-size:22px;'
+    + '#sd-analog-hint .sd-sku{background:rgba(255,255,255,.22);padding:1px 6px;border-radius:5px;'
+    + '  font-size:11px;margin-left:0}'
+    + '#sd-analog-hint .sd-x{position:absolute;top:7px;right:11px;cursor:pointer;font-size:19px;'
     + '  line-height:1;color:#00897B;border:none;background:none}'
     + '#sd-analog-hint .sd-x:hover{color:#004d40}'
-    + '#sd-analog-hint .sd-stock{flex:0 0 auto;max-width:100%;font-size:13px;font-weight:700;'
-    + '  padding:5px 10px;border-radius:6px;white-space:normal;overflow-wrap:anywhere}'
+    + '#sd-analog-hint .sd-stock{flex:0 0 auto;max-width:100%;font-size:11px;font-weight:600;'
+    + '  padding:3px 9px;border-radius:999px;white-space:normal;overflow-wrap:anywhere}'
     + '#sd-analog-hint .sd-stock-wait{background:#eee;color:#777;font-weight:normal}'
     + '#sd-analog-hint .sd-stock-yes{background:#E6F4EA;color:#1B5E20;border:1px solid #A5D6A7}'
     + '#sd-analog-hint .sd-stock-no{background:#FDECEA;color:#B71C1C;border:1px solid #F5B7B1}'
     + '#sd-analog-hint .sd-stock-unk{background:#f0f0f0;color:#777;font-weight:normal}'
-    + '#sd-analog-hint .sd-comp-img{flex:0 0 auto;width:48px;height:48px;object-fit:contain;'
-    + '  border:1px solid #9fd8d2;border-radius:6px;background:#fff}'
-    + '#sd-analog-hint .sd-price{background:#E8F0FE;border:1px solid #BBD3F5;border-radius:8px;'
-    + '  text-align:center;padding:6px 8px;box-sizing:border-box}'
-    + '#sd-analog-hint .sd-price-lab{font-size:11px;color:#4d6285;line-height:1.25}'
-    + '#sd-analog-hint .sd-price-val{font-size:21px;font-weight:800;color:#14418f;line-height:1.15;white-space:nowrap}'
+    + '#sd-analog-hint .sd-comp-img{flex:0 0 auto;width:42px;height:42px;object-fit:contain;'
+    + '  border:1px solid #b9ddd7;border-radius:9px;background:#fff}'
+    + '#sd-analog-hint .sd-price{background:#E8F0FE;border:1px solid #BBD3F5;border-radius:9px;'
+    + '  text-align:center;padding:4px 6px;box-sizing:border-box}'
+    + '#sd-analog-hint .sd-price-lab{font-size:10px;color:#4d6285;line-height:1.2}'
+    + '#sd-analog-hint .sd-price-val{font-size:17px;font-weight:800;color:#14418f;line-height:1.15;white-space:nowrap}'
     + 'html.sd-modal-open #sd-analog-hint{display:none !important}';
   var st = document.createElement('style');
   st.textContent = css;
