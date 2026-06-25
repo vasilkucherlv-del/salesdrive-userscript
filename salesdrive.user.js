@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.16
+// @version      1.17
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -3537,10 +3537,13 @@ function __sdPageMain() {
   function payId(o){ var v=o.payment_method!=null?o.payment_method:(o.paymentMethod!=null?o.paymentMethod:o.payment_method_id);
     var m=String(v==null?'':v).match(/(\d+)/); return m?parseInt(m[1],10):null; }
   // Сума замовлення (готівка, що надходить у касу).
-  // paymentAmount = сплачено; restPay = (сплачено − разом), тобто відʼємний, якщо суму
-  // оплати не внесено вручну. Звідси «разом» = paymentAmount − restPay
-  // (для звичайних оплачених restPay=0 → дорівнює paymentAmount, нічого не змінюється).
-  function amount(o){ return num(o.paymentAmount) - num(o.restPay); }
+  // Якщо paymentAmount заповнено — це сума замовлення (беремо її).
+  // Якщо ні — беремо |restPay| (там сума буває відʼємною, коли оплату сумою не внесено).
+  function amount(o){
+    var pa=o.paymentAmount;
+    if(pa!=null && String(pa).trim()!=='') return num(pa);
+    return Math.abs(num(o.restPay));
+  }
   function payDate(o){ return String(o.paymentDate||'').slice(0,10); }
   function clientName(o){ var c=(o.contacts&&o.contacts[0])||o;
     var n=[c.lName||c.lname||'',c.fName||c.fname||''].join(' ').trim(); return n||('№'+o.id); }
