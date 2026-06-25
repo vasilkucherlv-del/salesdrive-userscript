@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      0.86
+// @version      0.99
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -2890,4 +2890,411 @@ function __sdPageMain() {
   window.addEventListener('hashchange', evaluate); // миттєво прибрати при виході із заявки
   setInterval(evaluate, 1500);        // ловить зміну способу оплати
   setTimeout(evaluate, 800);
+})();
+
+/* ===== 💰 Каса самовивозу — день / тиждень / місяць / період ===== */
+(function lkCashRegister(){
+  'use strict';
+
+  var API_KEY   = '9yC3JYj4MlYitQ8J3KUf-uy_qPDYkFzwoITQSUeiWEDMZntbQ4uj0NxNcHrqAg8VAB6wDmkdXJZ1LMFgnQbuivTSrzutQbVB66wN';
+  var ORDERS    = '/api/order/list/';
+  var CASHORD   = '/document-cash-order/index/';
+  var STATUS_ID = 5;     // Оплачено САМОВИВІЗ
+  var CASH_ID   = 44;    // Готівкою 💵
+  var CARD_ID   = 100;   // Термінал 💳
+  var CHECK_KEY = 'Bfmy2OEwDnw022CI7GACrjwHOTLgyyZomtZOnTg-zLv3x_lsPTxiGSs6rFxQwAiWHWVqyYvH0JJYNgV2gJ2u14nnZMx8yMlBEI7E';
+  var CHECKS    = '/api/check/list/';   // фіскальні чеки
+  var BARCODE_URL   = 'https://barcode-printer-production-2b32.up.railway.app';
+  var BARCODE_TOKEN = 'nab_8Kx2pQ7mLr4tW9vZ';
+
+  function pad(n){ return n<10?'0'+n:''+n; }
+  function ymd(d){ return d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate()); }
+  function fmt(n){ return Number(n||0).toLocaleString('uk-UA',{minimumFractionDigits:2,maximumFractionDigits:2})+' ₴'; }
+  function num(v){ var m=String(v==null?'':v).replace(',','.').match(/-?[\d.]+/); return m?parseFloat(m[0]):0; }
+  function sleep(ms){ return new Promise(function(r){ setTimeout(r,ms); }); }
+  function dstr(d){ return d.split('-').reverse().join('.'); }
+  function startOfDay(d){ var x=new Date(d); x.setHours(0,0,0,0); return x; }
+
+  // режим: 'day' | 'week' | 'month' | 'range'
+  var mode='day';
+  var renderSeq=0;                 // для скасування застарілих перемальовувань
+  var anchor=new Date();           // опорна дата для day/week/month
+  var rangeFrom=null, rangeTo=null;// для 'range' (рядки ymd)
+
+  // Поточний понеділок тижня опорної дати
+  function weekBounds(d){
+    var x=startOfDay(d); var wd=(x.getDay()+6)%7; // 0=Пн
+    var mon=new Date(x); mon.setDate(x.getDate()-wd);
+    var sun=new Date(mon); sun.setDate(mon.getDate()+6);
+    return [mon,sun];
+  }
+  function monthBounds(d){
+    var first=new Date(d.getFullYear(),d.getMonth(),1);
+    var last=new Date(d.getFullYear(),d.getMonth()+1,0);
+    return [first,last];
+  }
+  // повертає {from,to,label} у форматі ymd
+  function currentSpan(){
+    if(mode==='range' && rangeFrom && rangeTo){
+      var a=rangeFrom, b=rangeTo; if(a>b){ var t=a;a=b;b=t; }
+      return {from:a,to:b,label:dstr(a)+' — '+dstr(b)};
+    }
+    if(mode==='week'){
+      var w=weekBounds(anchor);
+      return {from:ymd(w[0]),to:ymd(w[1]),label:'тиждень '+dstr(ymd(w[0]))+' — '+dstr(ymd(w[1]))};
+    }
+    if(mode==='month'){
+      var m=monthBounds(anchor);
+      var nm=anchor.toLocaleDateString('uk-UA',{month:'long',year:'numeric'});
+      return {from:ymd(m[0]),to:ymd(m[1]),label:nm};
+    }
+    var s=ymd(anchor);
+    return {from:s,to:s,label:dstr(s)};
+  }
+  function shift(dir){
+    if(mode==='day')   anchor.setDate(anchor.getDate()+dir);
+    else if(mode==='week')  anchor.setDate(anchor.getDate()+7*dir);
+    else if(mode==='month') anchor.setMonth(anchor.getMonth()+dir);
+    // range стрілками не листаємо
+  }
+
+  /* ---- стартовий залишок (barcode-app) ---- */
+  function gmGet(url){
+    return new Promise(function(res,rej){
+      if(typeof GM_xmlhttpRequest!=='undefined'){
+        GM_xmlhttpRequest({method:'GET',url:url,
+          onload:function(r){ (r.status>=200&&r.status<300)?res(r.responseText):rej(new Error('HTTP '+r.status)); },
+          onerror:function(){ rej(new Error('net')); }});
+      } else { fetch(url).then(function(r){return r.text();}).then(res).catch(rej); }
+    });
+  }
+  function gmPost(url,body){
+    return new Promise(function(res,rej){
+      if(typeof GM_xmlhttpRequest!=='undefined'){
+        GM_xmlhttpRequest({method:'POST',url:url,headers:{'Content-Type':'application/json'},
+          data:JSON.stringify(body),
+          onload:function(r){ (r.status>=200&&r.status<300)?res(r.responseText):rej(new Error('HTTP '+r.status)); },
+          onerror:function(){ rej(new Error('net')); }});
+      } else {
+        fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+          .then(function(r){return r.text();}).then(res).catch(rej);
+      }
+    });
+  }
+  async function getBaseline(){
+    try{ var t=await gmGet(BARCODE_URL+'/api/cash-baseline?token='+encodeURIComponent(BARCODE_TOKEN));
+      var d=JSON.parse(t); return d&&d.ok?d.baseline:null; }catch(e){ return null; }
+  }
+  async function setBaseline(amount,pin){
+    var body={amount:amount,date:ymd(new Date()),by:'',pin:pin};
+    var t=await gmPost(BARCODE_URL+'/api/cash-baseline?token='+encodeURIComponent(BARCODE_TOKEN),body);
+    var d=JSON.parse(t); if(!d.ok) throw new Error(d.error||'err'); return d.baseline;
+  }
+
+  /* ---- продажі ---- */
+  function payId(o){ var v=o.payment_method!=null?o.payment_method:(o.paymentMethod!=null?o.paymentMethod:o.payment_method_id);
+    var m=String(v==null?'':v).match(/(\d+)/); return m?parseInt(m[1],10):null; }
+  function amount(o){ return num(o.paymentAmount!=null?o.paymentAmount:o.restPay); }
+  function payDate(o){ return String(o.paymentDate||'').slice(0,10); }
+  function clientName(o){ var c=(o.contacts&&o.contacts[0])||o;
+    var n=[c.lName||c.lname||'',c.fName||c.fname||''].join(' ').trim(); return n||('№'+o.id); }
+  function ordUrl(pm,from,to){
+    return '/ua/index.html?formId=1#/order/index?'
+      +'filter%5BstatusId%5D%5B%5D='+STATUS_ID
+      +'&filter%5Bpayment_method%5D%5B%5D='+pm
+      +'&filter%5BpaymentDate%5D%5Bfrom%5D='+from
+      +'&filter%5BpaymentDate%5D%5Bto%5D='+to;
+  }
+  var OUTC_URL='/ua/index.html?formId=1#/document/cash-order/outcoming';
+
+  async function fetchOrders(from,to){
+    var page=1,all=[],guard=0;
+    while(guard++<40){
+      var url=ORDERS+'?page='+page+'&limit=100&filter[statusId]='+STATUS_ID
+        +'&filter[paymentDate][from]='+from+'&filter[paymentDate][to]='+to;
+      var r; try{ r=await fetch(url,{headers:{'Form-Api-Key':API_KEY,'Accept':'application/json'}}); }catch(e){ break; }
+      if(r.status===400){ cashNote('⏳ Забагато запитів до SalesDrive.<br>Зачекайте ~1 хв, рахунок продовжиться сам…'); await sleep(65000); cashNote('Рахую…'); continue; }
+      var j=await r.json().catch(function(){return {};});
+      var arr=j.data||j.orders||[]; all=all.concat(arr);
+      if(arr.length<100) break; page++; await sleep(6500);
+    }
+    return all;
+  }
+
+  function shiftYmd(d,delta){
+    var p=String(d).slice(0,10).split('-');
+    var dt=new Date(parseInt(p[0],10),parseInt(p[1],10)-1,parseInt(p[2],10));
+    dt.setDate(dt.getDate()+delta);
+    return ymd(dt);
+  }
+
+  /* ---- фіскальні чеки за період → множина order.id з чеком (done) ---- */
+  async function fetchChecks(from,to){
+    var set=new Set(), page=1, guard=0;
+    var ff=from+' 00:00:00', tt=to+' 23:59:59';
+    while(guard++<10){
+      var url=CHECKS+'?page='+page+'&limit=100'
+        +'&filter[date][from]='+encodeURIComponent(ff)
+        +'&filter[date][to]='+encodeURIComponent(tt);
+      var r; try{ r=await fetch(url,{headers:{'X-Api-Key':CHECK_KEY,'Accept':'application/json'}}); }catch(e){ break; }
+      if(r.status===400){ cashNote('⏳ Забагато запитів до SalesDrive.<br>Зачекайте ~1 хв, рахунок продовжиться сам…'); await sleep(65000); cashNote('Рахую…'); continue; }
+      var j=await r.json().catch(function(){return {};});
+      var arr=j.data||[];
+      arr.forEach(function(c){ var oid=c.order&&c.order.id; if(oid && c.fiscalizationStatus==='done') set.add(String(oid)); });
+      var pg=j.pagination||{};
+      if(arr.length<100) break;
+      if(pg.currentPage && pg.pageCount && pg.currentPage>=pg.pageCount) break;
+      page++; await sleep(6500);
+    }
+    return set;
+  }
+
+  /* ---- видаткові касові ордери: newest-first, стоп на from ---- */
+  async function fetchOutcoming(from,to){
+    var page=1,items=[],sum=0,guard=0,stop=false;
+    while(guard++<80 && !stop){
+      var url=CASHORD+'?active=1&formId=1&type=outcoming&page='+page;
+      var r; try{ r=await fetch(url,{headers:{'Accept':'application/json'},credentials:'same-origin'}); }catch(e){ break; }
+      var j=await r.json().catch(function(){return {};});
+      var arr=j.data||[]; if(!arr.length) break;
+      for(var i=0;i<arr.length;i++){
+        var o=arr[i], dt=String(o.date||'').slice(0,10); if(!dt) continue;
+        if(dt<from){ stop=true; break; }
+        if(dt>to) continue;
+        var a=num(o.totalSum); sum+=a;
+        items.push({id:o.id,date:dt,amount:a,comment:String(o.comment||'').trim(),number:o.number});
+      }
+      var pg=j.pagination||{}; if(pg.currentPage>=pg.pageCount) break;
+      page++; await sleep(300);
+    }
+    return {sum:sum,items:items};
+  }
+
+  function ensureStyles(){
+    if(document.getElementById('lk-cash-css')) return;
+    var s=document.createElement('style'); s.id='lk-cash-css';
+    s.textContent=''
+    +'#lk-cash-btn{position:fixed;left:18px;bottom:18px;z-index:99998;width:52px;height:52px;border-radius:50%;'
+    +'background:#ad2fb6;color:#fff;border:none;font-size:24px;cursor:pointer;box-shadow:0 3px 10px rgba(0,0,0,.3)}'
+    +'#lk-cash-btn:hover{filter:brightness(1.08)}'
+    +'#lk-cash-ov{position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center}'
+    +'#lk-cash-box{background:#fff;width:460px;max-width:94vw;max-height:90vh;overflow:auto;border-radius:12px;'
+    +'font-family:system-ui,Arial,sans-serif;box-shadow:0 10px 40px rgba(0,0,0,.3)}'
+    +'#lk-cash-box .h{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid #eee}'
+    +'#lk-cash-box .h b{font-size:17px}'
+    +'#lk-cash-box .x{border:none;background:none;font-size:22px;cursor:pointer;color:#888;line-height:1}'
+    +'#lk-cash-modes{display:flex;gap:6px;padding:11px 16px 4px;flex-wrap:wrap}'
+    +'#lk-cash-modes button{border:1px solid #ddd;background:#fafafa;border-radius:7px;padding:5px 12px;cursor:pointer;font-size:13px;color:#555}'
+    +'#lk-cash-modes button.on{background:#ad2fb6;border-color:#ad2fb6;color:#fff;font-weight:700}'
+    +'#lk-cash-range{display:none;gap:8px;align-items:center;padding:4px 16px 2px;font-size:13px;color:#555}'
+    +'#lk-cash-range.show{display:flex}'
+    +'#lk-cash-range input{border:1px solid #ccc;border-radius:6px;padding:4px 6px;font-size:13px}'
+    +'#lk-cash-range button{border:1px solid #ad2fb6;background:#ad2fb6;color:#fff;border-radius:6px;padding:5px 10px;cursor:pointer;font-size:13px}'
+    +'#lk-cash-nav{display:flex;align-items:center;justify-content:center;gap:12px;padding:8px;font-size:14px;font-weight:600}'
+    +'#lk-cash-nav button{border:1px solid #ddd;background:#fafafa;border-radius:7px;width:32px;height:32px;cursor:pointer;font-size:18px}'
+    +'#lk-cash-nav .today{font-size:12px;color:#ad2fb6;cursor:pointer;text-decoration:underline;width:auto;height:auto;border:none;background:none}'
+    +'#lk-cash-nav #lk-cash-span{min-width:150px;text-align:center;color:#333}'
+    +'#lk-cash-bal{margin:2px 16px 6px;padding:15px 16px;border-radius:11px;background:#fbeffc;border:1px solid #e8b9ed;display:flex;justify-content:space-between;align-items:baseline}'
+    +'#lk-cash-bal .l{font-size:14px;color:#7a2a80;font-weight:600}'
+    +'#lk-cash-bal .v{font-size:24px;font-weight:800;color:#7a2a80}'
+    +'#lk-cash-bal .sub{font-size:11px;color:#a06aa6;font-weight:400}'
+    +'#lk-cash-day-sum{padding:2px 16px 6px}'
+    +'#lk-cash-day-sum .row{display:flex;justify-content:space-between;align-items:baseline;padding:9px 14px;border-radius:9px;margin-bottom:7px}'
+    +'#lk-cash-day-sum .cash{background:#eafaf1;border:1px solid #abebc6}'
+    +'#lk-cash-day-sum .card{background:#eef4fd;border:1px solid #aed0f5}'
+    +'#lk-cash-day-sum .out{background:#fdeeea;border:1px solid #f5b7a8}'
+    +'#lk-cash-day-sum .lbl{font-size:13px;color:#444}'
+    +'#lk-cash-day-sum .val{font-size:18px;font-weight:800}'
+    +'#lk-cash-day-sum .cnt{font-size:11px;color:#888;font-weight:400}'
+    +'#lk-cash-out-list{padding:0 16px}'
+    +'#lk-cash-out-list .it{display:flex;justify-content:space-between;gap:8px;padding:6px 12px;font-size:13px;border-bottom:1px dashed #f0d4cc}'
+    +'#lk-cash-out-list a.it{text-decoration:none;color:#a8432a;cursor:pointer}'
+    +'#lk-cash-out-list a.it:hover{background:#fdeeea}'
+    +'#lk-cash-out-list .cm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#7a3b28}'
+    +'#lk-cash-out-list .dt{color:#b08;font-size:11px;margin-right:4px}'
+    +'#lk-cash-out-list .am{white-space:nowrap;font-weight:700;color:#a8432a}'
+    +'#lk-cash-list{padding:8px 16px 16px}'
+    +'#lk-cash-list .ttl{font-size:12px;color:#999;text-transform:uppercase;letter-spacing:.5px;margin:8px 0 6px}'
+    +'#lk-cash-list a{display:flex;justify-content:space-between;gap:8px;padding:7px 10px;border-bottom:1px solid #f1f1f1;text-decoration:none;color:#222;font-size:13px}'
+    +'#lk-cash-list a:hover{background:#faf5fb}'
+    +'#lk-cash-list .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}'
+    +'#lk-cash-list .dt{color:#aaa;font-size:11px;margin-right:4px}'
+    +'#lk-cash-list .am{white-space:nowrap;font-weight:700}'
+    +'#lk-cash-list .chk.ok{font-size:12px}'
+    +'#lk-cash-list .chk.no{font-size:11px;color:#c0392b;font-weight:700;background:#fdecea;border:1px solid #f5b7a8;border-radius:4px;padding:0 4px;margin-left:4px}'
+    +'#lk-cash-day-sum .row.card.warn{background:#fff7e6;border-color:#f0c36d}'
+    +'#lk-cash-day-sum .nochk{color:#b9770e}'
+    +'#lk-cash-day-sum a.row{text-decoration:none;color:inherit;cursor:pointer;transition:filter .1s}'
+    +'#lk-cash-day-sum a.row:hover{filter:brightness(.97)}'
+    +'#lk-cash-day-sum a.row .val{white-space:nowrap}'
+    +'#lk-cash-adj{margin:4px 16px 16px;padding:9px;border:1px dashed #ccc;border-radius:9px;text-align:center;font-size:13px;color:#666;cursor:pointer}'
+    +'#lk-cash-adj:hover{background:#fafafa}'
+    +'#lk-cash-load{padding:24px;text-align:center;color:#999}';
+    document.head.appendChild(s);
+  }
+
+  function syncModeUI(){
+    var box=document.getElementById('lk-cash-box'); if(!box) return;
+    box.querySelectorAll('#lk-cash-modes button').forEach(function(b){
+      b.classList.toggle('on', b.getAttribute('data-m')===mode);
+    });
+    box.querySelector('#lk-cash-range').classList.toggle('show', mode==='range');
+    box.querySelector('#lk-cash-nav').style.display = (mode==='range')?'none':'flex';
+  }
+
+  function cashNote(msg){
+    var el=document.getElementById('lk-cash-load');
+    if(el) el.innerHTML=msg;
+  }
+
+  async function render(){
+    var box=document.getElementById('lk-cash-box'); if(!box) return;
+    var myseq=++renderSeq;
+    syncModeUI();
+    if(mode==='range' && !(rangeFrom&&rangeTo)){
+      box.querySelector('#lk-cash-body').innerHTML='<div style="padding:18px 16px;color:#888;font-size:14px">Оберіть дати «від» і «до» та натисніть «Показати».</div>';
+      return;
+    }
+    var span=currentSpan();
+    box.querySelector('#lk-cash-span').textContent=span.label;
+    box.querySelector('#lk-cash-body').innerHTML='<div id="lk-cash-load">Рахую…</div>';
+
+    var base=await getBaseline();
+    if(myseq!==renderSeq) return;
+    if(!base){
+      box.querySelector('#lk-cash-body').innerHTML=
+        '<div style="padding:18px 16px;color:#555;font-size:14px;line-height:1.5">Стартовий залишок каси ще не задано.<br>Порахуйте готівку в коробці й натисніть нижче.</div>'
+        +'<div id="lk-cash-adj">➕ Задати поточний залишок каси</div>';
+      box.querySelector('#lk-cash-adj').onclick=adjust; return;
+    }
+    var bdate=String(base.date).slice(0,10);
+
+    // ── Один запит на обʼєднаний діапазон, далі рахуємо і залишок, і період ──
+    var hasBal=(span.to>=bdate);
+    var uFrom=hasBal?(bdate<span.from?bdate:span.from):span.from;
+    var uTo=span.to;
+    // три незалежні джерела — тягнемо паралельно (різні ключі = різні ліміти)
+    var _res=await Promise.all([
+      fetchOrders(uFrom,uTo),
+      fetchOutcoming(uFrom,uTo),
+      fetchChecks(shiftYmd(span.from,-3),shiftYmd(span.to,3))
+    ]);
+    if(myseq!==renderSeq) return;
+    var allOrders=_res[0], allOut=_res[1], checks=_res[2];
+
+    function inPeriod(d){ return d>=span.from && d<=span.to; }
+
+    // Залишок: уся готівка з продажів від стартової точки − видаткові ордери від стартової точки
+    var balanceTxt;
+    if(!hasBal){
+      balanceTxt='<div style="padding:2px 16px 8px;color:#999;font-size:13px">Період раніше за стартову точку каси ('+dstr(bdate)+') — залишок не рахується.</div>';
+    } else {
+      var cashCum=0; allOrders.forEach(function(o){ if(payId(o)===CASH_ID && payDate(o)>=bdate) cashCum+=amount(o); });
+      var outCum=0; allOut.items.forEach(function(x){ if(x.date>=bdate) outCum+=x.amount; });
+      var balance=num(base.amount)+cashCum-outCum;
+      balanceTxt='<div id="lk-cash-bal"><span class="l">💰 Готівка в касі<br><span class="sub">станом на '+dstr(span.to)+'</span></span><span class="v">'+fmt(balance)+'</span></div>';
+    }
+
+    // Обороти за вибраний період (з того самого набору)
+    var orders=allOrders.filter(function(o){ return inPeriod(payDate(o)); });
+    var outItems=allOut.items.filter(function(x){ return inPeriod(x.date); });
+    var outSum=0; outItems.forEach(function(x){ outSum+=x.amount; });
+    var out={sum:outSum,items:outItems};
+    var pCash=0,pCashN=0,pCard=0,pCardN=0,rows=[],noCheckN=0;
+    orders.forEach(function(o){
+      var p=payId(o), a=amount(o), d=payDate(o);
+      if(p===CASH_ID){ pCash+=a; pCashN++; } else if(p===CARD_ID){ pCard+=a; pCardN++; } else return;
+      var ic=p===CASH_ID?'💵':'💳';
+      var dd=(span.from!==span.to)?'<span class="dt">'+dstr(d)+'</span>':'';
+      var badge='';
+      if(p===CARD_ID){ if(checks.has(String(o.id))) badge=' <span class="chk ok" title="Чек є">✅</span>'; else { badge=' <span class="chk no">⚠️ без чека</span>'; noCheckN++; } }
+      rows.push('<a href="/ua/index.html?formId=1#/order/update/'+o.id+'"><span class="nm">'+dd+ic+' №'+o.id+' · '+clientName(o)+badge+'</span><span class="am">'+fmt(a)+'</span></a>');
+    });
+    var multi=(span.from!==span.to);
+    var outHtml='';
+    if(out.items.length){
+      outHtml='<div id="lk-cash-out-list">'+out.items.map(function(x){
+        var dd=multi?'<span class="dt">'+dstr(x.date)+'</span>':'';
+        return '<a class="it" href="/ua/index.html?formId=1#/document/cash-order/update/'+x.id+'" target="_blank" title="Відкрити касовий ордер"><span class="cm">'+dd+'📤 '+(x.comment||'видаток №'+x.number)+'</span><span class="am">−'+fmt(x.amount)+' ↗</span></a>';
+      }).join('')+'</div>';
+    }
+
+    box.querySelector('#lk-cash-body').innerHTML=
+      balanceTxt
+      +'<div id="lk-cash-day-sum">'
+      +' <a class="row cash" href="'+ordUrl(CASH_ID,span.from,span.to)+'" target="_blank" title="Відкрити у SalesDrive"><span class="lbl">💵 Готівка продажі <span class="cnt">'+pCashN+' зам.</span></span><span class="val">'+fmt(pCash)+' ↗</span></a>'
+      +' <a class="row card'+(noCheckN?' warn':'')+'" href="'+ordUrl(CARD_ID,span.from,span.to)+'" target="_blank" title="Відкрити у SalesDrive"><span class="lbl">💳 Термінал <span class="cnt">'+pCardN+' зам.'+(noCheckN?' · <b class="nochk">⚠️ без чека: '+noCheckN+'</b>':'')+'</span></span><span class="val">'+fmt(pCard)+' ↗</span></a>'
+      +(out.items.length?' <div class="row out"><span class="lbl">📤 Видатки <span class="cnt">'+out.items.length+' шт.</span></span><span class="val">−'+fmt(out.sum)+'</span></div>':'')
+      +'</div>'
+      +outHtml
+      +'<div id="lk-cash-list"><div class="ttl">Замовлення за період ('+(pCashN+pCardN)+')</div>'+(rows.join('')||'<div style="color:#999;padding:6px 0">Немає</div>')+'</div>'
+      +'<div id="lk-cash-adj">⚙️ Скоригувати залишок (зараз '+fmt(base.amount)+' від '+dstr(bdate)+')</div>';
+    box.querySelector('#lk-cash-adj').onclick=adjust;
+  }
+
+  async function adjust(){
+    var v=prompt('Скільки готівки ЗАРАЗ фізично в касі (₴)?\nЦе стане новою стартовою точкою на сьогодні.');
+    if(v==null) return;
+    var n=parseFloat(String(v).replace(',','.').replace(/\s/g,''));
+    if(isNaN(n)){ alert('Введіть число.'); return; }
+    var pin=prompt('Введіть PIN для коригування каси:');
+    if(pin==null) return;
+    var box=document.getElementById('lk-cash-box');
+    if(box) box.querySelector('#lk-cash-body').innerHTML='<div id="lk-cash-load">Зберігаю…</div>';
+    try{ await setBaseline(n,pin); mode='day'; anchor=new Date(); await render(); }
+    catch(e){
+      if(/HTTP 403|bad pin/.test(e.message)) alert('Невірний PIN — залишок не змінено.');
+      else alert('Не вдалося зберегти: '+e.message);
+      render();
+    }
+  }
+
+  function setMode(m){
+    mode=m;
+    if(m!=='range'){ anchor=new Date(); }
+    render();
+  }
+
+  function open(){
+    ensureStyles();
+    if(document.getElementById('lk-cash-ov')) return;
+    var today=ymd(new Date());
+    var ov=document.createElement('div'); ov.id='lk-cash-ov';
+    ov.innerHTML=''
+     +'<div id="lk-cash-box">'
+     +' <div class="h"><b>💰 Каса самовивозу</b><div><button class="rf" title="Оновити" style="border:none;background:none;font-size:18px;cursor:pointer;color:#888;margin-right:6px">🔄</button><button class="x">&times;</button></div></div>'
+     +' <div id="lk-cash-modes">'
+     +'   <button data-m="day">День</button><button data-m="week">Тиждень</button>'
+     +'   <button data-m="month">Місяць</button><button data-m="range">Період</button>'
+     +' </div>'
+     +' <div id="lk-cash-range"><label>від <input type="date" id="lk-rf" value="'+today+'"></label><label>до <input type="date" id="lk-rt" value="'+today+'"></label><button class="go">Показати</button></div>'
+     +' <div id="lk-cash-nav"><button class="prev">‹</button><span id="lk-cash-span"></span><button class="next">›</button><button class="today">зараз</button></div>'
+     +' <div id="lk-cash-body"></div>'
+     +'</div>';
+    document.body.appendChild(ov);
+    ov.addEventListener('click',function(e){ if(e.target===ov) ov.remove(); });
+    ov.querySelector('.x').onclick=function(){ ov.remove(); };
+    ov.querySelector('.rf').onclick=function(){ render(); };
+    ov.querySelectorAll('#lk-cash-modes button').forEach(function(b){
+      b.onclick=function(){ setMode(b.getAttribute('data-m')); };
+    });
+    ov.querySelector('.go').onclick=function(){
+      rangeFrom=ov.querySelector('#lk-rf').value; rangeTo=ov.querySelector('#lk-rt').value;
+      if(!rangeFrom||!rangeTo){ alert('Оберіть обидві дати.'); return; }
+      render();
+    };
+    ov.querySelector('.prev').onclick=function(){ shift(-1); render(); };
+    ov.querySelector('.next').onclick=function(){ shift(1); render(); };
+    ov.querySelector('.today').onclick=function(){ anchor=new Date(); render(); };
+    render();
+  }
+
+  function addBtn(){
+    if(document.getElementById('lk-cash-btn')) return;
+    ensureStyles();
+    var b=document.createElement('button'); b.id='lk-cash-btn'; b.textContent='💰'; b.title='Каса самовивозу';
+    b.onclick=function(){ mode='day'; anchor=new Date(); open(); };
+    document.body.appendChild(b);
+  }
+  setInterval(addBtn,1500); addBtn();
 })();
