@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.00
+// @version      1.01
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -37,6 +37,11 @@
   var GID = "0";
   var KB_SHEET_ID = "1ji2p3Nk0qcOy58vMu1312kO1LBrDqa7Ha5c8QvQvW7c"; // база знань
   var KB_GID = "0";
+  // Аналоги (якір + аналоги-заміни). ОКРЕМА таблиця — встав сюди її ID.
+  // Колонки такі ж, як у допродажів: 0=код якоря, 1=назва якоря, 2=код аналога, 3=назва аналога, 4=примітка.
+  // Поки ID порожній — функція аналогів просто не показується (без помилок).
+  var ANALOG_SHEET_ID = ""; // <-- ВСТАВ ID НОВОЇ ТАБЛИЦІ АНАЛОГІВ
+  var ANALOG_GID = "0";
   var TTL_MS = 60 * 1000;
 
   function gvizUrl(id, gid) {
@@ -88,6 +93,27 @@
     return out;
   }
 
+  // Аналоги: та сама структура, що й допродажі (анкер + заміна).
+  function parseAnalog(text) {
+    var s = text.indexOf("{");
+    var e = text.lastIndexOf("}");
+    if (s < 0 || e < 0) throw new Error("несподіваний формат відповіді");
+    var json = JSON.parse(text.slice(s, e + 1));
+    var rows = (json.table && json.table.rows) || [];
+    var out = [];
+    for (var i = 0; i < rows.length; i++) {
+      var c = rows[i].c || [];
+      // колонки: 0=код якоря, 1=назва якоря, 2=код аналога, 3=назва аналога, 4=примітка
+      var anchorName = cellText(c[1]);
+      var compCode = cellText(c[2]);
+      var compName = cellText(c[3]);
+      var script = cellText(c[4]);
+      if (!anchorName || !compCode) continue;
+      out.push({ a: anchorName, sku: compCode, c: compName, s: script });
+    }
+    return out;
+  }
+
   function parseKb(text) {
     var s = text.indexOf("{");
     var e = text.lastIndexOf("}");
@@ -128,6 +154,27 @@
     });
   }
 
+  function getAnalog(force) {
+    // не налаштовано — мовчки повертаємо порожньо (банер аналогів не зʼявиться)
+    if (!ANALOG_SHEET_ID) return Promise.resolve({ pairs: [], source: "disabled" });
+    var now = Date.now();
+    var cached = gmGetJSON("sd_analog_cache_v1");
+    if (!force && cached && cached.pairs && cached.pairs.length && now - cached.ts < TTL_MS) {
+      return Promise.resolve({ pairs: cached.pairs, source: "cache" });
+    }
+    return gmFetch(gvizUrl(ANALOG_SHEET_ID, ANALOG_GID)).then(function (txt) {
+      var pairs = parseAnalog(txt);
+      if (!pairs.length) throw new Error("у таблиці 0 придатних рядків");
+      gmSetJSON("sd_analog_cache_v1", { ts: now, pairs: pairs });
+      return { pairs: pairs, source: "sheet" };
+    }).catch(function (err) {
+      if (cached && cached.pairs && cached.pairs.length) {
+        return { pairs: cached.pairs, source: "cache-after-error", error: String(err) };
+      }
+      return { pairs: [], source: "error", error: String(err) };
+    });
+  }
+
   function getKb(force) {
     var now = Date.now();
     var cached = gmGetJSON("sd_kb_cache_v1");
@@ -154,6 +201,7 @@
       sendMessage: function (msg, cb) {
         if (!msg) return;
         if (msg.type === "sdGetUpsellMap") { getMap(!!msg.force).then(function (r) { if (cb) cb(r); }); return; }
+        if (msg.type === "sdGetAnalogs") { getAnalog(!!msg.force).then(function (r) { if (cb) cb(r); }); return; }
         if (msg.type === "sdGetKb") { getKb(!!msg.force).then(function (r) { if (cb) cb(r); }); return; }
       }
     },
@@ -440,6 +488,35 @@ var UPSELL_MAP_DATA = [
     } catch (e) {}
   }
 
+  // ---- аналоги (окрема таблиця): якір -> список товарів-замін ----
+  var ANALOG_GROUPS = [];
+  function requestAnalogSheet(force) {
+    try {
+      chrome.runtime.sendMessage(
+        { type: "sdGetAnalogs", force: !!force },
+        function (resp) {
+          if (chrome.runtime.lastError) return;
+          if (resp && resp.pairs && resp.pairs.length) {
+            ANALOG_GROUPS = buildGroups(resp.pairs);
+            console.log(
+              "[SalesDrive Аналоги] карта з таблиці:",
+              resp.pairs.length, "пар,",
+              ANALOG_GROUPS.length, "якорів (джерело:", resp.source + ")"
+            );
+          }
+        }
+      );
+    } catch (e) {}
+  }
+  function matchAnalogGroup(label) {
+    var t = norm(label);
+    if (t.length < 4) return null;
+    for (var i = 0; i < ANALOG_GROUPS.length; i++) {
+      if (t.indexOf(ANALOG_GROUPS[i].key) !== -1) return ANALOG_GROUPS[i];
+    }
+    return null;
+  }
+
   function cleanLabel(a) {
     var clone = a.cloneNode(true);
     clone
@@ -463,6 +540,10 @@ var UPSELL_MAP_DATA = [
   var existingShownSig = null;    // підпис набору, показаного для товарів у заявці
   var existingDismissedKey = null;// заявка, для якої авто-підказку закрили
   var lastOrderKey = "";          // поточна заявка (щоб ловити перехід)
+  var analogHideTimer = null;     // авто-приховування банера аналогів
+  var analogShownSig = null;      // підпис показаних аналогів (товари заявки)
+  var analogDismissedKey = null;  // заявка, для якої банер аналогів закрили
+  var lastAnalogOrderKey = "";    // поточна заявка для логіки аналогів
 
   function removeHint() {
     var old = document.getElementById("sd-upsell-hint");
@@ -605,6 +686,148 @@ var UPSELL_MAP_DATA = [
     if (!opts.existing) armHideTimer();
   }
 
+  function removeAnalogHint() {
+    var old = document.getElementById("sd-analog-hint");
+    if (old) old.remove();
+    if (analogHideTimer) { clearTimeout(analogHideTimer); analogHideTimer = null; }
+  }
+  function armAnalogHideTimer() {
+    if (analogHideTimer) clearTimeout(analogHideTimer);
+    analogHideTimer = setTimeout(removeAnalogHint, 45000);
+  }
+
+  // Банер аналогів-замін. Структура й логіка — як у showHint (допродаж),
+  // але окремий банер (#sd-analog-hint) і свій підпис «аналог/заміна».
+  function showAnalogHint(items, headerText, opts) {
+    if (/\/document\/arrival-product\//.test(location.hash || "")) { removeAnalogHint(); return; }
+    opts = opts || {};
+    removeAnalogHint();
+    if (!opts.existing) analogShownSig = null;
+
+    var box = document.createElement("div");
+    box.id = "sd-analog-hint";
+
+    var x = document.createElement("button");
+    x.className = "sd-x";
+    x.textContent = "×";
+    x.title = "Сховати";
+    x.addEventListener("click", function () { removeAnalogHint(); if (opts.onClose) opts.onClose(); });
+    box.appendChild(x);
+
+    if (headerText) {
+      var top = document.createElement("div");
+      top.className = "sd-top";
+      top.textContent = headerText;
+      box.appendChild(top);
+    }
+
+    var slots = {};
+    items.forEach(function (it) {
+      var item = document.createElement("div");
+      item.className = "sd-item";
+
+      var cimg = document.createElement("img");
+      cimg.className = "sd-comp-img";
+      cimg.alt = "";
+      cimg.loading = "eager";
+      cimg.style.display = "none";
+      cimg.onerror = function () { cimg.style.display = "none"; };
+      item.appendChild(cimg);
+
+      var main = document.createElement("div");
+      main.className = "sd-main";
+
+      if (it.c) {
+        var nameEl = document.createElement("div");
+        nameEl.className = "sd-name";
+        nameEl.textContent = it.c;
+        main.appendChild(nameEl);
+      }
+
+      var say = document.createElement("div");
+      say.className = "sd-say";
+      say.textContent = "Аналог / заміна";
+      main.appendChild(say);
+
+      if (it.s) {
+        var script = document.createElement("div");
+        script.className = "sd-script";
+        script.textContent = it.s;
+        main.appendChild(script);
+      }
+
+      var stock = null;
+      if (it.sku) {
+        stock = document.createElement("span");
+        stock.className = "sd-stock sd-stock-wait";
+        stock.textContent = "перевіряю залишок…";
+        main.appendChild(stock);
+      }
+      item.appendChild(main);
+
+      var action = document.createElement("div");
+      action.className = "sd-action";
+
+      var priceEl = null, priceLab = null, priceVal = null;
+      if (it.sku) {
+        priceEl = document.createElement("div");
+        priceEl.className = "sd-price";
+        priceEl.style.display = "none";
+        priceLab = document.createElement("div");
+        priceLab.className = "sd-price-lab";
+        priceVal = document.createElement("div");
+        priceVal.className = "sd-price-val";
+        priceEl.appendChild(priceLab);
+        priceEl.appendChild(priceVal);
+        action.appendChild(priceEl);
+      }
+
+      var addBtn = document.createElement("button");
+      addBtn.className = "sd-add";
+      addBtn.type = "button";
+      addBtn.appendChild(document.createTextNode("➕ Додати"));
+      if (it.sku) {
+        var sku = document.createElement("span");
+        sku.className = "sd-sku";
+        sku.textContent = "код " + it.sku;
+        addBtn.appendChild(document.createTextNode("  "));
+        addBtn.appendChild(sku);
+      }
+      addBtn.addEventListener("click", function () {
+        addCompanion(it.sku, addBtn);
+      });
+      action.appendChild(addBtn);
+
+      item.appendChild(action);
+
+      if (it.sku) {
+        slots[it.sku] = { badge: stock, img: cimg, item: item,
+          price: priceEl, priceLab: priceLab, priceVal: priceVal };
+      }
+
+      box.appendChild(item);
+    });
+
+    var spot = findInsertPoint();
+    if (spot && spot.parent) {
+      // ставимо під банером допродажу (якщо він є), інакше — одразу після таблиці
+      var ref = document.getElementById("sd-upsell-hint") || (spot.ref ? spot.ref.nextSibling : null);
+      spot.parent.insertBefore(box, ref ? ref.nextSibling : null);
+    } else {
+      box.style.position = "fixed";
+      box.style.bottom = "20px";
+      box.style.left = "50%";
+      box.style.transform = "translateX(-50%)";
+      box.style.maxWidth = "820px";
+      box.style.width = "90%";
+      document.body.appendChild(box);
+    }
+
+    if (opts.scrollIntoView) { try { box.scrollIntoView({ block: "nearest", behavior: "smooth" }); } catch (e) {} }
+    requestStock(slots, "sd-analog-hint");
+    if (!opts.existing) armAnalogHideTimer();
+  }
+
   function fmtQty(n) {
     if (n == null) return "";
     return (Math.abs(n - Math.round(n)) < 1e-9) ? String(Math.round(n)) : String(n);
@@ -687,7 +910,8 @@ var UPSELL_MAP_DATA = [
   }
 
   // запит залишків + фото у page-context для всіх супутніх одразу
-  function requestStock(slots) {
+  function requestStock(slots, boxId) {
+    boxId = boxId || "sd-upsell-hint";
     var codes = Object.keys(slots || {});
     if (!codes.length) return;
     var token = String(Date.now()) + "_" + Math.random().toString(36).slice(2);
@@ -700,7 +924,7 @@ var UPSELL_MAP_DATA = [
       if (!data || data.token !== token) return;
       BUS.removeEventListener("sdUpsellStockResult", onRes);
       (data.results || []).forEach(function (r) { applyResult(slots[r.code], r); });
-      reorderByStock(document.getElementById("sd-upsell-hint"), slots, data.results);
+      reorderByStock(document.getElementById(boxId), slots, data.results);
     }
 
     BUS.addEventListener("sdUpsellStockResult", onRes);
@@ -766,6 +990,13 @@ var UPSELL_MAP_DATA = [
       var many = group.items.length > 1;
       showHint(group.items, "💡 Допродаж до: " + truncate(group.a, 52) +
         (many ? "  (" + group.items.length + " варіанти)" : ""));
+    }
+    var ag = matchAnalogGroup(label);
+    if (ag) {
+      showAnalogHint(ag.items, "🔁 Аналоги до: " + truncate(ag.a, 52) +
+        (ag.items.length > 1 ? "  (" + ag.items.length + " варіанти)" : ""));
+    } else {
+      removeAnalogHint();
     }
   }
 
@@ -936,6 +1167,75 @@ var UPSELL_MAP_DATA = [
   }
 
   BUS.addEventListener("sdOrderItems", onOrderItems);
+
+  // ---- аналоги за товарами, що ВЖЕ є у відкритій заявці (незалежно від допродажу) ----
+  function onOrderItemsAnalog() {
+    if (!ANALOG_GROUPS.length) return; // таблиця аналогів не налаштована/не завантажена
+    var key = orderKey();
+    if (key !== lastAnalogOrderKey) {
+      lastAnalogOrderKey = key;
+      analogDismissedKey = null;
+      analogShownSig = null;
+    }
+    if (Date.now() - lastTypeahead < 3000) return; // не перебиваємо підказку з пошуку
+
+    var items = [];
+    try { items = JSON.parse(document.documentElement.getAttribute("data-sd-order-items")) || []; }
+    catch (e) { return; }
+    if (!items.length) return;
+
+    var presentCodes = {}, presentNames = [];
+    items.forEach(function (it) {
+      (it.codes || []).forEach(function (c) { presentCodes[String(c).toLowerCase()] = 1; });
+      if (it.name) presentNames.push(norm(it.name));
+    });
+    function alreadyInOrder(comp) {
+      if (presentCodes[String(comp.sku).toLowerCase()]) return true;
+      var cn = norm(comp.c);
+      if (cn.length > 10) {
+        for (var i = 0; i < presentNames.length; i++) {
+          if (presentNames[i].indexOf(cn) !== -1) return true;
+        }
+      }
+      return false;
+    }
+
+    var seenAnchor = {}, seenComp = {}, analogs = [];
+    items.forEach(function (it) {
+      var g = matchAnalogGroup(it.name || "");
+      if (!g || seenAnchor[g.key]) return;
+      seenAnchor[g.key] = 1;
+      g.items.forEach(function (ci) {
+        if (seenComp[ci.sku] || alreadyInOrder(ci)) return;
+        seenComp[ci.sku] = 1;
+        analogs.push({ sku: ci.sku, c: ci.c, s: ci.s, anchor: g.a });
+      });
+    });
+
+    if (!analogs.length) {
+      if (analogShownSig !== null) { removeAnalogHint(); analogShownSig = null; }
+      return;
+    }
+    if (analogDismissedKey === key) return;
+
+    var sig = analogs.map(function (c) { return c.sku; }).sort().join(",");
+    if (analogShownSig === sig && document.getElementById("sd-analog-hint")) return;
+
+    var anchors = {};
+    analogs.forEach(function (c) { anchors[c.anchor] = 1; });
+    var names = Object.keys(anchors);
+    var header = names.length === 1
+      ? "🔁 Аналоги до «" + truncate(names[0], 44) + "»:"
+      : "🔁 Аналоги (заміни) до товарів заявки:";
+
+    showAnalogHint(analogs, header, {
+      existing: true,
+      onClose: function () { analogDismissedKey = key; analogShownSig = null; }
+    });
+    analogShownSig = sig;
+  }
+
+  BUS.addEventListener("sdOrderItems", onOrderItemsAnalog);
 
   // ---------- ПЕРЕДУПЕРЕДЖЕННЯ ПРО ЦІНУ ROZETKA ----------
   function pwMoney(n) {
@@ -1259,6 +1559,7 @@ var UPSELL_MAP_DATA = [
 
   // тягнемо карту з таблиці при завантаженні сторінки
   requestSheet(false);
+  requestAnalogSheet(false); // аналоги — окрема таблиця (якщо налаштовано ANALOG_SHEET_ID)
 
   console.log("[SalesDrive Допродаж] активний. Якорів у вбудованій карті:", GROUPS.length);
 })();
@@ -3327,4 +3628,58 @@ function __sdPageMain() {
     document.body.appendChild(b);
   }
   setInterval(addBtn,1500); addBtn();
+})();
+/* ===== Стилі банера «Аналоги» (бірюзовий, окремо від жовтого допродажу) ===== */
+(function lkAnalogStyles() {
+  'use strict';
+  var css = ''
+    + '#sd-analog-hint{position:relative;box-sizing:border-box;width:100%;'
+    + '  min-width:min(560px,100%);max-width:980px;margin:10px 0 14px 0;'
+    + '  padding:14px 44px 16px 18px;background:#E8F5F4;border:2px solid #00897B;'
+    + '  border-left:7px solid #00897B;border-radius:10px;font-family:Arial,sans-serif;'
+    + '  color:#0f3d39;box-shadow:0 3px 12px rgba(0,0,0,.15);z-index:9999;animation:sdpop .18s ease-out}'
+    + '#sd-analog-hint .sd-top{font-size:13px;opacity:.9;font-weight:700;margin-bottom:8px;'
+    + '  color:#00695C;text-transform:uppercase;letter-spacing:.3px}'
+    + '#sd-analog-hint .sd-item{display:flex;flex-wrap:wrap;align-items:flex-start;gap:10px 14px;'
+    + '  padding:12px 0 2px 0;margin-top:12px;border-top:1px dashed rgba(0,137,123,.45)}'
+    + '#sd-analog-hint .sd-main{flex:1 1 300px;min-width:0;display:flex;flex-direction:column;'
+    + '  align-items:flex-start;gap:6px}'
+    + '#sd-analog-hint .sd-name{font-size:12.5px;font-weight:700;letter-spacing:.2px;color:#33514e;'
+    + '  line-height:1.3;text-transform:uppercase;overflow-wrap:anywhere}'
+    + '#sd-analog-hint .sd-say{display:inline-block;font-size:11px;font-weight:800;letter-spacing:.5px;'
+    + '  text-transform:uppercase;color:#00897B;margin:2px 0 3px 0}'
+    + '#sd-analog-hint .sd-say::before{content:"🔁 "}'
+    + '#sd-analog-hint .sd-script{font-size:15px;font-weight:600;line-height:1.5;color:#0f2b29;'
+    + '  background:#fff;border:1px solid #9fd8d2;border-left:5px solid #00897B;border-radius:9px;'
+    + '  padding:10px 13px;overflow-wrap:anywhere;box-shadow:0 1px 4px rgba(0,137,123,.12)}'
+    + '#sd-analog-hint .sd-action{flex:0 0 auto;width:150px;max-width:100%;display:flex;'
+    + '  flex-direction:column;align-items:stretch;gap:8px}'
+    + '#sd-analog-hint .sd-add{width:100%;box-sizing:border-box;white-space:normal;word-break:break-word;'
+    + '  text-align:center;padding:11px 14px;background:#00897B;color:#fff;border:none;border-radius:7px;'
+    + '  font-size:15px;font-weight:bold;cursor:pointer;font-family:Arial,sans-serif}'
+    + '#sd-analog-hint .sd-add:hover{background:#00695C}'
+    + '#sd-analog-hint .sd-add:active{transform:translateY(1px)}'
+    + '#sd-analog-hint .sd-add.sd-done{background:#9e9e9e;cursor:default}'
+    + '#sd-analog-hint .sd-add.sd-done:hover{background:#9e9e9e}'
+    + '#sd-analog-hint .sd-sku{background:rgba(255,255,255,.3);padding:2px 8px;border-radius:4px;'
+    + '  font-size:13px;margin-left:6px}'
+    + '#sd-analog-hint .sd-x{position:absolute;top:8px;right:12px;cursor:pointer;font-size:22px;'
+    + '  line-height:1;color:#00897B;border:none;background:none}'
+    + '#sd-analog-hint .sd-x:hover{color:#004d40}'
+    + '#sd-analog-hint .sd-stock{flex:0 0 auto;max-width:100%;font-size:13px;font-weight:700;'
+    + '  padding:5px 10px;border-radius:6px;white-space:normal;overflow-wrap:anywhere}'
+    + '#sd-analog-hint .sd-stock-wait{background:#eee;color:#777;font-weight:normal}'
+    + '#sd-analog-hint .sd-stock-yes{background:#E6F4EA;color:#1B5E20;border:1px solid #A5D6A7}'
+    + '#sd-analog-hint .sd-stock-no{background:#FDECEA;color:#B71C1C;border:1px solid #F5B7B1}'
+    + '#sd-analog-hint .sd-stock-unk{background:#f0f0f0;color:#777;font-weight:normal}'
+    + '#sd-analog-hint .sd-comp-img{flex:0 0 auto;width:48px;height:48px;object-fit:contain;'
+    + '  border:1px solid #9fd8d2;border-radius:6px;background:#fff}'
+    + '#sd-analog-hint .sd-price{background:#E8F0FE;border:1px solid #BBD3F5;border-radius:8px;'
+    + '  text-align:center;padding:6px 8px;box-sizing:border-box}'
+    + '#sd-analog-hint .sd-price-lab{font-size:11px;color:#4d6285;line-height:1.25}'
+    + '#sd-analog-hint .sd-price-val{font-size:21px;font-weight:800;color:#14418f;line-height:1.15;white-space:nowrap}'
+    + 'html.sd-modal-open #sd-analog-hint{display:none !important}';
+  var st = document.createElement('style');
+  st.textContent = css;
+  (document.head || document.documentElement).appendChild(st);
 })();
