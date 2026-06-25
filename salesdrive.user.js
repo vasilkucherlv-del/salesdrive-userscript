@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      0.90
+// @version      0.91
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -2902,6 +2902,8 @@ function __sdPageMain() {
   var STATUS_ID = 5;     // Оплачено САМОВИВІЗ
   var CASH_ID   = 44;    // Готівкою 💵
   var CARD_ID   = 100;   // Термінал 💳
+  var CHECK_KEY = 'Bfmy2OEwDnw022CI7GACrjwHOTLgyyZomtZOnTg-zLv3x_lsPTxiGSs6rFxQwAiWHWVqyYvH0JJYNgV2gJ2u14nnZMx8yMlBEI7E';
+  var CHECKS    = '/api/check/list/';   // фіскальні чеки
   var BARCODE_URL   = 'https://barcode-printer-production-2b32.up.railway.app';
   var BARCODE_TOKEN = 'nab_8Kx2pQ7mLr4tW9vZ';
 
@@ -3009,6 +3011,27 @@ function __sdPageMain() {
     return all;
   }
 
+  /* ---- фіскальні чеки за період → множина order.id з чеком (done) ---- */
+  async function fetchChecks(from,to){
+    var set=new Set(), page=1, guard=0;
+    var ff=from+' 00:00:00', tt=to+' 23:59:59';
+    while(guard++<10){
+      var url=CHECKS+'?page='+page+'&limit=100'
+        +'&filter[date][from]='+encodeURIComponent(ff)
+        +'&filter[date][to]='+encodeURIComponent(tt);
+      var r; try{ r=await fetch(url,{headers:{'Form-Api-Key':CHECK_KEY,'Accept':'application/json'}}); }catch(e){ break; }
+      if(r.status===400){ await sleep(65000); continue; }
+      var j=await r.json().catch(function(){return {};});
+      var arr=j.data||[];
+      arr.forEach(function(c){ var oid=c.order&&c.order.id; if(oid && c.fiscalizationStatus==='done') set.add(String(oid)); });
+      var pg=j.pagination||{};
+      if(arr.length<100) break;
+      if(pg.currentPage && pg.pageCount && pg.currentPage>=pg.pageCount) break;
+      page++; await sleep(6500);
+    }
+    return set;
+  }
+
   /* ---- видаткові касові ордери: newest-first, стоп на from ---- */
   async function fetchOutcoming(from,to){
     var page=1,items=[],sum=0,guard=0,stop=false;
@@ -3078,6 +3101,10 @@ function __sdPageMain() {
     +'#lk-cash-list .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}'
     +'#lk-cash-list .dt{color:#aaa;font-size:11px;margin-right:4px}'
     +'#lk-cash-list .am{white-space:nowrap;font-weight:700}'
+    +'#lk-cash-list .chk.ok{font-size:12px}'
+    +'#lk-cash-list .chk.no{font-size:11px;color:#c0392b;font-weight:700;background:#fdecea;border:1px solid #f5b7a8;border-radius:4px;padding:0 4px;margin-left:4px}'
+    +'#lk-cash-day-sum .row.card.warn{background:#fff7e6;border-color:#f0c36d}'
+    +'#lk-cash-day-sum .nochk{color:#b9770e}'
     +'#lk-cash-adj{margin:4px 16px 16px;padding:9px;border:1px dashed #ccc;border-radius:9px;text-align:center;font-size:13px;color:#666;cursor:pointer}'
     +'#lk-cash-adj:hover{background:#fafafa}'
     +'#lk-cash-load{padding:24px;text-align:center;color:#999}';
@@ -3129,13 +3156,16 @@ function __sdPageMain() {
     // Обороти за вибраний період
     var orders=await fetchOrders(span.from,span.to);
     var out=await fetchOutcoming(span.from,span.to);
-    var pCash=0,pCashN=0,pCard=0,pCardN=0,rows=[];
+    var checks=await fetchChecks(span.from,span.to);
+    var pCash=0,pCashN=0,pCard=0,pCardN=0,rows=[],noCheckN=0;
     orders.forEach(function(o){
       var p=payId(o), a=amount(o), d=payDate(o);
       if(p===CASH_ID){ pCash+=a; pCashN++; } else if(p===CARD_ID){ pCard+=a; pCardN++; } else return;
       var ic=p===CASH_ID?'💵':'💳';
       var dd=(span.from!==span.to)?'<span class="dt">'+dstr(d)+'</span>':'';
-      rows.push('<a href="/ua/index.html?formId=1#/order/update/'+o.id+'"><span class="nm">'+dd+ic+' №'+o.id+' · '+clientName(o)+'</span><span class="am">'+fmt(a)+'</span></a>');
+      var badge='';
+      if(p===CARD_ID){ if(checks.has(String(o.id))) badge=' <span class="chk ok" title="Чек є">✅</span>'; else { badge=' <span class="chk no">⚠️ без чека</span>'; noCheckN++; } }
+      rows.push('<a href="/ua/index.html?formId=1#/order/update/'+o.id+'"><span class="nm">'+dd+ic+' №'+o.id+' · '+clientName(o)+badge+'</span><span class="am">'+fmt(a)+'</span></a>');
     });
     var multi=(span.from!==span.to);
     var outHtml='';
@@ -3150,7 +3180,7 @@ function __sdPageMain() {
       balanceTxt
       +'<div id="lk-cash-day-sum">'
       +' <div class="row cash"><span class="lbl">💵 Готівка продажі <span class="cnt">'+pCashN+' зам.</span></span><span class="val">'+fmt(pCash)+'</span></div>'
-      +' <div class="row card"><span class="lbl">💳 Термінал <span class="cnt">'+pCardN+' зам.</span></span><span class="val">'+fmt(pCard)+'</span></div>'
+      +' <div class="row card'+(noCheckN?' warn':'')+'"><span class="lbl">💳 Термінал <span class="cnt">'+pCardN+' зам.'+(noCheckN?' · <b class="nochk">⚠️ без чека: '+noCheckN+'</b>':'')+'</span></span><span class="val">'+fmt(pCard)+'</span></div>'
       +(out.items.length?' <div class="row out"><span class="lbl">📤 Видатки <span class="cnt">'+out.items.length+' шт.</span></span><span class="val">−'+fmt(out.sum)+'</span></div>':'')
       +'</div>'
       +outHtml
