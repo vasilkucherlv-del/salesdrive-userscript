@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.09
+// @version      1.10
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -2919,6 +2919,9 @@ function __sdPageMain() {
   function extractSku(cell) {
     var sku = '';
     cell.querySelectorAll('span').forEach(function (sp) {
+      // ігноруємо коди всередині розгорнутих блоків (наші та комплектів),
+      // інакше зчитаємо код аналога/набору замість коду товару в рядку
+      if (sp.closest('.lkan-exp,.lknb-exp,.lkmk-exp')) return;
       var m = sp.textContent.trim().match(/^\(([\w\-]+)\)$/);
       if (m) sku = m[1];
     });
@@ -2965,7 +2968,7 @@ function __sdPageMain() {
 
       var code = document.createElement('span');
       code.className = 'code';
-      code.textContent = '(' + it.sku + ')';
+      code.textContent = 'код ' + it.sku;
       r.appendChild(code);
 
       var add = document.createElement('button');
