@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      0.99
+// @version      1.00
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -657,6 +657,35 @@ var UPSELL_MAP_DATA = [
     }
   }
 
+  // Переставити блоки супутніх за наявністю:
+  // спочатку ті, яких найбільше (qty більше — вище), потім менше,
+  // далі з невідомим залишком, а яких немає / нема в каталозі — в кінці.
+  function reorderByStock(box, slots, results) {
+    if (!box) return;
+    var info = {};
+    (results || []).forEach(function (r) { if (r && r.code != null) info[r.code] = r; });
+    var entries = Object.keys(slots).map(function (code) {
+      var r = info[code] || {};
+      var group, qty = 0;
+      if (r.found !== false && r.qty != null && Number(r.qty) > 0) {
+        group = 0; qty = Number(r.qty);              // в наявності — сортуємо за кількістю
+      } else if (r.found !== false && r.qty == null && info[code]) {
+        group = 1;                                   // знайдено, але залишок невідомий
+      } else {
+        group = 2;                                   // немає в наявності або нема в каталозі
+      }
+      return { item: slots[code].item, group: group, qty: qty };
+    });
+    // стабільне сортування: спершу за групою, всередині групи «в наявності» — за кількістю вниз
+    entries.sort(function (a, b) {
+      if (a.group !== b.group) return a.group - b.group;
+      return b.qty - a.qty;
+    });
+    entries.forEach(function (e) {
+      if (e.item && e.item.parentNode === box) box.appendChild(e.item);
+    });
+  }
+
   // запит залишків + фото у page-context для всіх супутніх одразу
   function requestStock(slots) {
     var codes = Object.keys(slots || {});
@@ -671,6 +700,7 @@ var UPSELL_MAP_DATA = [
       if (!data || data.token !== token) return;
       BUS.removeEventListener("sdUpsellStockResult", onRes);
       (data.results || []).forEach(function (r) { applyResult(slots[r.code], r); });
+      reorderByStock(document.getElementById("sd-upsell-hint"), slots, data.results);
     }
 
     BUS.addEventListener("sdUpsellStockResult", onRes);
