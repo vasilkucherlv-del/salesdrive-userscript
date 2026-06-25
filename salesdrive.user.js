@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.07
+// @version      1.08
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -785,7 +785,7 @@ var UPSELL_MAP_DATA = [
       var addBtn = document.createElement("button");
       addBtn.className = "sd-add";
       addBtn.type = "button";
-      addBtn.appendChild(document.createTextNode("➕ Додати"));
+      addBtn.appendChild(document.createTextNode("➕ Додати аналог"));
       if (it.sku) {
         var sku = document.createElement("span");
         sku.className = "sd-sku";
@@ -3657,26 +3657,27 @@ function __sdPageMain() {
   'use strict';
   var css = ''
     + '#sd-analog-hint{position:relative;box-sizing:border-box;width:100%;'
-    + '  min-width:min(540px,100%);max-width:740px;margin:10px 0 14px 0;'
-    + '  padding:12px 40px 12px 14px;background:#F2FBFA;border:1px solid #7FCBC2;'
-    + '  border-left:5px solid #00897B;border-radius:13px;'
+    + '  max-width:none;margin:10px 0 14px 0;'
+    + '  padding:9px 36px 9px 12px;background:#F2FBFA;border:1px solid #7FCBC2;'
+    + '  border-left:5px solid #00897B;border-radius:11px;'
     + '  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;'
-    + '  color:#0f3d39;box-shadow:0 8px 24px rgba(0,0,0,.09);z-index:9999;animation:sdpop .18s ease-out}'
+    + '  color:#0f3d39;box-shadow:0 6px 18px rgba(0,0,0,.08);z-index:9999;animation:sdpop .18s ease-out}'
     + '#sd-analog-hint .sd-top{font-size:11.5px;opacity:.95;font-weight:800;margin-bottom:6px;'
     + '  color:#00695C;text-transform:uppercase;letter-spacing:.4px}'
-    + '#sd-analog-hint .sd-item{display:flex;flex-wrap:wrap;align-items:flex-start;gap:7px 12px;'
-    + '  padding:11px 0;margin-top:0;border-top:1px solid rgba(0,137,123,.16)}'
-    + '#sd-analog-hint .sd-main{flex:1 1 280px;min-width:0;display:flex;flex-direction:column;'
-    + '  align-items:flex-start;gap:4px}'
+    + '#sd-analog-hint .sd-item{display:flex;flex-wrap:wrap;align-items:flex-start;gap:6px 14px;'
+    + '  padding:9px 0;margin-top:0;border-top:1px solid rgba(0,137,123,.16)}'
+    + '#sd-analog-hint .sd-item:first-of-type{border-top:none;padding-top:3px}'
+    + '#sd-analog-hint .sd-main{flex:1 1 420px;min-width:0;display:flex;flex-direction:column;'
+    + '  align-items:flex-start;gap:3px}'
     + '#sd-analog-hint .sd-name{font-size:11.5px;font-weight:700;letter-spacing:.3px;color:#3a5e5a;'
     + '  line-height:1.25;text-transform:uppercase;overflow-wrap:anywhere}'
     + '#sd-analog-hint .sd-say{display:inline-block;font-size:10px;font-weight:800;letter-spacing:.5px;'
     + '  text-transform:uppercase;color:#00897B;margin:0}'
     + '#sd-analog-hint .sd-say::before{content:"🔁 "}'
-    + '#sd-analog-hint .sd-script{font-size:14px;font-weight:500;line-height:1.4;color:#0f2b29;'
-    + '  background:#fff;border:1px solid #c8e7e2;border-left:3px solid #00897B;border-radius:9px;'
-    + '  padding:8px 11px;overflow-wrap:anywhere;box-shadow:none}'
-    + '#sd-analog-hint .sd-action{flex:0 0 auto;width:118px;max-width:100%;display:flex;'
+    + '#sd-analog-hint .sd-script{font-size:13.5px;font-weight:500;line-height:1.4;color:#0f2b29;'
+    + '  background:#fff;border:1px solid #c8e7e2;border-left:3px solid #00897B;border-radius:8px;'
+    + '  padding:7px 11px;overflow-wrap:anywhere;box-shadow:none}'
+    + '#sd-analog-hint .sd-action{flex:0 0 auto;width:138px;max-width:100%;display:flex;'
     + '  flex-direction:column;align-items:stretch;gap:6px}'
     + '#sd-analog-hint .sd-add{width:100%;box-sizing:border-box;white-space:normal;word-break:break-word;'
     + '  display:flex;align-items:center;justify-content:center;gap:5px;flex-wrap:wrap;line-height:1.2;'
@@ -3697,8 +3698,8 @@ function __sdPageMain() {
     + '#sd-analog-hint .sd-stock-yes{background:#E6F4EA;color:#1B5E20;border:1px solid #A5D6A7}'
     + '#sd-analog-hint .sd-stock-no{background:#FDECEA;color:#B71C1C;border:1px solid #F5B7B1}'
     + '#sd-analog-hint .sd-stock-unk{background:#f0f0f0;color:#777;font-weight:normal}'
-    + '#sd-analog-hint .sd-comp-img{flex:0 0 auto;width:42px;height:42px;object-fit:contain;'
-    + '  border:1px solid #b9ddd7;border-radius:9px;background:#fff}'
+    + '#sd-analog-hint .sd-comp-img{flex:0 0 auto;width:38px;height:38px;object-fit:contain;'
+    + '  border:1px solid #b9ddd7;border-radius:8px;background:#fff}'
     + '#sd-analog-hint .sd-price{background:#E8F0FE;border:1px solid #BBD3F5;border-radius:9px;'
     + '  text-align:center;padding:4px 6px;box-sizing:border-box}'
     + '#sd-analog-hint .sd-price-lab{font-size:10px;color:#4d6285;line-height:1.2}'
