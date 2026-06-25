@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      0.89
+// @version      0.90
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -2982,8 +2982,8 @@ function __sdPageMain() {
     try{ var t=await gmGet(BARCODE_URL+'/api/cash-baseline?token='+encodeURIComponent(BARCODE_TOKEN));
       var d=JSON.parse(t); return d&&d.ok?d.baseline:null; }catch(e){ return null; }
   }
-  async function setBaseline(amount){
-    var body={amount:amount,date:ymd(new Date()),by:''};
+  async function setBaseline(amount,pin){
+    var body={amount:amount,date:ymd(new Date()),by:'',pin:pin};
     var t=await gmPost(BARCODE_URL+'/api/cash-baseline?token='+encodeURIComponent(BARCODE_TOKEN),body);
     var d=JSON.parse(t); if(!d.ok) throw new Error(d.error||'err'); return d.baseline;
   }
@@ -3164,10 +3164,16 @@ function __sdPageMain() {
     if(v==null) return;
     var n=parseFloat(String(v).replace(',','.').replace(/\s/g,''));
     if(isNaN(n)){ alert('Введіть число.'); return; }
+    var pin=prompt('Введіть PIN для коригування каси:');
+    if(pin==null) return;
     var box=document.getElementById('lk-cash-box');
     if(box) box.querySelector('#lk-cash-body').innerHTML='<div id="lk-cash-load">Зберігаю…</div>';
-    try{ await setBaseline(n); mode='day'; anchor=new Date(); await render(); }
-    catch(e){ alert('Не вдалося зберегти: '+e.message); render(); }
+    try{ await setBaseline(n,pin); mode='day'; anchor=new Date(); await render(); }
+    catch(e){
+      if(/HTTP 403|bad pin/.test(e.message)) alert('Невірний PIN — залишок не змінено.');
+      else alert('Не вдалося зберегти: '+e.message);
+      render();
+    }
   }
 
   function setMode(m){
