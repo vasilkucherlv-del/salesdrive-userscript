@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.04
+// @version      1.05
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -3061,7 +3061,7 @@ function __sdPageMain() {
   'use strict';
   var css = ''
     // контейнер: вужчий і витягнутий по вертикалі (краще довгий, ніж широкий)
-    + '#sd-upsell-hint{padding:14px 40px 14px 14px;max-width:480px;'
+    + '#sd-upsell-hint{padding:14px 38px 14px 12px;max-width:380px;'
     + '  background:#FFFDF6;border:1px solid #F0CE72;border-left:5px solid #F0A800;'
     + '  border-radius:13px;box-shadow:0 8px 24px rgba(0,0,0,.09);'
     + '  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif}'
@@ -3072,7 +3072,7 @@ function __sdPageMain() {
     // фото
     + '#sd-upsell-hint .sd-comp-img{width:42px;height:42px;border-radius:9px;border:1px solid #ece0bf}'
     // середня колонка: вужча основа → текст переноситься на більше рядків (вище)
-    + '#sd-upsell-hint .sd-main{flex:1 1 210px;gap:6px}'
+    + '#sd-upsell-hint .sd-main{flex:1 1 165px;gap:6px}'
     + '#sd-upsell-hint .sd-name{font-size:11.5px;font-weight:700;letter-spacing:.3px;'
     + '  color:#9b7d23;line-height:1.25;margin:0;text-transform:uppercase}'
     + '#sd-upsell-hint .sd-say{display:inline-block;font-size:10px;font-weight:800;'
@@ -3085,7 +3085,7 @@ function __sdPageMain() {
     // бейдж залишку — пігулка
     + '#sd-upsell-hint .sd-stock{font-size:11px;font-weight:600;padding:3px 9px;border-radius:999px}'
     // права колонка
-    + '#sd-upsell-hint .sd-action{width:118px;gap:6px}'
+    + '#sd-upsell-hint .sd-action{width:102px;gap:6px}'
     + '#sd-upsell-hint .sd-price{padding:4px 6px;border-radius:9px}'
     + '#sd-upsell-hint .sd-price-lab{font-size:10px}'
     + '#sd-upsell-hint .sd-price-val{font-size:17px;font-weight:800}'
