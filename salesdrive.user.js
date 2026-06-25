@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.12
+// @version      1.13
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -3443,6 +3443,11 @@ function __sdPageMain() {
 
   function pad(n){ return n<10?'0'+n:''+n; }
   function ymd(d){ return d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate()); }
+  // дата+час локально (для стартової точки каси), формат "YYYY-MM-DD HH:MM:SS"
+  function ymdhms(d){ return ymd(d)+' '+pad(d.getHours())+':'+pad(d.getMinutes())+':'+pad(d.getSeconds()); }
+  // нормалізуємо будь-який рядок дати до порівнюваного "YYYY-MM-DD HH:MM:SS"
+  // (дата без часу → початок дня, щоб старі baseline без часу не ламались)
+  function dtnorm(s){ s=String(s==null?'':s).replace('T',' ').trim(); return s.length<=10 ? (s+' 00:00:00') : s.slice(0,19); }
   function fmt(n){ return Number(n||0).toLocaleString('uk-UA',{minimumFractionDigits:2,maximumFractionDigits:2})+' ₴'; }
   function num(v){ var m=String(v==null?'':v).replace(',','.').match(/-?[\d.]+/); return m?parseFloat(m[0]):0; }
   function sleep(ms){ return new Promise(function(r){ setTimeout(r,ms); }); }
@@ -3520,7 +3525,9 @@ function __sdPageMain() {
       var d=JSON.parse(t); return d&&d.ok?d.baseline:null; }catch(e){ return null; }
   }
   async function setBaseline(amount,pin){
-    var body={amount:amount,date:ymd(new Date()),by:'',pin:pin};
+    // зберігаємо МОМЕНТ перерахунку (дата+час); ts — резерв, якщо сервер обріже date
+    var nowStr=ymdhms(new Date());
+    var body={amount:amount,date:nowStr,ts:nowStr,by:'',pin:pin};
     var t=await gmPost(BARCODE_URL+'/api/cash-baseline?token='+encodeURIComponent(BARCODE_TOKEN),body);
     var d=JSON.parse(t); if(!d.ok) throw new Error(d.error||'err'); return d.baseline;
   }
@@ -3596,7 +3603,7 @@ function __sdPageMain() {
         if(dt<from){ stop=true; break; }
         if(dt>to) continue;
         var a=num(o.totalSum); sum+=a;
-        items.push({id:o.id,date:dt,amount:a,comment:String(o.comment||'').trim(),number:o.number});
+        items.push({id:o.id,date:dt,ts:String(o.date||''),amount:a,comment:String(o.comment||'').trim(),number:o.number});
       }
       var pg=j.pagination||{}; if(pg.currentPage>=pg.pageCount) break;
       page++; await sleep(300);
@@ -3702,6 +3709,7 @@ function __sdPageMain() {
       box.querySelector('#lk-cash-adj').onclick=adjust; return;
     }
     var bdate=String(base.date).slice(0,10);
+    var bts=dtnorm(base.ts||base.date); // МОМЕНТ перерахунку (дата+час) для відсікання
 
     // ── Один запит на обʼєднаний діапазон, далі рахуємо і залишок, і період ──
     var hasBal=(span.to>=bdate);
@@ -3723,8 +3731,10 @@ function __sdPageMain() {
     if(!hasBal){
       balanceTxt='<div style="padding:2px 16px 8px;color:#999;font-size:13px">Період раніше за стартову точку каси ('+dstr(bdate)+') — залишок не рахується.</div>';
     } else {
-      var cashCum=0; allOrders.forEach(function(o){ if(payId(o)===CASH_ID && payDate(o)>=bdate) cashCum+=amount(o); });
-      var outCum=0; allOut.items.forEach(function(x){ if(x.date>=bdate) outCum+=x.amount; });
+      // рахуємо лише те, що сталося ПІСЛЯ моменту перерахунку (за часом, не лише датою),
+      // інакше сьогоднішні продажі/видатки до перерахунку зарахувались би двічі
+      var cashCum=0; allOrders.forEach(function(o){ if(payId(o)===CASH_ID && dtnorm(o.paymentDate)>bts) cashCum+=amount(o); });
+      var outCum=0; allOut.items.forEach(function(x){ if(dtnorm(x.ts||x.date)>bts) outCum+=x.amount; });
       var balance=num(base.amount)+cashCum-outCum;
       balanceTxt='<div id="lk-cash-bal"><span class="l">💰 Готівка в касі<br><span class="sub">станом на '+dstr(span.to)+'</span></span><span class="v">'+fmt(balance)+'</span></div>';
     }
@@ -3762,7 +3772,7 @@ function __sdPageMain() {
       +'</div>'
       +outHtml
       +'<div id="lk-cash-list"><div class="ttl">Замовлення за період ('+(pCashN+pCardN)+')</div>'+(rows.join('')||'<div style="color:#999;padding:6px 0">Немає</div>')+'</div>'
-      +'<div id="lk-cash-adj">⚙️ Скоригувати залишок (зараз '+fmt(base.amount)+' від '+dstr(bdate)+')</div>';
+      +'<div id="lk-cash-adj">⚙️ Скоригувати залишок (зараз '+fmt(base.amount)+' від '+dstr(bdate)+' '+bts.slice(11,16)+')</div>';
     box.querySelector('#lk-cash-adj').onclick=adjust;
   }
 
