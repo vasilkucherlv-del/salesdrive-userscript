@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      0.92
+// @version      0.99
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -2917,6 +2917,7 @@ function __sdPageMain() {
 
   // режим: 'day' | 'week' | 'month' | 'range'
   var mode='day';
+  var renderSeq=0;                 // для скасування застарілих перемальовувань
   var anchor=new Date();           // опорна дата для day/week/month
   var rangeFrom=null, rangeTo=null;// для 'range' (рядки ymd)
 
@@ -2997,18 +2998,34 @@ function __sdPageMain() {
   function payDate(o){ return String(o.paymentDate||'').slice(0,10); }
   function clientName(o){ var c=(o.contacts&&o.contacts[0])||o;
     var n=[c.lName||c.lname||'',c.fName||c.fname||''].join(' ').trim(); return n||('№'+o.id); }
+  function ordUrl(pm,from,to){
+    return '/ua/index.html?formId=1#/order/index?'
+      +'filter%5BstatusId%5D%5B%5D='+STATUS_ID
+      +'&filter%5Bpayment_method%5D%5B%5D='+pm
+      +'&filter%5BpaymentDate%5D%5Bfrom%5D='+from
+      +'&filter%5BpaymentDate%5D%5Bto%5D='+to;
+  }
+  var OUTC_URL='/ua/index.html?formId=1#/document/cash-order/outcoming';
+
   async function fetchOrders(from,to){
     var page=1,all=[],guard=0;
     while(guard++<40){
       var url=ORDERS+'?page='+page+'&limit=100&filter[statusId]='+STATUS_ID
         +'&filter[paymentDate][from]='+from+'&filter[paymentDate][to]='+to;
       var r; try{ r=await fetch(url,{headers:{'Form-Api-Key':API_KEY,'Accept':'application/json'}}); }catch(e){ break; }
-      if(r.status===400){ await sleep(65000); continue; }
+      if(r.status===400){ cashNote('⏳ Забагато запитів до SalesDrive.<br>Зачекайте ~1 хв, рахунок продовжиться сам…'); await sleep(65000); cashNote('Рахую…'); continue; }
       var j=await r.json().catch(function(){return {};});
       var arr=j.data||j.orders||[]; all=all.concat(arr);
       if(arr.length<100) break; page++; await sleep(6500);
     }
     return all;
+  }
+
+  function shiftYmd(d,delta){
+    var p=String(d).slice(0,10).split('-');
+    var dt=new Date(parseInt(p[0],10),parseInt(p[1],10)-1,parseInt(p[2],10));
+    dt.setDate(dt.getDate()+delta);
+    return ymd(dt);
   }
 
   /* ---- фіскальні чеки за період → множина order.id з чеком (done) ---- */
@@ -3019,8 +3036,8 @@ function __sdPageMain() {
       var url=CHECKS+'?page='+page+'&limit=100'
         +'&filter[date][from]='+encodeURIComponent(ff)
         +'&filter[date][to]='+encodeURIComponent(tt);
-      var r; try{ r=await fetch(url,{headers:{'Form-Api-Key':CHECK_KEY,'Accept':'application/json'}}); }catch(e){ break; }
-      if(r.status===400){ await sleep(65000); continue; }
+      var r; try{ r=await fetch(url,{headers:{'X-Api-Key':CHECK_KEY,'Accept':'application/json'}}); }catch(e){ break; }
+      if(r.status===400){ cashNote('⏳ Забагато запитів до SalesDrive.<br>Зачекайте ~1 хв, рахунок продовжиться сам…'); await sleep(65000); cashNote('Рахую…'); continue; }
       var j=await r.json().catch(function(){return {};});
       var arr=j.data||[];
       arr.forEach(function(c){ var oid=c.order&&c.order.id; if(oid && c.fiscalizationStatus==='done') set.add(String(oid)); });
@@ -3045,7 +3062,7 @@ function __sdPageMain() {
         if(dt<from){ stop=true; break; }
         if(dt>to) continue;
         var a=num(o.totalSum); sum+=a;
-        items.push({date:dt,amount:a,comment:String(o.comment||'').trim(),number:o.number});
+        items.push({id:o.id,date:dt,amount:a,comment:String(o.comment||'').trim(),number:o.number});
       }
       var pg=j.pagination||{}; if(pg.currentPage>=pg.pageCount) break;
       page++; await sleep(300);
@@ -3091,6 +3108,8 @@ function __sdPageMain() {
     +'#lk-cash-day-sum .cnt{font-size:11px;color:#888;font-weight:400}'
     +'#lk-cash-out-list{padding:0 16px}'
     +'#lk-cash-out-list .it{display:flex;justify-content:space-between;gap:8px;padding:6px 12px;font-size:13px;border-bottom:1px dashed #f0d4cc}'
+    +'#lk-cash-out-list a.it{text-decoration:none;color:#a8432a;cursor:pointer}'
+    +'#lk-cash-out-list a.it:hover{background:#fdeeea}'
     +'#lk-cash-out-list .cm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#7a3b28}'
     +'#lk-cash-out-list .dt{color:#b08;font-size:11px;margin-right:4px}'
     +'#lk-cash-out-list .am{white-space:nowrap;font-weight:700;color:#a8432a}'
@@ -3105,6 +3124,9 @@ function __sdPageMain() {
     +'#lk-cash-list .chk.no{font-size:11px;color:#c0392b;font-weight:700;background:#fdecea;border:1px solid #f5b7a8;border-radius:4px;padding:0 4px;margin-left:4px}'
     +'#lk-cash-day-sum .row.card.warn{background:#fff7e6;border-color:#f0c36d}'
     +'#lk-cash-day-sum .nochk{color:#b9770e}'
+    +'#lk-cash-day-sum a.row{text-decoration:none;color:inherit;cursor:pointer;transition:filter .1s}'
+    +'#lk-cash-day-sum a.row:hover{filter:brightness(.97)}'
+    +'#lk-cash-day-sum a.row .val{white-space:nowrap}'
     +'#lk-cash-adj{margin:4px 16px 16px;padding:9px;border:1px dashed #ccc;border-radius:9px;text-align:center;font-size:13px;color:#666;cursor:pointer}'
     +'#lk-cash-adj:hover{background:#fafafa}'
     +'#lk-cash-load{padding:24px;text-align:center;color:#999}';
@@ -3120,8 +3142,14 @@ function __sdPageMain() {
     box.querySelector('#lk-cash-nav').style.display = (mode==='range')?'none':'flex';
   }
 
+  function cashNote(msg){
+    var el=document.getElementById('lk-cash-load');
+    if(el) el.innerHTML=msg;
+  }
+
   async function render(){
     var box=document.getElementById('lk-cash-box'); if(!box) return;
+    var myseq=++renderSeq;
     syncModeUI();
     if(mode==='range' && !(rangeFrom&&rangeTo)){
       box.querySelector('#lk-cash-body').innerHTML='<div style="padding:18px 16px;color:#888;font-size:14px">Оберіть дати «від» і «до» та натисніть «Показати».</div>';
@@ -3132,6 +3160,7 @@ function __sdPageMain() {
     box.querySelector('#lk-cash-body').innerHTML='<div id="lk-cash-load">Рахую…</div>';
 
     var base=await getBaseline();
+    if(myseq!==renderSeq) return;
     if(!base){
       box.querySelector('#lk-cash-body').innerHTML=
         '<div style="padding:18px 16px;color:#555;font-size:14px;line-height:1.5">Стартовий залишок каси ще не задано.<br>Порахуйте готівку в коробці й натисніть нижче.</div>'
@@ -3140,23 +3169,37 @@ function __sdPageMain() {
     }
     var bdate=String(base.date).slice(0,10);
 
-    // Залишок завжди накопичувально від стартової точки до КІНЦЯ періоду
-    var balFrom=bdate, balTo=span.to;
+    // ── Один запит на обʼєднаний діапазон, далі рахуємо і залишок, і період ──
+    var hasBal=(span.to>=bdate);
+    var uFrom=hasBal?(bdate<span.from?bdate:span.from):span.from;
+    var uTo=span.to;
+    // три незалежні джерела — тягнемо паралельно (різні ключі = різні ліміти)
+    var _res=await Promise.all([
+      fetchOrders(uFrom,uTo),
+      fetchOutcoming(uFrom,uTo),
+      fetchChecks(shiftYmd(span.from,-3),shiftYmd(span.to,3))
+    ]);
+    if(myseq!==renderSeq) return;
+    var allOrders=_res[0], allOut=_res[1], checks=_res[2];
+
+    function inPeriod(d){ return d>=span.from && d<=span.to; }
+
+    // Залишок: уся готівка з продажів від стартової точки − видаткові ордери від стартової точки
     var balanceTxt;
-    if(span.to<bdate){
+    if(!hasBal){
       balanceTxt='<div style="padding:2px 16px 8px;color:#999;font-size:13px">Період раніше за стартову точку каси ('+dstr(bdate)+') — залишок не рахується.</div>';
     } else {
-      var balOrders=await fetchOrders(balFrom,balTo);
-      var balOut=await fetchOutcoming(balFrom,balTo);
-      var cashCum=0; balOrders.forEach(function(o){ if(payId(o)===CASH_ID) cashCum+=amount(o); });
-      var balance=num(base.amount)+cashCum-balOut.sum;
+      var cashCum=0; allOrders.forEach(function(o){ if(payId(o)===CASH_ID && payDate(o)>=bdate) cashCum+=amount(o); });
+      var outCum=0; allOut.items.forEach(function(x){ if(x.date>=bdate) outCum+=x.amount; });
+      var balance=num(base.amount)+cashCum-outCum;
       balanceTxt='<div id="lk-cash-bal"><span class="l">💰 Готівка в касі<br><span class="sub">станом на '+dstr(span.to)+'</span></span><span class="v">'+fmt(balance)+'</span></div>';
     }
 
-    // Обороти за вибраний період
-    var orders=await fetchOrders(span.from,span.to);
-    var out=await fetchOutcoming(span.from,span.to);
-    var checks=await fetchChecks(span.from,span.to);
+    // Обороти за вибраний період (з того самого набору)
+    var orders=allOrders.filter(function(o){ return inPeriod(payDate(o)); });
+    var outItems=allOut.items.filter(function(x){ return inPeriod(x.date); });
+    var outSum=0; outItems.forEach(function(x){ outSum+=x.amount; });
+    var out={sum:outSum,items:outItems};
     var pCash=0,pCashN=0,pCard=0,pCardN=0,rows=[],noCheckN=0;
     orders.forEach(function(o){
       var p=payId(o), a=amount(o), d=payDate(o);
@@ -3172,15 +3215,15 @@ function __sdPageMain() {
     if(out.items.length){
       outHtml='<div id="lk-cash-out-list">'+out.items.map(function(x){
         var dd=multi?'<span class="dt">'+dstr(x.date)+'</span>':'';
-        return '<div class="it"><span class="cm">'+dd+'📤 '+(x.comment||'видаток №'+x.number)+'</span><span class="am">−'+fmt(x.amount)+'</span></div>';
+        return '<a class="it" href="/ua/index.html?formId=1#/document/cash-order/update/'+x.id+'" target="_blank" title="Відкрити касовий ордер"><span class="cm">'+dd+'📤 '+(x.comment||'видаток №'+x.number)+'</span><span class="am">−'+fmt(x.amount)+' ↗</span></a>';
       }).join('')+'</div>';
     }
 
     box.querySelector('#lk-cash-body').innerHTML=
       balanceTxt
       +'<div id="lk-cash-day-sum">'
-      +' <div class="row cash"><span class="lbl">💵 Готівка продажі <span class="cnt">'+pCashN+' зам.</span></span><span class="val">'+fmt(pCash)+'</span></div>'
-      +' <div class="row card'+(noCheckN?' warn':'')+'"><span class="lbl">💳 Термінал <span class="cnt">'+pCardN+' зам.'+(noCheckN?' · <b class="nochk">⚠️ без чека: '+noCheckN+'</b>':'')+'</span></span><span class="val">'+fmt(pCard)+'</span></div>'
+      +' <a class="row cash" href="'+ordUrl(CASH_ID,span.from,span.to)+'" target="_blank" title="Відкрити у SalesDrive"><span class="lbl">💵 Готівка продажі <span class="cnt">'+pCashN+' зам.</span></span><span class="val">'+fmt(pCash)+' ↗</span></a>'
+      +' <a class="row card'+(noCheckN?' warn':'')+'" href="'+ordUrl(CARD_ID,span.from,span.to)+'" target="_blank" title="Відкрити у SalesDrive"><span class="lbl">💳 Термінал <span class="cnt">'+pCardN+' зам.'+(noCheckN?' · <b class="nochk">⚠️ без чека: '+noCheckN+'</b>':'')+'</span></span><span class="val">'+fmt(pCard)+' ↗</span></a>'
       +(out.items.length?' <div class="row out"><span class="lbl">📤 Видатки <span class="cnt">'+out.items.length+' шт.</span></span><span class="val">−'+fmt(out.sum)+'</span></div>':'')
       +'</div>'
       +outHtml
