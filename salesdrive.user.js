@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.24
+// @version      1.26
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -3981,10 +3981,16 @@ function __sdPageMain() {
       else { sel.value = val; sel.dispatchEvent(new Event('change', {bubbles:true})); }
     }catch(e){}
   }
-  // справжній клік-емулятор (Angular ng-click та select2 реагують на ці події)
+  // справжній клік-емулятор (Angular ng-click та select2 реагують на ці події).
+  // ВАЖЛИВО: без view:window — у пісочниці Tampermonkey window обгорнутий у Proxy
+  // і MouseEvent його не приймає (помилка "Failed to convert value to 'Window'").
+  var REALWIN = (typeof unsafeWindow!=='undefined' && unsafeWindow) ? unsafeWindow : window;
   function clickIt(el){
     ['mouseenter','mousedown','mouseup','click'].forEach(function(t){
-      el.dispatchEvent(new MouseEvent(t, {bubbles:true, cancelable:true, view:window}));
+      var ev;
+      try{ ev=new MouseEvent(t, {bubbles:true, cancelable:true, view:REALWIN}); }
+      catch(e){ ev=new MouseEvent(t, {bubbles:true, cancelable:true}); }
+      el.dispatchEvent(ev);
     });
   }
   function waitFor(getter, maxTries, cb){
@@ -4024,16 +4030,33 @@ function __sdPageMain() {
   }
   // відкрити поле доставки → дочекатись попапа → клікнути «Самовивіз»
   function applyPickup(){
-    waitFor(shipFieldReady, 80, function(field){
-      if(!field) return;
-      if(/самови/i.test(field.textContent||'')) return; // вже стоїть — не чіпаємо
-      if(!optionsVisible()) clickIt(field);              // відкрити попап лише якщо ще закритий
-      waitFor(pickupOption, 40, function(opt){
-        if(!opt) return;
-        setTimeout(function(){                           // дати попапу домалюватись
-          clickIt(opt.querySelector('span') || opt);     // клік саме по внутрішньому span
-        }, 120);
-      });
+    console.log('[pickup] старт, чекаю готовності поля доставки');
+    waitFor(shipFieldReady, 120, function(field){
+      if(!field){ console.log('[pickup] ❌ поле так і не стало готовим'); return; }
+      console.log('[pickup] поле готове, текст:', JSON.stringify((field.textContent||'').trim()));
+      if(/самови/i.test(field.textContent||'')){ console.log('[pickup] вже самовивіз — нічого не роблю'); return; }
+      // відкриваємо попап; якщо з першого разу не зʼявився — клікаємо ще раз
+      var openTries=0;
+      var ivOpen=setInterval(function(){
+        openTries++;
+        if(optionsVisible()){
+          clearInterval(ivOpen);
+          console.log('[pickup] попап відкрито за', openTries, 'спроб');
+          waitFor(pickupOption, 40, function(opt){
+            if(!opt){ console.log('[pickup] ❌ пункт самовивозу не знайдено'); return; }
+            setTimeout(function(){
+              clickIt(opt.querySelector('span') || opt);
+              console.log('[pickup] клікнув самовивіз');
+              setTimeout(function(){
+                console.log('[pickup] РЕЗУЛЬТАТ:', JSON.stringify((shipField()||{}).textContent||''));
+              }, 600);
+            }, 150);
+          });
+          return;
+        }
+        clickIt(field); // ще одна спроба відкрити
+        if(openTries>20){ clearInterval(ivOpen); console.log('[pickup] ❌ попап не відкрився за 20 спроб'); }
+      }, 250);
     });
   }
   function openPickupOrder(){
