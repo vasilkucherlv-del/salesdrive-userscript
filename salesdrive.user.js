@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.26
+// @version      1.28
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4079,4 +4079,77 @@ function __sdPageMain() {
     anchor.parentNode.insertBefore(b, anchor.nextSibling);
   }
   setInterval(addBtn, 1500); addBtn();
+
+  /* ---- дві плитки швидкої оплати (готівка / термінал) для самовивозу ---- */
+  // знайти пункт у відкритому select2-попапі: спершу за точним значенням number:NN, далі за текстом
+  function findOption(numVal, textRe){
+    var lis=document.querySelectorAll('li.select2-results__option');
+    var suffix='number:'+numVal;
+    for(var i=0;i<lis.length;i++){ if((lis[i].id||'').slice(-suffix.length)===suffix) return lis[i]; }
+    for(var j=0;j<lis.length;j++){ if(textRe && textRe.test(lis[j].textContent||'')) return lis[j]; }
+    return null;
+  }
+  // вибрати значення у кастомному p-editable полі (оплата/доставка)
+  function chooseInField(fieldAttr, numVal, textRe){
+    var field=document.querySelector('[attr-field-name="'+fieldAttr+'"]');
+    if(!field) return;
+    var tries=0;
+    var iv=setInterval(function(){
+      tries++;
+      if(optionsVisible()){
+        clearInterval(iv);
+        waitFor(function(){ return findOption(numVal, textRe); }, 40, function(opt){
+          if(!opt) return;
+          setTimeout(function(){ clickIt(opt.querySelector('span') || opt); }, 150);
+        });
+        return;
+      }
+      clickIt(field);                       // відкрити попап (повторні спроби)
+      if(tries>20) clearInterval(iv);
+    }, 250);
+  }
+  // текст готового (домальованого) поля; null якщо поле сире або відсутнє
+  function readyFieldText(attr){
+    var f=document.querySelector('[attr-field-name="'+attr+'"]');
+    if(!f) return null;
+    var t=(f.textContent||'').replace(/\s+/g,' ').trim();
+    return t.length>40 ? null : t;          // довгий текст = ще будується
+  }
+  function ensurePayTiles(){
+    if(document.getElementById('lk-pay-tiles')) return;
+    var st=document.createElement('style');
+    st.textContent=''
+      +'#lk-pay-tiles{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);z-index:99997;display:none;gap:16px}'
+      +'#lk-pay-tiles.show{display:flex}'
+      +'#lk-pay-tiles .lk-pt{width:160px;height:96px;border-radius:16px;display:flex;flex-direction:column;align-items:center;justify-content:center;font-size:21px;font-weight:800;color:#fff;cursor:pointer;box-shadow:0 8px 24px rgba(0,0,0,.32);line-height:1.3;text-align:center;user-select:none;font-family:system-ui,Arial,sans-serif}'
+      +'#lk-pay-tiles .lk-pt .ic{font-size:30px;margin-bottom:2px}'
+      +'#lk-pay-tiles .lk-pt[data-pay="cash"]{background:#2e9e5b}'
+      +'#lk-pay-tiles .lk-pt[data-pay="card"]{background:#2b6fd0}'
+      +'#lk-pay-tiles .lk-pt:hover{filter:brightness(1.08)}'
+      +'#lk-pay-tiles .lk-pt:active{transform:translateY(2px)}';
+    document.head.appendChild(st);
+    var wrap=document.createElement('div'); wrap.id='lk-pay-tiles';
+    wrap.innerHTML=''
+      +'<div class="lk-pt" data-pay="cash"><span class="ic">💵</span>Готівка</div>'
+      +'<div class="lk-pt" data-pay="card"><span class="ic">💳</span>Термінал</div>';
+    document.body.appendChild(wrap);
+    wrap.querySelector('[data-pay="cash"]').onclick=function(){ chooseInField('payment_method', 44, /готівк/i); };
+    wrap.querySelector('[data-pay="card"]').onclick=function(){ chooseInField('payment_method', 100, /термінал/i); };
+  }
+  // показуємо плитки лише на картці заявки, коли доставка = самовивіз і оплата ще НЕ обрана
+  function updatePayTiles(){
+    ensurePayTiles();
+    var wrap=document.getElementById('lk-pay-tiles');
+    var onCard=/\/order\/(create|update)/.test(location.hash||'');
+    if(!onCard){ wrap.classList.remove('show'); return; }
+    var ship=readyFieldText('shipping_method');
+    var pay=readyFieldText('payment_method');
+    if(ship===null || pay===null){ wrap.classList.remove('show'); return; } // поля ще не готові
+    var isPickup=/самови/i.test(ship);
+    // оплата вважається ОБРАНОЮ, якщо в полі є конкретний спосіб
+    var paySet=/готівк|термінал|приват|monobank|моно|накладен|при отриман|розрахунк|wayforpay|liqpay|олх|пром/i.test(pay);
+    if(isPickup && !paySet) wrap.classList.add('show');
+    else wrap.classList.remove('show');
+  }
+  setInterval(updatePayTiles, 1000); updatePayTiles();
 })();
