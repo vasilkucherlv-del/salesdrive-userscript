@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.17
+// @version      1.24
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -3570,6 +3570,48 @@ function __sdPageMain() {
     return all;
   }
 
+  /* ---- заявки «Оплачено САМОВИВІЗ», але БЕЗ обраного способу оплати ---- */
+  // дивимось останні ~600 заявок статусу 5 (забута оплата — завжди серед свіжих),
+  // лишаємо ті, де payId(o)===null (спосіб оплати порожній).
+  var unpaidCache=null, unpaidBusy=false;
+  async function fetchUnpaidPickup(){
+    var page=1,out=[],guard=0;
+    while(guard++<6){
+      var url=ORDERS+'?page='+page+'&limit=100&filter[statusId]='+STATUS_ID;
+      var r; try{ r=await fetch(url,{headers:{'Form-Api-Key':API_KEY,'Accept':'application/json'}}); }catch(e){ break; }
+      if(r.status===400){ await sleep(65000); continue; }
+      var j=await r.json().catch(function(){return {};});
+      var arr=j.data||[];
+      arr.forEach(function(o){ if(payId(o)===null) out.push({id:o.id,amount:amount(o),date:payDate(o),name:clientName(o)}); });
+      if(arr.length<100) break; page++; await sleep(6500);
+    }
+    return out;
+  }
+  async function loadUnpaid(force){
+    if(unpaidBusy) return;
+    if(unpaidCache && !force){ renderUnpaid(); return; }
+    unpaidBusy=true; renderUnpaid('loading');
+    try{ unpaidCache=await fetchUnpaidPickup(); }catch(e){ /* лишаємо попередній кеш */ }
+    unpaidBusy=false; renderUnpaid();
+  }
+  function renderUnpaid(state){
+    var el=document.getElementById('lk-cash-unpaid'); if(!el) return;
+    if(state==='loading' && !unpaidCache){
+      el.style.display='block';
+      el.innerHTML='<div class="lk-unpaid-load">Перевіряю заявки без способу оплати…</div>';
+      return;
+    }
+    var list=unpaidCache||[];
+    if(!list.length){ el.style.display='none'; el.innerHTML=''; return; }
+    var sum=0; list.forEach(function(x){ sum+=x.amount; });
+    el.style.display='block';
+    el.innerHTML='<div class="lk-unpaid-ttl">⚠️ Оплачено, але не вказано спосіб оплати: '+list.length+' зам. на '+fmt(sum)+'</div>'
+      +'<div class="lk-unpaid-list">'+list.map(function(x){
+        return '<a href="/ua/index.html?formId=1#/order/update/'+x.id+'" title="Відкрити заявку"><span class="nm">№'+x.id+' · '+x.name+(x.date?' · '+dstr(x.date):'')+'</span><span class="am">'+fmt(x.amount)+'</span></a>';
+      }).join('')+'</div>'
+      +'<div class="lk-unpaid-hint">Відкрийте заявку та проставте спосіб оплати — після цього вона зайде в касу.</div>';
+  }
+
   function shiftYmd(d,delta){
     var p=String(d).slice(0,10).split('-');
     var dt=new Date(parseInt(p[0],10),parseInt(p[1],10)-1,parseInt(p[2],10));
@@ -3678,6 +3720,14 @@ function __sdPageMain() {
     +'#lk-cash-day-sum a.row .val{white-space:nowrap}'
     +'#lk-cash-adj{margin:4px 16px 16px;padding:9px;border:1px dashed #ccc;border-radius:9px;text-align:center;font-size:13px;color:#666;cursor:pointer}'
     +'#lk-cash-adj:hover{background:#fafafa}'
+    +'#lk-cash-unpaid{margin:2px 16px 8px;border:1px solid #f0b8a8;background:#fdeeea;border-radius:11px;overflow:hidden}'
+    +'#lk-cash-unpaid .lk-unpaid-ttl{padding:10px 14px;font-size:13px;font-weight:800;color:#b2391c;background:#fbe2da}'
+    +'#lk-cash-unpaid .lk-unpaid-list a{display:flex;justify-content:space-between;gap:8px;padding:7px 14px;text-decoration:none;color:#7a3b28;font-size:13px;border-top:1px solid #f3d3c9}'
+    +'#lk-cash-unpaid .lk-unpaid-list a:hover{background:#fbe2da}'
+    +'#lk-cash-unpaid .lk-unpaid-list .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}'
+    +'#lk-cash-unpaid .lk-unpaid-list .am{white-space:nowrap;font-weight:700}'
+    +'#lk-cash-unpaid .lk-unpaid-hint{padding:7px 14px;font-size:11px;color:#9c5a48;background:#fff}'
+    +'#lk-cash-unpaid .lk-unpaid-load{padding:9px 14px;font-size:12px;color:#999}'
     +'#lk-cash-load{padding:24px;text-align:center;color:#999}';
     document.head.appendChild(s);
   }
@@ -3780,7 +3830,7 @@ function __sdPageMain() {
       +'</div>'
       +outHtml
       +'<div id="lk-cash-list"><div class="ttl">Замовлення за період ('+(pCashN+pCardN)+')</div>'+(rows.join('')||'<div style="color:#999;padding:6px 0">Немає</div>')+'</div>'
-      +'<div id="lk-cash-adj">⚙️ Скоригувати залишок (останнє коригування: '+dstr(bdate)+' '+String(base.date).slice(11,16)+')</div>';
+      +'<div id="lk-cash-adj">⚙️ Задати стартовий залишок каси (під PIN)</div>';
     box.querySelector('#lk-cash-adj').onclick=adjust;
   }
 
@@ -3832,12 +3882,13 @@ function __sdPageMain() {
      +' </div>'
      +' <div id="lk-cash-range"><label>від <input type="date" id="lk-rf" value="'+today+'"></label><label>до <input type="date" id="lk-rt" value="'+today+'"></label><button class="go">Показати</button></div>'
      +' <div id="lk-cash-nav"><button class="prev">‹</button><span id="lk-cash-span"></span><button class="next">›</button><button class="today">зараз</button></div>'
+     +' <div id="lk-cash-unpaid" style="display:none"></div>'
      +' <div id="lk-cash-body"></div>'
      +'</div>';
     document.body.appendChild(ov);
     ov.addEventListener('click',function(e){ if(e.target===ov) ov.remove(); });
     ov.querySelector('.x').onclick=function(){ ov.remove(); };
-    ov.querySelector('.rf').onclick=function(){ render(); };
+    ov.querySelector('.rf').onclick=function(){ render(); loadUnpaid(true); };
     ov.querySelectorAll('#lk-cash-modes button').forEach(function(b){
       b.onclick=function(){ setMode(b.getAttribute('data-m')); };
     });
@@ -3850,6 +3901,7 @@ function __sdPageMain() {
     ov.querySelector('.next').onclick=function(){ shift(1); render(); };
     ov.querySelector('.today').onclick=function(){ anchor=new Date(); render(); };
     render();
+    loadUnpaid();
   }
 
   function addBtn(){
@@ -3917,4 +3969,91 @@ function __sdPageMain() {
   var st = document.createElement('style');
   st.textContent = css;
   (document.head || document.documentElement).appendChild(st);
+})();
+/* ===== ➕ Швидка кнопка: нова заявка із самовивозом ===== */
+(function lkQuickPickup(){
+  'use strict';
+  var SHIP_PICKUP = 43; // id способу доставки «Самовивіз»
+
+  function setShipping(sel, val){
+    try{
+      if(window.jQuery){ window.jQuery(sel).val(val).trigger('change'); }
+      else { sel.value = val; sel.dispatchEvent(new Event('change', {bubbles:true})); }
+    }catch(e){}
+  }
+  // справжній клік-емулятор (Angular ng-click та select2 реагують на ці події)
+  function clickIt(el){
+    ['mouseenter','mousedown','mouseup','click'].forEach(function(t){
+      el.dispatchEvent(new MouseEvent(t, {bubbles:true, cancelable:true, view:window}));
+    });
+  }
+  function waitFor(getter, maxTries, cb){
+    var n=0;
+    var iv=setInterval(function(){
+      n++;
+      var el=getter();
+      if(el){ clearInterval(iv); cb(el); return; }
+      if(n>=maxTries){ clearInterval(iv); cb(null); }
+    }, 200);
+  }
+  // поле доставки (кастомний select2 div), напр. <div class="stylized-select" attr-field-name="shipping_method">
+  function shipField(){
+    return document.querySelector('[attr-field-name="shipping_method"]');
+  }
+  // пункт «Самовивіз» у відкритому select2-попапі (number:43 або текст)
+  function pickupOption(){
+    var lis=document.querySelectorAll('li.select2-results__option');
+    for(var i=0;i<lis.length;i++){
+      var id=lis[i].id||'';
+      if(id.slice(-9)==='number:'+SHIP_PICKUP) return lis[i];
+      if(/самови/i.test(lis[i].textContent||'')) return lis[i];
+    }
+    return null;
+  }
+  function optionsVisible(){
+    return document.querySelectorAll('li.select2-results__option').length>0;
+  }
+  // поле вважаємо ГОТОВИМ, коли воно домальоване: текст короткий (обраний спосіб
+  // або «---»), а не весь список варіантів злитий докупи (ознака сирої форми).
+  function shipFieldReady(){
+    var f=shipField();
+    if(!f) return null;
+    var t=(f.textContent||'').replace(/\s+/g,' ').trim();
+    if(t.length>40) return null;          // ще будується — чекаємо
+    return f;
+  }
+  // відкрити поле доставки → дочекатись попапа → клікнути «Самовивіз»
+  function applyPickup(){
+    waitFor(shipFieldReady, 80, function(field){
+      if(!field) return;
+      if(/самови/i.test(field.textContent||'')) return; // вже стоїть — не чіпаємо
+      if(!optionsVisible()) clickIt(field);              // відкрити попап лише якщо ще закритий
+      waitFor(pickupOption, 40, function(opt){
+        if(!opt) return;
+        setTimeout(function(){                           // дати попапу домалюватись
+          clickIt(opt.querySelector('span') || opt);     // клік саме по внутрішньому span
+        }, 120);
+      });
+    });
+  }
+  function openPickupOrder(){
+    if((location.hash||'').indexOf('/order/create') < 0){
+      location.hash = '#/order/create';
+    }
+    applyPickup();
+  }
+  function addBtn(){
+    if(document.getElementById('lk-pickup-btn')) return;
+    var anchor = document.querySelector('span.btn-check');
+    if(!anchor || !anchor.parentNode) return;
+    var b = document.createElement('span');
+    b.id = 'lk-pickup-btn';
+    b.className = 'btn btn-primary-alt cursor-pointer';
+    b.title = 'Швидко: нова заявка із самовивозом';
+    b.style.marginLeft = '6px';
+    b.textContent = '➕ Самовивіз';
+    b.onclick = openPickupOrder;
+    anchor.parentNode.insertBefore(b, anchor.nextSibling);
+  }
+  setInterval(addBtn, 1500); addBtn();
 })();
