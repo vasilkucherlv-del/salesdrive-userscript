@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.34
+// @version      1.36
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -1585,7 +1585,7 @@ var UPSELL_MAP_DATA = [
   ["input", "focusin", "focusout", "click"].forEach(function (ev) {
     document.addEventListener(ev, function () { setTimeout(syncModalClass, 0); }, true);
   });
-  setInterval(syncModalClass, 300);
+  setInterval(syncModalClass, 2000);
   syncModalClass();
 
   // тягнемо карту з таблиці при завантаженні сторінки
@@ -3422,7 +3422,7 @@ function __sdPageMain() {
   var BUS=(typeof unsafeWindow!=='undefined' && unsafeWindow) ? unsafeWindow : window;
   BUS.addEventListener('sdOrderItems', evaluate);
   window.addEventListener('hashchange', evaluate); // миттєво прибрати при виході із заявки
-  setInterval(evaluate, 1500);        // ловить зміну способу оплати
+  setInterval(evaluate, 2500);        // ловить зміну способу оплати
   setTimeout(evaluate, 800);
 })();
 
@@ -3891,7 +3891,7 @@ function __sdPageMain() {
     b.onclick=function(){ mode='day'; anchor=new Date(); open(); };
     document.body.appendChild(b);
   }
-  setInterval(addBtn,1500); addBtn();
+  setInterval(addBtn,800); addBtn();
 })();
 /* ===== Стилі банера «Аналоги» (бірюзовий, окремо від жовтого допродажу) ===== */
 (function lkAnalogStyles() {
@@ -4058,7 +4058,7 @@ function __sdPageMain() {
     b.onclick = openPickupOrder;
     anchor.parentNode.insertBefore(b, anchor.nextSibling);
   }
-  setInterval(addBtn, 1500); addBtn();
+  setInterval(addBtn, 800); addBtn();
 
   /* ---- дві плитки швидкої оплати (готівка / термінал) для самовивозу ---- */
   // знайти пункт у відкритому select2-попапі: спершу за точним значенням number:NN, далі за текстом
@@ -4131,5 +4131,5 @@ function __sdPageMain() {
     if(isPickup && !paySet) wrap.classList.add('show');
     else wrap.classList.remove('show');
   }
-  setInterval(updatePayTiles, 1000); updatePayTiles();
+  setInterval(updatePayTiles, 800); updatePayTiles();
 })();
