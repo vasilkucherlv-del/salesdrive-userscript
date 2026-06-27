@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.28
+// @version      1.29
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -3571,20 +3571,16 @@ function __sdPageMain() {
   }
 
   /* ---- заявки «Оплачено САМОВИВІЗ», але БЕЗ обраного способу оплати ---- */
-  // дивимось останні ~600 заявок статусу 5 (забута оплата — завжди серед свіжих),
+  // дивимось останні 100 заявок статусу 5 (забута оплата — завжди серед свіжих),
   // лишаємо ті, де payId(o)===null (спосіб оплати порожній).
   var unpaidCache=null, unpaidBusy=false;
   async function fetchUnpaidPickup(){
-    var page=1,out=[],guard=0;
-    while(guard++<6){
-      var url=ORDERS+'?page='+page+'&limit=100&filter[statusId]='+STATUS_ID;
-      var r; try{ r=await fetch(url,{headers:{'Form-Api-Key':API_KEY,'Accept':'application/json'}}); }catch(e){ break; }
-      if(r.status===400){ await sleep(65000); continue; }
-      var j=await r.json().catch(function(){return {};});
-      var arr=j.data||[];
-      arr.forEach(function(o){ if(payId(o)===null) out.push({id:o.id,amount:amount(o),date:payDate(o),name:clientName(o)}); });
-      if(arr.length<100) break; page++; await sleep(6500);
-    }
+    var out=[];
+    var url=ORDERS+'?page=1&limit=100&filter[statusId]='+STATUS_ID;
+    var r; try{ r=await fetch(url,{headers:{'Form-Api-Key':API_KEY,'Accept':'application/json'}}); }catch(e){ return out; }
+    if(r.status===400){ await sleep(65000); try{ r=await fetch(url,{headers:{'Form-Api-Key':API_KEY,'Accept':'application/json'}}); }catch(e2){ return out; } }
+    var j=await r.json().catch(function(){return {};});
+    (j.data||[]).forEach(function(o){ if(payId(o)===null) out.push({id:o.id,amount:amount(o),date:payDate(o),name:clientName(o)}); });
     return out;
   }
   async function loadUnpaid(force){
