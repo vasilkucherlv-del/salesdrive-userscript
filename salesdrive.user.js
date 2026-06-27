@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.29
+// @version      1.33
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -3459,6 +3459,7 @@ function __sdPageMain() {
   var renderSeq=0;                 // для скасування застарілих перемальовувань
   var anchor=new Date();           // опорна дата для day/week/month
   var rangeFrom=null, rangeTo=null;// для 'range' (рядки ymd)
+  var _rangeCache=null;            // Рівень-1 кеш orders+видатків {key,t,data}; 90с
 
   // Поточний понеділок тижня опорної дати
   function weekBounds(d){
@@ -3536,6 +3537,11 @@ function __sdPageMain() {
   /* ---- продажі ---- */
   function payId(o){ var v=o.payment_method!=null?o.payment_method:(o.paymentMethod!=null?o.paymentMethod:o.payment_method_id);
     var m=String(v==null?'':v).match(/(\d+)/); return m?parseInt(m[1],10):null; }
+  // Чи є фіскальний чек — прямо із замовлення (document_ord_check: 1=є, null/0=нема).
+  function hasCheck(o){
+    var v=o.document_ord_check!=null?o.document_ord_check:o.cek;
+    return v!=null && v!==0 && v!=='0' && v!=='';
+  }
   // Сума замовлення (готівка, що надходить у касу).
   // Якщо paymentAmount заповнено — це сума замовлення (беремо її).
   // Якщо ні — беремо |restPay| (там сума буває відʼємною, коли оплату сумою не внесено).
@@ -3768,14 +3774,19 @@ function __sdPageMain() {
     var hasBal=(span.to>=bdate);
     var uFrom=hasBal?(bdate<span.from?bdate:span.from):span.from;
     var uTo=span.to;
-    // три незалежні джерела — тягнемо паралельно (різні ключі = різні ліміти)
-    var _res=await Promise.all([
-      fetchOrders(uFrom,uTo),
-      fetchOutcoming(uFrom,uTo),
-      fetchChecks(shiftYmd(span.from,-3),shiftYmd(span.to,3))
-    ]);
+    // Кеш orders+видатків (Рівень 1, 90с). Ознака чека тепер береться прямо
+    // із замовлення (поле document_ord_check) — окремий запит чеків не потрібен.
+    var okey=uFrom+'|'+uTo;
+    var od;
+    if(_rangeCache && _rangeCache.key===okey && (Date.now()-_rangeCache.t)<90000){
+      od=_rangeCache.data;
+    } else {
+      od=await Promise.all([ fetchOrders(uFrom,uTo), fetchOutcoming(uFrom,uTo) ]);
+      if(myseq!==renderSeq) return;
+      _rangeCache={key:okey, t:Date.now(), data:od};
+    }
     if(myseq!==renderSeq) return;
-    var allOrders=_res[0], allOut=_res[1], checks=_res[2];
+    var allOrders=od[0], allOut=od[1];
 
     function inPeriod(d){ return d>=span.from && d<=span.to; }
 
@@ -3805,7 +3816,10 @@ function __sdPageMain() {
       var ic=p===CASH_ID?'💵':'💳';
       var dd=(span.from!==span.to)?'<span class="dt">'+dstr(d)+'</span>':'';
       var badge='';
-      if(p===CARD_ID){ if(checks.has(String(o.id))) badge=' <span class="chk ok" title="Чек є">✅</span>'; else { badge=' <span class="chk no">⚠️ без чека</span>'; noCheckN++; } }
+      if(p===CARD_ID){
+        if(hasCheck(o)){ badge=' <span class="chk ok" title="Чек є">✅</span>'; }
+        else { badge=' <span class="chk no">⚠️ без чека</span>'; noCheckN++; }
+      }
       rows.push('<a href="/ua/index.html?formId=1#/order/update/'+o.id+'"><span class="nm">'+dd+ic+' №'+o.id+' · '+clientName(o)+badge+'</span><span class="am">'+fmt(a)+'</span></a>');
     });
     var multi=(span.from!==span.to);
@@ -3849,7 +3863,7 @@ function __sdPageMain() {
       var sCash=0; wm[0].forEach(function(o){ if(payId(o)===CASH_ID) sCash+=amount(o); });
       var sOut=0;  wm[1].items.forEach(function(x){ sOut+=x.amount; });
       var openFloat=Math.round((n - sCash + sOut)*100)/100;
-      await setBaseline(openFloat,pin); mode='day'; anchor=new Date(); await render();
+      await setBaseline(openFloat,pin); _rangeCache=null; mode='day'; anchor=new Date(); await render();
     }
     catch(e){
       if(/HTTP 403|bad pin/.test(e.message)) alert('Невірний PIN — залишок не змінено.');
@@ -3884,7 +3898,7 @@ function __sdPageMain() {
     document.body.appendChild(ov);
     ov.addEventListener('click',function(e){ if(e.target===ov) ov.remove(); });
     ov.querySelector('.x').onclick=function(){ ov.remove(); };
-    ov.querySelector('.rf').onclick=function(){ render(); loadUnpaid(true); };
+    ov.querySelector('.rf').onclick=function(){ _rangeCache=null; render(); loadUnpaid(true); };
     ov.querySelectorAll('#lk-cash-modes button').forEach(function(b){
       b.onclick=function(){ setMode(b.getAttribute('data-m')); };
     });
