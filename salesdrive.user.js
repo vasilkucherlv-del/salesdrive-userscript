@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.33
+// @version      1.34
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -3436,8 +3436,6 @@ function __sdPageMain() {
   var STATUS_ID = 5;     // Оплачено САМОВИВІЗ
   var CASH_ID   = 44;    // Готівкою 💵
   var CARD_ID   = 100;   // Термінал 💳
-  var CHECK_KEY = 'Bfmy2OEwDnw022CI7GACrjwHOTLgyyZomtZOnTg-zLv3x_lsPTxiGSs6rFxQwAiWHWVqyYvH0JJYNgV2gJ2u14nnZMx8yMlBEI7E';
-  var CHECKS    = '/api/check/list/';   // фіскальні чеки
   var BARCODE_URL   = 'https://barcode-printer-production-2b32.up.railway.app';
   var BARCODE_TOKEN = 'nab_8Kx2pQ7mLr4tW9vZ';
 
@@ -3612,34 +3610,6 @@ function __sdPageMain() {
         return '<a href="/ua/index.html?formId=1#/order/update/'+x.id+'" title="Відкрити заявку"><span class="nm">№'+x.id+' · '+x.name+(x.date?' · '+dstr(x.date):'')+'</span><span class="am">'+fmt(x.amount)+'</span></a>';
       }).join('')+'</div>'
       +'<div class="lk-unpaid-hint">Відкрийте заявку та проставте спосіб оплати — після цього вона зайде в касу.</div>';
-  }
-
-  function shiftYmd(d,delta){
-    var p=String(d).slice(0,10).split('-');
-    var dt=new Date(parseInt(p[0],10),parseInt(p[1],10)-1,parseInt(p[2],10));
-    dt.setDate(dt.getDate()+delta);
-    return ymd(dt);
-  }
-
-  /* ---- фіскальні чеки за період → множина order.id з чеком (done) ---- */
-  async function fetchChecks(from,to){
-    var set=new Set(), page=1, guard=0;
-    var ff=from+' 00:00:00', tt=to+' 23:59:59';
-    while(guard++<10){
-      var url=CHECKS+'?page='+page+'&limit=100'
-        +'&filter[date][from]='+encodeURIComponent(ff)
-        +'&filter[date][to]='+encodeURIComponent(tt);
-      var r; try{ r=await fetch(url,{headers:{'X-Api-Key':CHECK_KEY,'Accept':'application/json'}}); }catch(e){ break; }
-      if(r.status===400){ cashNote('⏳ Забагато запитів до SalesDrive.<br>Зачекайте ~1 хв, рахунок продовжиться сам…'); await sleep(65000); cashNote('Рахую…'); continue; }
-      var j=await r.json().catch(function(){return {};});
-      var arr=j.data||[];
-      arr.forEach(function(c){ var oid=c.order&&c.order.id; if(oid && c.fiscalizationStatus==='done') set.add(String(oid)); });
-      var pg=j.pagination||{};
-      if(arr.length<100) break;
-      if(pg.currentPage && pg.pageCount && pg.currentPage>=pg.pageCount) break;
-      page++; await sleep(6500);
-    }
-    return set;
   }
 
   /* ---- видаткові касові ордери: newest-first, стоп на from ---- */
