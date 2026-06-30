@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.42
+// @version      1.43
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -3987,6 +3987,9 @@ function __sdPageMain() {
 (function lkQuickPickup(){
   'use strict';
   var SHIP_PICKUP = 43; // id способу доставки «Самовивіз»
+  // організація за замовчуванням для швидкого самовивозу: ФОП Кучер Василь Богданович
+  var DEFAULT_ORG_NUM = 1;              // number:1 у списку organizationId
+  var DEFAULT_ORG_RE  = /кучер василь/i; // запасний пошук за назвою (не плутати з «Кучер Вікторія»)
 
   function setShipping(sel, val){
     try{
@@ -4072,11 +4075,29 @@ function __sdPageMain() {
       }, 250);
     });
   }
+  // виставити організацію за замовчуванням (ФОП Кучер Василь Богданович),
+  // якщо ще не обрана; чекаємо, доки поле організації домалюється
+  function applyDefaultOrg(){
+    console.log('[pickup] чекаю готовності поля організації');
+    waitFor(function(){
+      var f=document.querySelector('[attr-field-name="organizationId"]');
+      if(!f) return null;
+      var t=(f.textContent||'').replace(/\s+/g,' ').trim();
+      return t.length>40 ? null : f;        // довгий текст = ще будується
+    }, 120, function(field){
+      if(!field){ console.log('[pickup] ❌ поле організації не готове'); return; }
+      if(DEFAULT_ORG_RE.test(field.textContent||'')){ console.log('[pickup] організація вже потрібна — пропускаю'); return; }
+      console.log('[pickup] виставляю організацію за замовчуванням');
+      chooseInField('organizationId', DEFAULT_ORG_NUM, DEFAULT_ORG_RE);
+    });
+  }
   function openPickupOrder(){
     if((location.hash||'').indexOf('/order/create') < 0){
       location.hash = '#/order/create';
     }
     applyPickup();
+    // організацію виставляємо трохи згодом, щоб не зіткнутись із попапом доставки
+    setTimeout(applyDefaultOrg, 2000);
   }
   function addBtn(){
     if(document.getElementById('lk-pickup-btn')) return;
