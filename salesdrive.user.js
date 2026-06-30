@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.45
+// @version      1.46
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -30,6 +30,7 @@
      • lkAnalogStyles  — стилі банера «Аналоги»
      • lkQuickPickup   — ➕ швидка кнопка нової заявки самовивозу
      • lkAutoOrgByPayment — автопідстановка організації під вхідний платіж
+     • lkCheckCashbox   — підстановка «каса самовивозу» у формі чека (самовивіз)
    ╚══════════════════════════════════════════════════════════════════╝ */
 
 /* ▼▼▼ МОДУЛЬ-START • core — ЯДРО — шина подій, дані з Google-таблиць, стилі; містить content.js (підказки/ціни/рейтинг/ТТН) і Базу знань ▼▼▼ */
@@ -4341,3 +4342,72 @@ function __sdPageMain() {
   soon();
 })();
 /* ╚════ ▲▲▲ МОДУЛЬ-END • lkAutoOrgByPayment ════════════════════════════════╝ */
+
+
+/* ▼▼▼ МОДУЛЬ-START • lkCheckCashbox — підстановка «каса самовивозу» у формі чека (самовивіз) ▼▼▼ */
+(function lkCheckCashbox(){
+  'use strict';
+  var DEBUG=false; // true → логи [SD-Каса-чек] у консоль
+  function dbg(){ if(!DEBUG) return; try{ console.log.apply(console,['[SD-Каса-чек]'].concat([].slice.call(arguments))); }catch(e){} }
+
+  var CASH_NUM = 3;            // number:3 = «каса самовивозу» у списку cashRegisterId
+  var CASH_RE  = /самовив/i;   // запасний пошук за назвою
+
+  var REALWIN=(typeof unsafeWindow!=='undefined'&&unsafeWindow)?unsafeWindow:window;
+  function clickIt(el){
+    ['mousedown','mouseup','click'].forEach(function(t){
+      var ev; try{ ev=new MouseEvent(t,{bubbles:true,cancelable:true,view:REALWIN}); }
+      catch(e){ ev=new MouseEvent(t,{bubbles:true,cancelable:true}); }
+      el.dispatchEvent(ev);
+    });
+  }
+  function cashField(){ return document.querySelector('.stylized-select[attr-field-name="cashRegisterId"]'); }
+  function shipPickup(){
+    var f=document.querySelector('[attr-field-name="shipping_method"]');
+    return !!(f && /самовив/i.test(f.textContent||''));
+  }
+  function txt(f){ return (f.textContent||'').replace(/\s+/g,' ').trim(); }
+  function isEmpty(f){ var t=txt(f); return (!t || t==='---' || /ph-is-empty/.test(f.innerHTML)); }
+  function optionsVisible(){ return document.querySelectorAll('li.select2-results__option').length>0; }
+  function findOption(){
+    var lis=document.querySelectorAll('li.select2-results__option');
+    var suf='number:'+CASH_NUM;
+    for(var i=0;i<lis.length;i++){ if((lis[i].id||'').slice(-suf.length)===suf) return lis[i]; }
+    for(var j=0;j<lis.length;j++){ if(CASH_RE.test(lis[j].textContent||'')) return lis[j]; }
+    return null;
+  }
+
+  var busy=false;
+  function trySet(){
+    if(busy) return;
+    var f=cashField(); if(!f) return;            // форми чека немає
+    if(!shipPickup()){ dbg('не самовивіз — пропускаю'); return; }
+    if(!isEmpty(f)) return;                       // вже щось обрано — не чіпаємо
+    dbg('ставлю «касу самовивозу»');
+    busy=true;
+    clickIt(f);
+    var tries=0;
+    var iv=setInterval(function(){
+      tries++;
+      if(optionsVisible()){
+        clearInterval(iv);
+        var s=0;
+        var iv2=setInterval(function(){
+          s++;
+          var opt=findOption();
+          if(opt){ clearInterval(iv2); clickIt(opt.querySelector('span')||opt); dbg('обрано'); setTimeout(function(){ busy=false; },250); }
+          else if(s>30){ clearInterval(iv2); busy=false; dbg('пункт каси не знайдено'); }
+        },90);
+        return;
+      }
+      if(tries===1||tries%5===0) clickIt(f);
+      if(tries>30){ clearInterval(iv); busy=false; dbg('попап каси не відкрився'); }
+    },110);
+  }
+
+  var t=null; function soon(){ clearTimeout(t); t=setTimeout(trySet,400); }
+  try{ new MutationObserver(soon).observe(document.body,{childList:true,subtree:true}); }catch(e){}
+  window.addEventListener('hashchange', soon);
+  soon();
+})();
+/* ▲▲▲ МОДУЛЬ-END • lkCheckCashbox ▲▲▲ */
