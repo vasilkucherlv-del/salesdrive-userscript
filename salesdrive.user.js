@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.43
+// @version      1.44
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4016,7 +4016,7 @@ function __sdPageMain() {
       var el=getter();
       if(el){ clearInterval(iv); cb(el); return; }
       if(n>=maxTries){ clearInterval(iv); cb(null); }
-    }, 200);
+    }, 90);
   }
   // поле доставки (кастомний select2 div), напр. <div class="stylized-select" attr-field-name="shipping_method">
   function shipField(){
@@ -4045,34 +4045,31 @@ function __sdPageMain() {
     return f;
   }
   // відкрити поле доставки → дочекатись попапа → клікнути «Самовивіз»
-  function applyPickup(){
+  function applyPickup(done){
+    function fin(){ if(done){ var d=done; done=null; d(); } } // викликаємо далі (організація) лише раз
     console.log('[pickup] старт, чекаю готовності поля доставки');
-    waitFor(shipFieldReady, 120, function(field){
-      if(!field){ console.log('[pickup] ❌ поле так і не стало готовим'); return; }
-      console.log('[pickup] поле готове, текст:', JSON.stringify((field.textContent||'').trim()));
-      if(/самови/i.test(field.textContent||'')){ console.log('[pickup] вже самовивіз — нічого не роблю'); return; }
-      // відкриваємо попап; якщо з першого разу не зʼявився — клікаємо ще раз
+    waitFor(shipFieldReady, 150, function(field){
+      if(!field){ console.log('[pickup] ❌ поле так і не стало готовим'); fin(); return; }
+      if(/самови/i.test(field.textContent||'')){ console.log('[pickup] вже самовивіз'); fin(); return; }
+      // відкриваємо попап один раз; повторний клік — лише зрідка, щоб не миготіло
       var openTries=0;
       var ivOpen=setInterval(function(){
         openTries++;
         if(optionsVisible()){
           clearInterval(ivOpen);
-          console.log('[pickup] попап відкрито за', openTries, 'спроб');
           waitFor(pickupOption, 40, function(opt){
-            if(!opt){ console.log('[pickup] ❌ пункт самовивозу не знайдено'); return; }
+            if(!opt){ console.log('[pickup] ❌ пункт самовивозу не знайдено'); fin(); return; }
             setTimeout(function(){
               clickIt(opt.querySelector('span') || opt);
               console.log('[pickup] клікнув самовивіз');
-              setTimeout(function(){
-                console.log('[pickup] РЕЗУЛЬТАТ:', JSON.stringify((shipField()||{}).textContent||''));
-              }, 600);
-            }, 150);
+              setTimeout(fin, 200); // одразу далі — організація
+            }, 50);
           });
           return;
         }
-        clickIt(field); // ще одна спроба відкрити
-        if(openTries>20){ clearInterval(ivOpen); console.log('[pickup] ❌ попап не відкрився за 20 спроб'); }
-      }, 250);
+        if(openTries===1 || openTries%5===0) clickIt(field); // відкрити (без зайвого миготіння)
+        if(openTries>30){ clearInterval(ivOpen); console.log('[pickup] ❌ попап доставки не відкрився'); fin(); }
+      }, 110);
     });
   }
   // виставити організацію за замовчуванням (ФОП Кучер Василь Богданович),
@@ -4095,9 +4092,7 @@ function __sdPageMain() {
     if((location.hash||'').indexOf('/order/create') < 0){
       location.hash = '#/order/create';
     }
-    applyPickup();
-    // організацію виставляємо трохи згодом, щоб не зіткнутись із попапом доставки
-    setTimeout(applyDefaultOrg, 2000);
+    applyPickup(applyDefaultOrg); // організацію — одразу після вибору доставки, без мертвої паузи
   }
   function addBtn(){
     if(document.getElementById('lk-pickup-btn')) return;
@@ -4134,13 +4129,13 @@ function __sdPageMain() {
         clearInterval(iv);
         waitFor(function(){ return findOption(numVal, textRe); }, 40, function(opt){
           if(!opt) return;
-          setTimeout(function(){ clickIt(opt.querySelector('span') || opt); }, 150);
+          setTimeout(function(){ clickIt(opt.querySelector('span') || opt); }, 50);
         });
         return;
       }
-      clickIt(field);                       // відкрити попап (повторні спроби)
-      if(tries>20) clearInterval(iv);
-    }, 250);
+      if(tries===1 || tries%5===0) clickIt(field); // відкрити попап (без зайвого миготіння)
+      if(tries>30) clearInterval(iv);
+    }, 110);
   }
   // текст готового (домальованого) поля; null якщо поле сире або відсутнє
   function readyFieldText(attr){
