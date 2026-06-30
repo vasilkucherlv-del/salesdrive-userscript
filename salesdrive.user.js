@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.40
+// @version      1.41
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4135,7 +4135,12 @@ function __sdPageMain() {
 })();
 
 
-/* ===== Автопідстановка організації (відправника) під вхідний платіж ===== */
+/* ╔════════════════════════════════════════════════════════════════════════╗
+   ║ ▼▼▼  МОДУЛЬ-START • lkAutoOrgByPayment                                   ║
+   ║ Автопідстановка організації (відправника) під вхідний платіж.            ║
+   ║ САМОДОСТАТНІЙ — не залежить від інших модулів і нічого з них не вживає.   ║
+   ║ Правити ТІЛЬКИ в межах рамок START…END, щоб не зачепити сусідні модулі.   ║
+   ╚════════════════════════════════════════════════════════════════════════╝ */
 (function lkAutoOrgByPayment(){
   'use strict';
   function onOrderPage(){ return /\/order\/\w+\/\d+/.test(location.hash||''); }
@@ -4159,7 +4164,7 @@ function __sdPageMain() {
   }
 
   var css=''
-    +'.sd-org-locked{position:relative;cursor:not-allowed !important;background:#f6f6f6 !important;'
+    +'.sd-org-locked{position:relative;cursor:pointer !important;background:#f6f6f6 !important;'
     +'  border:1px solid #e0b4b4 !important;border-radius:5px;opacity:.92;padding-right:20px !important}'
     +'.sd-org-locked::after{content:"🔒";position:absolute;right:5px;top:50%;transform:translateY(-50%);'
     +'  font-size:12px;pointer-events:none}'
@@ -4180,13 +4185,19 @@ function __sdPageMain() {
     tipT=setTimeout(function(){ if(tipEl) tipEl.classList.remove('show'); },2600);
   }
 
-  // блокування ручної зміни, поки організація зафіксована під платіж
+  // мʼяке блокування: змінити можна, але лише після підтвердження
   function blocker(e){
     var f=orgField(); if(!f) return;
     if(!(f===e.target||f.contains(e.target))) return;
-    if(f.classList.contains('sd-org-locked')){
-      e.preventDefault(); e.stopImmediatePropagation();
-      tip(e.clientX,e.clientY,'🔒 Організацію зафіксовано під вхідний платіж — змінити не можна.');
+    if(!f.classList.contains('sd-org-locked')) return;
+    e.preventDefault(); e.stopImmediatePropagation();
+    if(e.type!=='click') return; // запит показуємо лише раз — на click
+    var ok=false;
+    try{ ok=confirm('Організацію вже підставлено під вхідний платіж.\n\nТочно потрібна ручна зміна?'); }catch(_){ ok=true; }
+    if(ok){
+      override[location.hash]=true;            // далі цю заявку автоматично не чіпаємо
+      f.classList.remove('sd-org-locked');
+      setTimeout(function(){ var ff=orgField(); if(ff) openEditor(ff); },0); // відкрити вибір
     }
   }
   document.addEventListener('mousedown',blocker,true);
@@ -4195,7 +4206,7 @@ function __sdPageMain() {
   var DEBUG=false; // true → діагностика автопідстановки в консолі ([SD-Орг])
   function dbg(){ if(!DEBUG) return; try{ console.log.apply(console,['[SD-Орг]'].concat([].slice.call(arguments))); }catch(e){} }
 
-  var busy=false, attempts={};
+  var busy=false, attempts={}, override={};
   function openEditor(f){
     ['mousedown','mouseup','click'].forEach(function(ev){
       f.dispatchEvent(new MouseEvent(ev,{bubbles:true,cancelable:true}));
@@ -4252,6 +4263,7 @@ function __sdPageMain() {
     }
     if(!f) return;
     if(!fop){ f.classList.remove('sd-org-locked'); return; } // немає платежу — не чіпаємо
+    if(override[location.hash]){ f.classList.remove('sd-org-locked'); return; } // менеджер підтвердив ручну зміну
     if(cur===target){ f.classList.add('sd-org-locked'); return; } // вже правильно → фіксуємо
     var key=location.hash+'|'+target;
     attempts[key]=(attempts[key]||0)+1;
@@ -4261,7 +4273,8 @@ function __sdPageMain() {
 
   var t=null; function soon(){ clearTimeout(t); t=setTimeout(tick,500); }
   try{ new MutationObserver(soon).observe(document.body,{childList:true,subtree:true}); }catch(e){}
-  window.addEventListener('hashchange',function(){ attempts={}; lastState=''; soon(); });
+  window.addEventListener('hashchange',function(){ attempts={}; override={}; lastState=''; soon(); });
   dbg('модуль автопідстановки організації завантажено');
   soon();
 })();
+/* ╚════ ▲▲▲ МОДУЛЬ-END • lkAutoOrgByPayment ════════════════════════════════╝ */
