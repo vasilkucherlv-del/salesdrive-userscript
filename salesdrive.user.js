@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.41
+// @version      1.42
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -16,6 +16,23 @@
 // @downloadURL  https://raw.githubusercontent.com/vasilkucherlv-del/salesdrive-userscript/main/salesdrive.user.js
 // ==/UserScript==
 
+/* ╔══════════════════════ КАРТА МОДУЛІВ (TOC) ══════════════════════╗
+   Кожен модуль обгорнуто рамкою «МОДУЛЬ-START … МОДУЛЬ-END • <id>».
+   Правити код модуля ТІЛЬКИ в межах його рамок, щоб не зачепити інші.
+   Список (зверху вниз):
+     • core            — ядро: шина, дані з таблиць, стилі, content.js, База знань
+     • lkNaboryInline  — позначка «входить у набори» в рядках заявки
+     • lkAnalogInline  — інлайн-значок «🔁 аналог» у рядку товару
+     • lkModalKits     — рядок «Входить у набори» в картці товару (модалка)
+     • lkUpsellRedesign— компактний вигляд картки допродажу
+     • lkStockPayWarn  — попередження: передоплата + малий залишок
+     • lkCashRegister  — 💰 Каса самовивозу
+     • lkAnalogStyles  — стилі банера «Аналоги»
+     • lkQuickPickup   — ➕ швидка кнопка нової заявки самовивозу
+     • lkAutoOrgByPayment — автопідстановка організації під вхідний платіж
+   ╚══════════════════════════════════════════════════════════════════╝ */
+
+/* ▼▼▼ МОДУЛЬ-START • core — ЯДРО — шина подій, дані з Google-таблиць, стилі; містить content.js (підказки/ціни/рейтинг/ТТН) і Базу знань ▼▼▼ */
 (function () {
   "use strict";
 
@@ -2747,7 +2764,9 @@ function __sdPageMain() {
   }
 
 })();
+/* ▲▲▲ МОДУЛЬ-END • core ▲▲▲ */
 
+/* ▼▼▼ МОДУЛЬ-START • lkNaboryInline — Набори: позначка «входить у набори» в рядках заявки ▼▼▼ */
 /* ===== Набори: позначка «входить у набори» в рядках заявки (джерело: баркод) ===== */
 (function lkNaboryInline() {
   'use strict';
@@ -2894,8 +2913,10 @@ function __sdPageMain() {
     new MutationObserver(scanSoon).observe(document.body, { childList: true, subtree: true });
   })();
 })();
+/* ▲▲▲ МОДУЛЬ-END • lkNaboryInline ▲▲▲ */
 
 
+/* ▼▼▼ МОДУЛЬ-START • lkAnalogInline — Інлайн-значок «🔁 аналог» у рядку товару ▼▼▼ */
 /* ===== Інлайн-значок «🔁 аналог» у рядку товару (праворуч від «+» комплектів) ===== */
 (function lkAnalogInline() {
   'use strict';
@@ -3043,8 +3064,10 @@ function __sdPageMain() {
   scan();
   new MutationObserver(scanSoon).observe(document.body, { childList: true, subtree: true });
 })();
+/* ▲▲▲ МОДУЛЬ-END • lkAnalogInline ▲▲▲ */
 
 
+/* ▼▼▼ МОДУЛЬ-START • lkModalKits — Картка товару (модалка): рядок «Входить у набори» ▼▼▼ */
 /* ===== Картка товару (модалка): рядок «Входить у набори» (джерело: баркод, ключ — ID) ===== */
 (function lkModalKits() {
   'use strict';
@@ -3235,7 +3258,9 @@ function __sdPageMain() {
     new MutationObserver(scanSoon).observe(document.body, { childList: true, subtree: true });
   })();
 })();
+/* ▲▲▲ МОДУЛЬ-END • lkModalKits ▲▲▲ */
 
+/* ▼▼▼ МОДУЛЬ-START • lkUpsellRedesign — Компактний вигляд картки допродажу ▼▼▼ */
 /* ===== Компактний сучасний вигляд картки допродажу ===== */
 (function lkUpsellRedesign() {
   'use strict';
@@ -3278,7 +3303,9 @@ function __sdPageMain() {
   st.textContent = css;
   (document.head || document.documentElement).appendChild(st);
 })();
+/* ▲▲▲ МОДУЛЬ-END • lkUpsellRedesign ▲▲▲ */
 
+/* ▼▼▼ МОДУЛЬ-START • lkStockPayWarn — Банер: передоплата + малий залишок → перевір склад ▼▼▼ */
 /* ===== Банер: передоплатна оплата + малий залишок → перевір склад ===== */
 (function lkStockPayWarn() {
   'use strict';
@@ -3425,7 +3452,9 @@ function __sdPageMain() {
   setInterval(evaluate, 2500);        // ловить зміну способу оплати
   setTimeout(evaluate, 800);
 })();
+/* ▲▲▲ МОДУЛЬ-END • lkStockPayWarn ▲▲▲ */
 
+/* ▼▼▼ МОДУЛЬ-START • lkCashRegister — 💰 Каса самовивозу (день/тиждень/місяць/період) ▼▼▼ */
 /* ===== 💰 Каса самовивозу — день / тиждень / місяць / період ===== */
 (function lkCashRegister(){
   'use strict';
@@ -3893,6 +3922,8 @@ function __sdPageMain() {
   }
   setInterval(addBtn,800); addBtn();
 })();
+/* ▲▲▲ МОДУЛЬ-END • lkCashRegister ▲▲▲ */
+/* ▼▼▼ МОДУЛЬ-START • lkAnalogStyles — Стилі банера «Аналоги» ▼▼▼ */
 /* ===== Стилі банера «Аналоги» (бірюзовий, окремо від жовтого допродажу) ===== */
 (function lkAnalogStyles() {
   'use strict';
@@ -3950,6 +3981,8 @@ function __sdPageMain() {
   st.textContent = css;
   (document.head || document.documentElement).appendChild(st);
 })();
+/* ▲▲▲ МОДУЛЬ-END • lkAnalogStyles ▲▲▲ */
+/* ▼▼▼ МОДУЛЬ-START • lkQuickPickup — ➕ Швидка кнопка: нова заявка із самовивозом ▼▼▼ */
 /* ===== ➕ Швидка кнопка: нова заявка із самовивозом ===== */
 (function lkQuickPickup(){
   'use strict';
@@ -4133,6 +4166,7 @@ function __sdPageMain() {
   }
   setInterval(updatePayTiles, 800); updatePayTiles();
 })();
+/* ▲▲▲ МОДУЛЬ-END • lkQuickPickup ▲▲▲ */
 
 
 /* ╔════════════════════════════════════════════════════════════════════════╗
