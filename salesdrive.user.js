@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.39
+// @version      1.40
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4192,7 +4192,8 @@ function __sdPageMain() {
   document.addEventListener('mousedown',blocker,true);
   document.addEventListener('click',blocker,true);
 
-  function dbg(){ try{ console.log.apply(console,['[SD-Орг]'].concat([].slice.call(arguments))); }catch(e){} }
+  var DEBUG=false; // true → діагностика автопідстановки в консолі ([SD-Орг])
+  function dbg(){ if(!DEBUG) return; try{ console.log.apply(console,['[SD-Орг]'].concat([].slice.call(arguments))); }catch(e){} }
 
   var busy=false, attempts={};
   function openEditor(f){
