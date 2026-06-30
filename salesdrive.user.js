@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.36
+// @version      1.37
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4132,4 +4132,117 @@ function __sdPageMain() {
     else wrap.classList.remove('show');
   }
   setInterval(updatePayTiles, 800); updatePayTiles();
+})();
+
+
+/* ===== Автопідстановка організації (відправника) під вхідний платіж ===== */
+(function lkAutoOrgByPayment(){
+  'use strict';
+  function onOrderPage(){ return /\/order\/\w+\/\d+/.test(location.hash||''); }
+  function orgField(){ return document.querySelector('.stylized-select[attr-field-name="organizationId"]'); }
+  function norm(s){ return String(s==null?'':s).replace(/ /g,' ').replace(/\s+/g,' ').trim().toLowerCase(); }
+
+  // ФОП із найновішого вхідного платежу (рядок коментаря з посиланням incoming-payment)
+  function paymentFop(){
+    var links=document.querySelectorAll('a[href*="incoming-payment"]');
+    for(var i=0;i<links.length;i++){
+      var row=links[i].closest('tr')||links[i].closest('.comment-to-order');
+      if(!row) continue;
+      var t=row.querySelector('.comment-title-inner'); if(!t) continue;
+      var parts=String(t.textContent||'').split('|');
+      for(var j=parts.length-1;j>=0;j--){
+        var seg=parts[j].trim();
+        if(/^ФОП/i.test(seg)) return seg;
+      }
+    }
+    return '';
+  }
+
+  var css=''
+    +'.sd-org-locked{position:relative;cursor:not-allowed !important;background:#f6f6f6 !important;'
+    +'  border:1px solid #e0b4b4 !important;border-radius:5px;opacity:.92;padding-right:20px !important}'
+    +'.sd-org-locked::after{content:"🔒";position:absolute;right:5px;top:50%;transform:translateY(-50%);'
+    +'  font-size:12px;pointer-events:none}'
+    +'#sd-org-tip{position:fixed;z-index:2147483600;max-width:300px;background:#243b53;color:#fff;'
+    +'  font:12px/1.4 -apple-system,"Segoe UI",Roboto,Arial,sans-serif;padding:8px 11px;border-radius:7px;'
+    +'  box-shadow:0 6px 18px rgba(0,0,0,.25);pointer-events:none;opacity:0;transition:opacity .12s}'
+    +'#sd-org-tip.show{opacity:1}';
+  var st=document.createElement('style'); st.textContent=css; (document.head||document.documentElement).appendChild(st);
+
+  var tipEl=null,tipT=null;
+  function tip(x,y,msg){
+    if(!tipEl){ tipEl=document.createElement('div'); tipEl.id='sd-org-tip'; document.body.appendChild(tipEl); }
+    tipEl.textContent=msg;
+    tipEl.style.left=Math.min(x+12,(window.innerWidth-320))+'px';
+    tipEl.style.top=(y+14)+'px';
+    tipEl.classList.add('show');
+    if(tipT) clearTimeout(tipT);
+    tipT=setTimeout(function(){ if(tipEl) tipEl.classList.remove('show'); },2600);
+  }
+
+  // блокування ручної зміни, поки організація зафіксована під платіж
+  function blocker(e){
+    var f=orgField(); if(!f) return;
+    if(!(f===e.target||f.contains(e.target))) return;
+    if(f.classList.contains('sd-org-locked')){
+      e.preventDefault(); e.stopImmediatePropagation();
+      tip(e.clientX,e.clientY,'🔒 Організацію зафіксовано під вхідний платіж — змінити не можна.');
+    }
+  }
+  document.addEventListener('mousedown',blocker,true);
+  document.addEventListener('click',blocker,true);
+
+  var busy=false, attempts={};
+  function openEditor(f){
+    ['mousedown','mouseup','click'].forEach(function(ev){
+      f.dispatchEvent(new MouseEvent(ev,{bubbles:true,cancelable:true,view:window}));
+    });
+  }
+  function setOrg(fopName){
+    var f=orgField(); if(!f) return;
+    busy=true;
+    openEditor(f);
+    var tries=0;
+    var iv=setInterval(function(){
+      tries++;
+      var ul=document.getElementById('select2-organizationId-pk-results');
+      if(ul){
+        var hit=null;
+        ul.querySelectorAll('li.select2-results__option').forEach(function(li){
+          var sp=li.querySelector('span');
+          if(sp && norm(sp.textContent)===norm(fopName)) hit=li;
+        });
+        if(hit){
+          ['mousedown','mouseup','click'].forEach(function(ev){
+            hit.dispatchEvent(new MouseEvent(ev,{bubbles:true,cancelable:true,view:window}));
+          });
+          setTimeout(function(){
+            var sub=document.querySelector('.editableform [type="submit"], .editable-buttons [type="submit"], .editable-submit');
+            if(sub){ try{ sub.click(); }catch(e){} }
+            busy=false;
+          },140);
+        } else { busy=false; }
+        clearInterval(iv);
+      } else if(tries>25){ clearInterval(iv); busy=false; }
+    },100);
+  }
+
+  function tick(){
+    if(busy) return;
+    var f=orgField(); if(!f) return;
+    if(!onOrderPage()){ f.classList.remove('sd-org-locked'); return; }
+    var fop=paymentFop();
+    if(!fop){ f.classList.remove('sd-org-locked'); return; } // немає платежу — не чіпаємо
+    var cur=norm(f.textContent), target=norm(fop);
+    if(cur===target){ f.classList.add('sd-org-locked'); return; } // вже правильно → фіксуємо
+    var key=location.hash+'|'+target;
+    attempts[key]=(attempts[key]||0)+1;
+    if(attempts[key]>2) return; // не вдалося автоматично — лишаємо менеджеру
+    setOrg(fop);
+  }
+
+  var t=null; function soon(){ clearTimeout(t); t=setTimeout(tick,500); }
+  try{ new MutationObserver(soon).observe(document.body,{childList:true,subtree:true}); }catch(e){}
+  window.addEventListener('hashchange',function(){ attempts={}; soon(); });
+  soon();
 })();
