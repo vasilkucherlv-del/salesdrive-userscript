@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.37
+// @version      1.38
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4192,6 +4192,8 @@ function __sdPageMain() {
   document.addEventListener('mousedown',blocker,true);
   document.addEventListener('click',blocker,true);
 
+  function dbg(){ try{ console.log.apply(console,['[SD-Орг]'].concat([].slice.call(arguments))); }catch(e){} }
+
   var busy=false, attempts={};
   function openEditor(f){
     ['mousedown','mouseup','click'].forEach(function(ev){
@@ -4201,48 +4203,64 @@ function __sdPageMain() {
   function setOrg(fopName){
     var f=orgField(); if(!f) return;
     busy=true;
+    dbg('відкриваю редактор організації, ціль =', fopName);
     openEditor(f);
     var tries=0;
     var iv=setInterval(function(){
       tries++;
-      var ul=document.getElementById('select2-organizationId-pk-results');
+      // шукаємо список select2 будь-де (id або клас), бо id може відрізнятись
+      var ul=document.getElementById('select2-organizationId-pk-results')
+           || document.querySelector('ul.select2-results__options[id*="organizationId"]')
+           || document.querySelector('.select2-container--open ul.select2-results__options');
       if(ul){
-        var hit=null;
-        ul.querySelectorAll('li.select2-results__option').forEach(function(li){
-          var sp=li.querySelector('span');
-          if(sp && norm(sp.textContent)===norm(fopName)) hit=li;
+        var opts=ul.querySelectorAll('li.select2-results__option');
+        dbg('список зʼявився (спроба '+tries+'), варіантів:', opts.length);
+        var hit=null, names=[];
+        opts.forEach(function(li){
+          var sp=li.querySelector('span')||li;
+          names.push(sp.textContent.trim());
+          if(norm(sp.textContent)===norm(fopName)) hit=li;
         });
         if(hit){
+          dbg('знайшов потрібний пункт, клікаю:', fopName);
           ['mousedown','mouseup','click'].forEach(function(ev){
             hit.dispatchEvent(new MouseEvent(ev,{bubbles:true,cancelable:true,view:window}));
           });
           setTimeout(function(){
             var sub=document.querySelector('.editableform [type="submit"], .editable-buttons [type="submit"], .editable-submit');
-            if(sub){ try{ sub.click(); }catch(e){} }
+            if(sub){ dbg('тисну кнопку збереження'); try{ sub.click(); }catch(e){} }
             busy=false;
           },140);
-        } else { busy=false; }
+        } else { dbg('НЕ знайшов пункт «'+fopName+'» у списку. Доступні:', names); busy=false; }
         clearInterval(iv);
-      } else if(tries>25){ clearInterval(iv); busy=false; }
+      } else if(tries>25){ dbg('список select2 так і не зʼявився (редактор не відкрився синтетичним кліком)'); clearInterval(iv); busy=false; }
     },100);
   }
 
+  var lastState='';
   function tick(){
     if(busy) return;
-    var f=orgField(); if(!f) return;
-    if(!onOrderPage()){ f.classList.remove('sd-org-locked'); return; }
+    if(!onOrderPage()) return;
+    var f=orgField();
     var fop=paymentFop();
+    var cur=f?norm(f.textContent):'(поля немає)';
+    var target=norm(fop);
+    var state=(f?'field+':'field-')+'|'+target+'|'+cur;
+    if(state!==lastState){ lastState=state;
+      dbg('перевірка: поле знайдено =', !!f, '| ФОП платежу =', fop||'(немає)', '| зараз в полі =', f?f.textContent.trim():'—');
+    }
+    if(!f) return;
     if(!fop){ f.classList.remove('sd-org-locked'); return; } // немає платежу — не чіпаємо
-    var cur=norm(f.textContent), target=norm(fop);
     if(cur===target){ f.classList.add('sd-org-locked'); return; } // вже правильно → фіксуємо
     var key=location.hash+'|'+target;
     attempts[key]=(attempts[key]||0)+1;
-    if(attempts[key]>2) return; // не вдалося автоматично — лишаємо менеджеру
+    if(attempts[key]>2){ dbg('вичерпано спроби автозаміни для цієї заявки'); return; }
     setOrg(fop);
   }
 
   var t=null; function soon(){ clearTimeout(t); t=setTimeout(tick,500); }
   try{ new MutationObserver(soon).observe(document.body,{childList:true,subtree:true}); }catch(e){}
-  window.addEventListener('hashchange',function(){ attempts={}; soon(); });
+  window.addEventListener('hashchange',function(){ attempts={}; lastState=''; soon(); });
+  dbg('модуль автопідстановки організації завантажено');
   soon();
 })();
