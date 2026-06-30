@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.44
+// @version      1.45
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4118,24 +4118,37 @@ function __sdPageMain() {
     for(var j=0;j<lis.length;j++){ if(textRe && textRe.test(lis[j].textContent||'')) return lis[j]; }
     return null;
   }
-  // вибрати значення у кастомному p-editable полі (оплата/доставка)
+  // СЕРІАЛІЗАЦІЯ роботи з select2-попапами: усі вибори йдуть ПО ЧЕРЗІ,
+  // щоб паралельні (напр. організація + швидкий «Термінал») не збивали один одного
+  var _selBusy=false, _selQ=[];
+  function selRun(task){ _selQ.push(task); selPump(); }
+  function selPump(){
+    if(_selBusy || !_selQ.length) return;
+    _selBusy=true;
+    var task=_selQ.shift();
+    var fin=function(){ _selBusy=false; setTimeout(selPump,120); };
+    try{ task(fin); }catch(e){ fin(); }
+  }
+  // вибрати значення у кастомному p-editable полі (оплата/доставка/організація) — через чергу
   function chooseInField(fieldAttr, numVal, textRe){
-    var field=document.querySelector('[attr-field-name="'+fieldAttr+'"]');
-    if(!field) return;
-    var tries=0;
-    var iv=setInterval(function(){
-      tries++;
-      if(optionsVisible()){
-        clearInterval(iv);
-        waitFor(function(){ return findOption(numVal, textRe); }, 40, function(opt){
-          if(!opt) return;
-          setTimeout(function(){ clickIt(opt.querySelector('span') || opt); }, 50);
-        });
-        return;
-      }
-      if(tries===1 || tries%5===0) clickIt(field); // відкрити попап (без зайвого миготіння)
-      if(tries>30) clearInterval(iv);
-    }, 110);
+    selRun(function(done){
+      var field=document.querySelector('[attr-field-name="'+fieldAttr+'"]');
+      if(!field){ done(); return; }
+      var tries=0;
+      var iv=setInterval(function(){
+        tries++;
+        if(optionsVisible()){
+          clearInterval(iv);
+          waitFor(function(){ return findOption(numVal, textRe); }, 40, function(opt){
+            if(opt) clickIt(opt.querySelector('span') || opt);
+            setTimeout(done, 60);
+          });
+          return;
+        }
+        if(tries===1 || tries%5===0) clickIt(field); // відкрити попап (без зайвого миготіння)
+        if(tries>30){ clearInterval(iv); done(); }
+      }, 110);
+    });
   }
   // текст готового (домальованого) поля; null якщо поле сире або відсутнє
   function readyFieldText(attr){
