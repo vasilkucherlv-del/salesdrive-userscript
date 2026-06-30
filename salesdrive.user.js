@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.46
+// @version      1.47
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -30,7 +30,7 @@
      • lkAnalogStyles  — стилі банера «Аналоги»
      • lkQuickPickup   — ➕ швидка кнопка нової заявки самовивозу
      • lkAutoOrgByPayment — автопідстановка організації під вхідний платіж
-     • lkCheckCashbox   — підстановка «каса самовивозу» у формі чека (самовивіз)
+     • lkCheckCashbox   — підстановка «каса самовивозу» у формі чека (оплата готівка/термінал)
    ╚══════════════════════════════════════════════════════════════════╝ */
 
 /* ▼▼▼ МОДУЛЬ-START • core — ЯДРО — шина подій, дані з Google-таблиць, стилі; містить content.js (підказки/ціни/рейтинг/ТТН) і Базу знань ▼▼▼ */
@@ -4344,7 +4344,7 @@ function __sdPageMain() {
 /* ╚════ ▲▲▲ МОДУЛЬ-END • lkAutoOrgByPayment ════════════════════════════════╝ */
 
 
-/* ▼▼▼ МОДУЛЬ-START • lkCheckCashbox — підстановка «каса самовивозу» у формі чека (самовивіз) ▼▼▼ */
+/* ▼▼▼ МОДУЛЬ-START • lkCheckCashbox — підстановка «каса самовивозу» у формі чека (оплата готівка/термінал) ▼▼▼ */
 (function lkCheckCashbox(){
   'use strict';
   var DEBUG=false; // true → логи [SD-Каса-чек] у консоль
@@ -4362,9 +4362,10 @@ function __sdPageMain() {
     });
   }
   function cashField(){ return document.querySelector('.stylized-select[attr-field-name="cashRegisterId"]'); }
-  function shipPickup(){
-    var f=document.querySelector('[attr-field-name="shipping_method"]');
-    return !!(f && /самовив/i.test(f.textContent||''));
+  // умова: спосіб оплати в самому чеку = Готівка або Термінал
+  function payCashOrCard(){
+    var f=document.querySelector('[attr-field-name="documentPaymentTypeId"]');
+    return !!(f && /готівк|термінал/i.test(f.textContent||''));
   }
   function txt(f){ return (f.textContent||'').replace(/\s+/g,' ').trim(); }
   function isEmpty(f){ var t=txt(f); return (!t || t==='---' || /ph-is-empty/.test(f.innerHTML)); }
@@ -4381,7 +4382,7 @@ function __sdPageMain() {
   function trySet(){
     if(busy) return;
     var f=cashField(); if(!f) return;            // форми чека немає
-    if(!shipPickup()){ dbg('не самовивіз — пропускаю'); return; }
+    if(!payCashOrCard()){ dbg('оплата не готівка/термінал — пропускаю'); return; }
     if(!isEmpty(f)) return;                       // вже щось обрано — не чіпаємо
     dbg('ставлю «касу самовивозу»');
     busy=true;
