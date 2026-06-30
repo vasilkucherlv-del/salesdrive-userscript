@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.38
+// @version      1.39
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4197,7 +4197,7 @@ function __sdPageMain() {
   var busy=false, attempts={};
   function openEditor(f){
     ['mousedown','mouseup','click'].forEach(function(ev){
-      f.dispatchEvent(new MouseEvent(ev,{bubbles:true,cancelable:true,view:window}));
+      f.dispatchEvent(new MouseEvent(ev,{bubbles:true,cancelable:true}));
     });
   }
   function setOrg(fopName){
@@ -4224,7 +4224,7 @@ function __sdPageMain() {
         if(hit){
           dbg('знайшов потрібний пункт, клікаю:', fopName);
           ['mousedown','mouseup','click'].forEach(function(ev){
-            hit.dispatchEvent(new MouseEvent(ev,{bubbles:true,cancelable:true,view:window}));
+            hit.dispatchEvent(new MouseEvent(ev,{bubbles:true,cancelable:true}));
           });
           setTimeout(function(){
             var sub=document.querySelector('.editableform [type="submit"], .editable-buttons [type="submit"], .editable-submit');
