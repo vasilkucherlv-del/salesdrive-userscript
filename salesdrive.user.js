@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.49
+// @version      1.50
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4314,10 +4314,13 @@ function __sdPageMain() {
     },100);
   }
 
+  // для самовивозу організацію задає окремий модуль (lkPickupDefaultOrg) → тут не втручаємось
+  function isPickupShip(){ var s=document.querySelector('[attr-field-name="shipping_method"]'); return !!(s && /самовив/i.test(s.textContent||'')); }
   var lastState='';
   function tick(){
     if(busy) return;
     if(!onOrderPage()) return;
+    if(isPickupShip()){ return; }
     var f=orgField();
     var fop=paymentFop();
     var cur=f?norm(f.textContent):'(поля немає)';
@@ -4455,15 +4458,14 @@ function __sdPageMain() {
   var busy=false, attempts={};
   function trySet(){
     if(busy) return;
-    if(!isPickup()){ dbg('не самовивіз'); return; }        // лише самовивіз
-    if(hasPayment()){ dbg('є платіж → пропускаю (орг ставить модуль за платежем)'); return; }
+    if(!isPickup()){ dbg('не самовивіз'); return; }        // ЄДИНА умова: доставка = самовивіз
     var f=orgField(); if(!f){ dbg('поле організації не знайдено'); return; }
     var cur=txt(f);
     if(ORG_RE.test(cur)){ dbg('організація вже Кучер Василь'); return; } // вже правильно
     var key=location.hash;
     attempts[key]=(attempts[key]||0)+1;
     if(attempts[key]>3){ dbg('вичерпано спроби для цієї заявки'); return; }
-    dbg('самовивіз без платежу → виставляю ФОП Кучер Василь (зараз:', cur||'порожньо', ')');
+    dbg('самовивіз → виставляю ФОП Кучер Василь (зараз:', cur||'порожньо', ')');
     busy=true;
     clickIt(f);
     var tries=0;
