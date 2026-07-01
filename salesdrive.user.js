@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.50
+// @version      1.51
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4075,26 +4075,13 @@ function __sdPageMain() {
     });
   }
   // виставити організацію за замовчуванням (ФОП Кучер Василь Богданович),
-  // якщо ще не обрана; чекаємо, доки поле організації домалюється
-  function applyDefaultOrg(){
-    console.log('[pickup] чекаю готовності поля організації');
-    waitFor(function(){
-      var f=document.querySelector('[attr-field-name="organizationId"]');
-      if(!f) return null;
-      var t=(f.textContent||'').replace(/\s+/g,' ').trim();
-      return t.length>40 ? null : f;        // довгий текст = ще будується
-    }, 120, function(field){
-      if(!field){ console.log('[pickup] ❌ поле організації не готове'); return; }
-      if(DEFAULT_ORG_RE.test(field.textContent||'')){ console.log('[pickup] організація вже потрібна — пропускаю'); return; }
-      console.log('[pickup] виставляю організацію за замовчуванням');
-      chooseInField('organizationId', DEFAULT_ORG_NUM, DEFAULT_ORG_RE);
-    });
-  }
+  // ПРИМІТКА: організацію для самовивозу тепер задає окремий модуль lkPickupDefaultOrg
+  // (щоб не було подвійного виставлення й конфлікту попапів select2).
   function openPickupOrder(){
     if((location.hash||'').indexOf('/order/create') < 0){
       location.hash = '#/order/create';
     }
-    applyPickup(applyDefaultOrg); // організацію — одразу після вибору доставки, без мертвої паузи
+    applyPickup(); // лише доставка; організацію підхопить lkPickupDefaultOrg
   }
   function addBtn(){
     if(document.getElementById('lk-pickup-btn')) return;
@@ -4459,6 +4446,7 @@ function __sdPageMain() {
   function trySet(){
     if(busy) return;
     if(!isPickup()){ dbg('не самовивіз'); return; }        // ЄДИНА умова: доставка = самовивіз
+    if(optionsVisible()){ dbg('відкритий інший попап — чекаю'); return; } // не збивати оплату/інші select2
     var f=orgField(); if(!f){ dbg('поле організації не знайдено'); return; }
     var cur=txt(f);
     if(ORG_RE.test(cur)){ dbg('організація вже Кучер Василь'); return; } // вже правильно
