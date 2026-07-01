@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.48
+// @version      1.49
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4418,7 +4418,7 @@ function __sdPageMain() {
 /* ▼▼▼ МОДУЛЬ-START • lkPickupDefaultOrg — самовивіз → організація ФОП Кучер Василь ▼▼▼ */
 (function lkPickupDefaultOrg(){
   'use strict';
-  var DEBUG=false; // true → логи [SD-Самовивіз-Орг]
+  var DEBUG=true; // true → логи [SD-Самовивіз-Орг] (тимчасово для діагностики)
   function dbg(){ if(!DEBUG) return; try{ console.log.apply(console,['[SD-Самовивіз-Орг]'].concat([].slice.call(arguments))); }catch(e){} }
 
   var ORG_NUM = 1;             // number:1 = ФОП Кучер Василь Богданович
@@ -4452,14 +4452,18 @@ function __sdPageMain() {
     return null;
   }
 
-  var busy=false;
+  var busy=false, attempts={};
   function trySet(){
     if(busy) return;
-    if(!isPickup()) return;                    // лише самовивіз
-    if(hasPayment()) return;                    // є платіж → організацію ставить модуль за платежем
-    var f=orgField(); if(!f) return;
-    if(!isEmpty(f)){ if(ORG_RE.test(txt(f))) return; return; } // вже обрана — не чіпаємо
-    dbg('самовивіз без платежу → ставлю ФОП Кучер Василь');
+    if(!isPickup()){ dbg('не самовивіз'); return; }        // лише самовивіз
+    if(hasPayment()){ dbg('є платіж → пропускаю (орг ставить модуль за платежем)'); return; }
+    var f=orgField(); if(!f){ dbg('поле організації не знайдено'); return; }
+    var cur=txt(f);
+    if(ORG_RE.test(cur)){ dbg('організація вже Кучер Василь'); return; } // вже правильно
+    var key=location.hash;
+    attempts[key]=(attempts[key]||0)+1;
+    if(attempts[key]>3){ dbg('вичерпано спроби для цієї заявки'); return; }
+    dbg('самовивіз без платежу → виставляю ФОП Кучер Василь (зараз:', cur||'порожньо', ')');
     busy=true;
     clickIt(f);
     var tries=0;
@@ -4483,7 +4487,8 @@ function __sdPageMain() {
 
   var t=null; function soon(){ clearTimeout(t); t=setTimeout(trySet,400); }
   try{ new MutationObserver(soon).observe(document.body,{childList:true,subtree:true}); }catch(e){}
-  window.addEventListener('hashchange', soon);
+  window.addEventListener('hashchange', function(){ attempts={}; soon(); });
+  dbg('модуль завантажено');
   soon();
 })();
 /* ▲▲▲ МОДУЛЬ-END • lkPickupDefaultOrg ▲▲▲ */
