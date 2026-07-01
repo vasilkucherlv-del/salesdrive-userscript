@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.47
+// @version      1.48
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -31,6 +31,7 @@
      • lkQuickPickup   — ➕ швидка кнопка нової заявки самовивозу
      • lkAutoOrgByPayment — автопідстановка організації під вхідний платіж
      • lkCheckCashbox   — підстановка «каса самовивозу» у формі чека (оплата готівка/термінал)
+     • lkPickupDefaultOrg — самовивіз (без платежу) → організація ФОП Кучер Василь
    ╚══════════════════════════════════════════════════════════════════╝ */
 
 /* ▼▼▼ МОДУЛЬ-START • core — ЯДРО — шина подій, дані з Google-таблиць, стилі; містить content.js (підказки/ціни/рейтинг/ТТН) і Базу знань ▼▼▼ */
@@ -4412,3 +4413,77 @@ function __sdPageMain() {
   soon();
 })();
 /* ▲▲▲ МОДУЛЬ-END • lkCheckCashbox ▲▲▲ */
+
+
+/* ▼▼▼ МОДУЛЬ-START • lkPickupDefaultOrg — самовивіз → організація ФОП Кучер Василь ▼▼▼ */
+(function lkPickupDefaultOrg(){
+  'use strict';
+  var DEBUG=false; // true → логи [SD-Самовивіз-Орг]
+  function dbg(){ if(!DEBUG) return; try{ console.log.apply(console,['[SD-Самовивіз-Орг]'].concat([].slice.call(arguments))); }catch(e){} }
+
+  var ORG_NUM = 1;             // number:1 = ФОП Кучер Василь Богданович
+  var ORG_RE  = /кучер василь/i; // не плутати з «Кучер Вікторія»
+
+  var REALWIN=(typeof unsafeWindow!=='undefined'&&unsafeWindow)?unsafeWindow:window;
+  function clickIt(el){
+    ['mousedown','mouseup','click'].forEach(function(t){
+      var ev; try{ ev=new MouseEvent(t,{bubbles:true,cancelable:true,view:REALWIN}); }
+      catch(e){ ev=new MouseEvent(t,{bubbles:true,cancelable:true}); }
+      el.dispatchEvent(ev);
+    });
+  }
+  function onOrderPage(){ return /\/order\/(create|update|\w+)\/?/.test(location.hash||'') && /\/order\//.test(location.hash||''); }
+  function isPickup(){ var f=document.querySelector('[attr-field-name="shipping_method"]'); return !!(f && /самовив/i.test(f.textContent||'')); }
+  function hasPayment(){ return !!document.querySelector('a[href*="incoming-payment"]'); }
+  // організація САМОЇ заявки (не поле у формі чека)
+  function orgField(){
+    var all=document.querySelectorAll('.stylized-select[attr-field-name="organizationId"]');
+    for(var i=0;i<all.length;i++){ if(!all[i].closest('.invoice-form-containers')) return all[i]; }
+    return all[0]||null;
+  }
+  function txt(f){ return (f.textContent||'').replace(/\s+/g,' ').trim(); }
+  function isEmpty(f){ var t=txt(f); return (!t || t==='---' || /ph-is-empty/.test(f.innerHTML)); }
+  function optionsVisible(){ return document.querySelectorAll('li.select2-results__option').length>0; }
+  function findOption(){
+    var lis=document.querySelectorAll('li.select2-results__option');
+    var suf='number:'+ORG_NUM;
+    for(var i=0;i<lis.length;i++){ if((lis[i].id||'').slice(-suf.length)===suf) return lis[i]; }
+    for(var j=0;j<lis.length;j++){ if(ORG_RE.test(lis[j].textContent||'')) return lis[j]; }
+    return null;
+  }
+
+  var busy=false;
+  function trySet(){
+    if(busy) return;
+    if(!isPickup()) return;                    // лише самовивіз
+    if(hasPayment()) return;                    // є платіж → організацію ставить модуль за платежем
+    var f=orgField(); if(!f) return;
+    if(!isEmpty(f)){ if(ORG_RE.test(txt(f))) return; return; } // вже обрана — не чіпаємо
+    dbg('самовивіз без платежу → ставлю ФОП Кучер Василь');
+    busy=true;
+    clickIt(f);
+    var tries=0;
+    var iv=setInterval(function(){
+      tries++;
+      if(optionsVisible()){
+        clearInterval(iv);
+        var s=0;
+        var iv2=setInterval(function(){
+          s++;
+          var opt=findOption();
+          if(opt){ clearInterval(iv2); clickIt(opt.querySelector('span')||opt); dbg('обрано'); setTimeout(function(){ busy=false; },250); }
+          else if(s>30){ clearInterval(iv2); busy=false; dbg('пункт організації не знайдено'); }
+        },90);
+        return;
+      }
+      if(tries===1||tries%5===0) clickIt(f);
+      if(tries>30){ clearInterval(iv); busy=false; dbg('попап організації не відкрився'); }
+    },110);
+  }
+
+  var t=null; function soon(){ clearTimeout(t); t=setTimeout(trySet,400); }
+  try{ new MutationObserver(soon).observe(document.body,{childList:true,subtree:true}); }catch(e){}
+  window.addEventListener('hashchange', soon);
+  soon();
+})();
+/* ▲▲▲ МОДУЛЬ-END • lkPickupDefaultOrg ▲▲▲ */
