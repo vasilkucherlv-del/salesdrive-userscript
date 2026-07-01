@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.51
+// @version      1.52
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -29,9 +29,8 @@
      • lkCashRegister  — 💰 Каса самовивозу
      • lkAnalogStyles  — стилі банера «Аналоги»
      • lkQuickPickup   — ➕ швидка кнопка нової заявки самовивозу
-     • lkAutoOrgByPayment — автопідстановка організації під вхідний платіж
+     • lkAutoOrgByPayment — організація: самовивіз→Кучер Василь, інакше→ФОП з платежу
      • lkCheckCashbox   — підстановка «каса самовивозу» у формі чека (оплата готівка/термінал)
-     • lkPickupDefaultOrg — самовивіз (без платежу) → організація ФОП Кучер Василь
    ╚══════════════════════════════════════════════════════════════════╝ */
 
 /* ▼▼▼ МОДУЛЬ-START • core — ЯДРО — шина подій, дані з Google-таблиць, стилі; містить content.js (підказки/ціни/рейтинг/ТТН) і Базу знань ▼▼▼ */
@@ -4075,13 +4074,13 @@ function __sdPageMain() {
     });
   }
   // виставити організацію за замовчуванням (ФОП Кучер Василь Богданович),
-  // ПРИМІТКА: організацію для самовивозу тепер задає окремий модуль lkPickupDefaultOrg
-  // (щоб не було подвійного виставлення й конфлікту попапів select2).
+  // ПРИМІТКА: організацію для самовивозу задає модуль lkAutoOrgByPayment
+  // (єдиний сеттер організації → без подвійного виставлення й конфлікту select2).
   function openPickupOrder(){
     if((location.hash||'').indexOf('/order/create') < 0){
       location.hash = '#/order/create';
     }
-    applyPickup(); // лише доставка; організацію підхопить lkPickupDefaultOrg
+    applyPickup(); // лише доставка; організацію підхопить lkAutoOrgByPayment
   }
   function addBtn(){
     if(document.getElementById('lk-pickup-btn')) return;
@@ -4245,7 +4244,7 @@ function __sdPageMain() {
     e.preventDefault(); e.stopImmediatePropagation();
     if(e.type!=='click') return; // запит показуємо лише раз — на click
     var ok=false;
-    try{ ok=confirm('Організацію вже підставлено під вхідний платіж.\n\nТочно потрібна ручна зміна?'); }catch(_){ ok=true; }
+    try{ ok=confirm('Організацію підставлено автоматично.\n\nТочно потрібна ручна зміна?'); }catch(_){ ok=true; }
     if(ok){
       override[location.hash]=true;            // далі цю заявку автоматично не чіпаємо
       f.classList.remove('sd-org-locked');
@@ -4255,7 +4254,7 @@ function __sdPageMain() {
   document.addEventListener('mousedown',blocker,true);
   document.addEventListener('click',blocker,true);
 
-  var DEBUG=false; // true → діагностика автопідстановки в консолі ([SD-Орг])
+  var DEBUG=true; // true → діагностика автопідстановки в консолі ([SD-Орг]) — тимчасово
   function dbg(){ if(!DEBUG) return; try{ console.log.apply(console,['[SD-Орг]'].concat([].slice.call(arguments))); }catch(e){} }
 
   var busy=false, attempts={}, override={};
@@ -4301,29 +4300,34 @@ function __sdPageMain() {
     },100);
   }
 
-  // для самовивозу організацію задає окремий модуль (lkPickupDefaultOrg) → тут не втручаємось
+  // ЄДИНА логіка організації (щоб не було гонки кількох модулів):
+  //   • доставка = Самовивіз → ФОП Кучер Василь Богданович (ПРІОРИТЕТ);
+  //   • інакше є вхідний платіж → ФОП із платежу.
+  var PICKUP_ORG='ФОП Кучер Василь Богданович';
   function isPickupShip(){ var s=document.querySelector('[attr-field-name="shipping_method"]'); return !!(s && /самовив/i.test(s.textContent||'')); }
+  function anyPopupOpen(){ return document.querySelectorAll('li.select2-results__option').length>0; }
+  function targetOrg(){ if(isPickupShip()) return PICKUP_ORG; return paymentFop()||''; }
   var lastState='';
   function tick(){
     if(busy) return;
     if(!onOrderPage()) return;
-    if(isPickupShip()){ return; }
     var f=orgField();
-    var fop=paymentFop();
+    var want=targetOrg();
     var cur=f?norm(f.textContent):'(поля немає)';
-    var target=norm(fop);
+    var target=norm(want);
     var state=(f?'field+':'field-')+'|'+target+'|'+cur;
     if(state!==lastState){ lastState=state;
-      dbg('перевірка: поле знайдено =', !!f, '| ФОП платежу =', fop||'(немає)', '| зараз в полі =', f?f.textContent.trim():'—');
+      dbg('перевірка: поле =', !!f, '| ціль =', want||'(немає)', '| зараз =', f?f.textContent.trim():'—');
     }
     if(!f) return;
-    if(!fop){ f.classList.remove('sd-org-locked'); return; } // немає платежу — не чіпаємо
-    if(override[location.hash]){ f.classList.remove('sd-org-locked'); return; } // менеджер підтвердив ручну зміну
-    if(cur===target){ f.classList.add('sd-org-locked'); return; } // вже правильно → фіксуємо
+    if(!want){ f.classList.remove('sd-org-locked'); return; }           // ні самовивозу, ні платежу
+    if(override[location.hash]){ f.classList.remove('sd-org-locked'); return; } // ручну зміну підтверджено
+    if(cur===target){ f.classList.add('sd-org-locked'); return; }       // вже правильно → фіксуємо
+    if(anyPopupOpen()){ dbg('відкритий інший попап — чекаю'); return; }  // не збивати оплату/інші select2
     var key=location.hash+'|'+target;
     attempts[key]=(attempts[key]||0)+1;
-    if(attempts[key]>2){ dbg('вичерпано спроби автозаміни для цієї заявки'); return; }
-    setOrg(fop);
+    if(attempts[key]>12){ dbg('вичерпано спроби автозаміни'); return; }
+    setOrg(want);
   }
 
   var t=null; function soon(){ clearTimeout(t); t=setTimeout(tick,500); }
@@ -4403,82 +4407,3 @@ function __sdPageMain() {
   soon();
 })();
 /* ▲▲▲ МОДУЛЬ-END • lkCheckCashbox ▲▲▲ */
-
-
-/* ▼▼▼ МОДУЛЬ-START • lkPickupDefaultOrg — самовивіз → організація ФОП Кучер Василь ▼▼▼ */
-(function lkPickupDefaultOrg(){
-  'use strict';
-  var DEBUG=true; // true → логи [SD-Самовивіз-Орг] (тимчасово для діагностики)
-  function dbg(){ if(!DEBUG) return; try{ console.log.apply(console,['[SD-Самовивіз-Орг]'].concat([].slice.call(arguments))); }catch(e){} }
-
-  var ORG_NUM = 1;             // number:1 = ФОП Кучер Василь Богданович
-  var ORG_RE  = /кучер василь/i; // не плутати з «Кучер Вікторія»
-
-  var REALWIN=(typeof unsafeWindow!=='undefined'&&unsafeWindow)?unsafeWindow:window;
-  function clickIt(el){
-    ['mousedown','mouseup','click'].forEach(function(t){
-      var ev; try{ ev=new MouseEvent(t,{bubbles:true,cancelable:true,view:REALWIN}); }
-      catch(e){ ev=new MouseEvent(t,{bubbles:true,cancelable:true}); }
-      el.dispatchEvent(ev);
-    });
-  }
-  function onOrderPage(){ return /\/order\/(create|update|\w+)\/?/.test(location.hash||'') && /\/order\//.test(location.hash||''); }
-  function isPickup(){ var f=document.querySelector('[attr-field-name="shipping_method"]'); return !!(f && /самовив/i.test(f.textContent||'')); }
-  function hasPayment(){ return !!document.querySelector('a[href*="incoming-payment"]'); }
-  // організація САМОЇ заявки (не поле у формі чека)
-  function orgField(){
-    var all=document.querySelectorAll('.stylized-select[attr-field-name="organizationId"]');
-    for(var i=0;i<all.length;i++){ if(!all[i].closest('.invoice-form-containers')) return all[i]; }
-    return all[0]||null;
-  }
-  function txt(f){ return (f.textContent||'').replace(/\s+/g,' ').trim(); }
-  function isEmpty(f){ var t=txt(f); return (!t || t==='---' || /ph-is-empty/.test(f.innerHTML)); }
-  function optionsVisible(){ return document.querySelectorAll('li.select2-results__option').length>0; }
-  function findOption(){
-    var lis=document.querySelectorAll('li.select2-results__option');
-    var suf='number:'+ORG_NUM;
-    for(var i=0;i<lis.length;i++){ if((lis[i].id||'').slice(-suf.length)===suf) return lis[i]; }
-    for(var j=0;j<lis.length;j++){ if(ORG_RE.test(lis[j].textContent||'')) return lis[j]; }
-    return null;
-  }
-
-  var busy=false, attempts={};
-  function trySet(){
-    if(busy) return;
-    if(!isPickup()){ dbg('не самовивіз'); return; }        // ЄДИНА умова: доставка = самовивіз
-    if(optionsVisible()){ dbg('відкритий інший попап — чекаю'); return; } // не збивати оплату/інші select2
-    var f=orgField(); if(!f){ dbg('поле організації не знайдено'); return; }
-    var cur=txt(f);
-    if(ORG_RE.test(cur)){ dbg('організація вже Кучер Василь'); return; } // вже правильно
-    var key=location.hash;
-    attempts[key]=(attempts[key]||0)+1;
-    if(attempts[key]>3){ dbg('вичерпано спроби для цієї заявки'); return; }
-    dbg('самовивіз → виставляю ФОП Кучер Василь (зараз:', cur||'порожньо', ')');
-    busy=true;
-    clickIt(f);
-    var tries=0;
-    var iv=setInterval(function(){
-      tries++;
-      if(optionsVisible()){
-        clearInterval(iv);
-        var s=0;
-        var iv2=setInterval(function(){
-          s++;
-          var opt=findOption();
-          if(opt){ clearInterval(iv2); clickIt(opt.querySelector('span')||opt); dbg('обрано'); setTimeout(function(){ busy=false; },250); }
-          else if(s>30){ clearInterval(iv2); busy=false; dbg('пункт організації не знайдено'); }
-        },90);
-        return;
-      }
-      if(tries===1||tries%5===0) clickIt(f);
-      if(tries>30){ clearInterval(iv); busy=false; dbg('попап організації не відкрився'); }
-    },110);
-  }
-
-  var t=null; function soon(){ clearTimeout(t); t=setTimeout(trySet,400); }
-  try{ new MutationObserver(soon).observe(document.body,{childList:true,subtree:true}); }catch(e){}
-  window.addEventListener('hashchange', function(){ attempts={}; soon(); });
-  dbg('модуль завантажено');
-  soon();
-})();
-/* ▲▲▲ МОДУЛЬ-END • lkPickupDefaultOrg ▲▲▲ */
