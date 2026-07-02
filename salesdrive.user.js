@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.59
+// @version      1.60
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4295,7 +4295,13 @@ function __sdPageMain() {
 (function lkAutoOrgByPayment(){
   'use strict';
   function onOrderPage(){ return /\/order\/\w+\/\d+/.test(location.hash||''); }
-  function orgField(){ return document.querySelector('.stylized-select[attr-field-name="organizationId"]'); }
+  // організація САМОЇ заявки — виключаємо поле у формі чека (.invoice-form-containers),
+  // бо там теж є attr-field-name="organizationId" і воно збиває вибір
+  function orgField(){
+    var all=document.querySelectorAll('.stylized-select[attr-field-name="organizationId"]');
+    for(var i=0;i<all.length;i++){ if(!all[i].closest('.invoice-form-containers')) return all[i]; }
+    return null;
+  }
   function norm(s){ return String(s==null?'':s).replace(/ /g,' ').replace(/\s+/g,' ').trim().toLowerCase(); }
 
   // ФОП із найновішого вхідного платежу (рядок коментаря з посиланням incoming-payment)
