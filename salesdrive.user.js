@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.54
+// @version      1.56
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -30,6 +30,7 @@
      • lkAnalogStyles  — стилі банера «Аналоги»
      • lkQuickPickup   — ➕ швидка кнопка нової заявки самовивозу
      • lkAutoOrgByPayment — організація: самовивіз→Кучер Василь, інакше→ФОП з платежу
+     • lkPayLink        — 💳 кнопка «Оплата»: платіжний лінк НБУ з сумою й номером заявки
      • lkCheckCashbox   — підстановка «каса самовивозу» у формі чека (оплата готівка/термінал)
      • lkSenderBySource — відправник СМС за джерелом замовлення (FIXLAND/Refort/lartek/Сайт/mobile_catalog_app/Bigl)
    ╚══════════════════════════════════════════════════════════════════╝ */
@@ -3925,6 +3926,84 @@ function __sdPageMain() {
   setInterval(addBtn,800); addBtn();
 })();
 /* ▲▲▲ МОДУЛЬ-END • lkCashRegister ▲▲▲ */
+/* ▼▼▼ МОДУЛЬ-START • lkPayLink — 💳 Кнопка «Оплата»: платіжний лінк НБУ (BCB/002) з сумою й номером заявки ▼▼▼ */
+(function lkPayLink(){
+  'use strict';
+  // Реквізити отримувача (ФОП). Формат перевірено сканером Privat24 — НЕ міняти теґ/версію/домен.
+  var RECIPIENT = 'ФОП Кучер Вікторія Михайлівна';
+  var IBAN      = 'UA893052990000026005031027180';
+  var CODE      = '3466102720';
+
+  function onOrderPage(){ return /\/order\/\w+\/\d+/.test(location.hash||''); }
+
+  // viewModel поточної відкритої заявки — через angular-scope кнопки коментаря
+  function getOrder(){
+    if(!window.angular) return null;
+    var anchor = document.querySelector('[ng-click*="viewModel.createComment"]');
+    if(!anchor) return null;
+    try{
+      var s = window.angular.element(anchor).scope();
+      while(s && !s.viewModel) s = s.$parent;
+      var o = s && s.viewModel && s.viewModel.order;
+      return o || null;
+    }catch(e){ return null; }
+  }
+
+  function amountOf(o){
+    var a = Number(o.paymentAmount);
+    if(!isFinite(a) || a<=0) a = Number(o.totalSum);
+    return (isFinite(a) && a>0) ? a : null;
+  }
+
+  function payLink(recipient, iban, code, amount, purpose){
+    iban = String(iban).replace(/\s+/g,'').toUpperCase();
+    var parts = ['BCB','002','1','UCT','', recipient, iban,
+                 'UAH'+amount.toFixed(2), String(code), '', '', purpose, ''];
+    var b64 = btoa(unescape(encodeURIComponent(parts.join('\n'))))
+                .replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+    return 'https://bank.gov.ua/qr/'+b64;
+  }
+
+  function toast(msg, ok){
+    var t = document.createElement('div');
+    t.textContent = msg;
+    t.style.cssText = 'position:fixed;z-index:99999;left:50%;bottom:28px;transform:translateX(-50%);'
+      + 'padding:10px 18px;border-radius:9px;font-size:14px;font-weight:600;color:#fff;'
+      + 'background:'+(ok?'#2ecc71':'#e67e22')+';box-shadow:0 4px 14px rgba(0,0,0,.2)';
+    document.body.appendChild(t);
+    setTimeout(function(){ t.remove(); }, 2600);
+  }
+
+  function onClick(){
+    var o = getOrder();
+    if(!o){ toast('Заявку не знайдено — відкрий картку заявки', false); return; }
+    var amount = amountOf(o);
+    if(!amount){ toast('У заявці немає суми — заповни товари/суму', false); return; }
+    var num = (o.number!=null && String(o.number).trim()) ? o.number : o.id;
+    var link = payLink(RECIPIENT, IBAN, CODE, amount, 'Оплата замовлення №'+num);
+    try{ GM_setClipboard(link); }
+    catch(e){ try{ navigator.clipboard.writeText(link); }catch(e2){} }
+    toast('💳 Лінк на оплату скопійовано ('+amount.toFixed(2)+' грн)', true);
+  }
+
+  function addBtn(){
+    if(!onOrderPage()) return;
+    var anchor = document.querySelector('[ng-click*="viewModel.createComment"]');
+    if(!anchor) return;
+    if(anchor.parentNode.querySelector('.lk-paylink-btn')) return;
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'btn btn-communication-history lk-paylink-btn';
+    b.style.cssText = 'background:#16a085;border-color:#16a085;color:#fff';
+    b.textContent = '💳 Оплата';
+    b.addEventListener('click', onClick);
+    anchor.parentNode.insertBefore(b, anchor.nextSibling);
+  }
+
+  setInterval(addBtn, 800); addBtn();
+})();
+/* ▲▲▲ МОДУЛЬ-END • lkPayLink ▲▲▲ */
+
 /* ▼▼▼ МОДУЛЬ-START • lkAnalogStyles — Стилі банера «Аналоги» ▼▼▼ */
 /* ===== Стилі банера «Аналоги» (бірюзовий, окремо від жовтого допродажу) ===== */
 (function lkAnalogStyles() {
