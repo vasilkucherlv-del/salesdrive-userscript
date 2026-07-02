@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.56
+// @version      1.59
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -3937,16 +3937,36 @@ function __sdPageMain() {
   function onOrderPage(){ return /\/order\/\w+\/\d+/.test(location.hash||''); }
 
   // viewModel поточної відкритої заявки — через angular-scope кнопки коментаря
+  function scopeOrder(scope){
+    var seen=0;
+    while(scope && seen<400){
+      seen++;
+      var vm=scope.viewModel;
+      if(vm && vm.order && (vm.order.paymentAmount!=null || vm.order.totalSum!=null || vm.order.id!=null)) return vm.order;
+      if(scope.order && (scope.order.paymentAmount!=null || scope.order.id!=null)) return scope.order;
+      scope=scope.$parent;
+    }
+    return null;
+  }
   function getOrder(){
     if(!window.angular) return null;
-    var anchor = document.querySelector('[ng-click*="viewModel.createComment"]');
-    if(!anchor) return null;
+    // 1) будь-який елемент, що згадує viewModel.order у розмітці
+    var hosts = document.querySelectorAll(
+      '[comments-to-order], [attr-field-name="paymentAmount"], [ng-click*="viewModel.addOption"], input[ng-model*="newName"], button[ng-click*="viewModel.createComment"], [ng-controller], .p-editable-precompile');
+    for(var i=0;i<hosts.length;i++){
+      try{
+        var o = scopeOrder(window.angular.element(hosts[i]).scope());
+        if(o) return o;
+      }catch(e){}
+    }
+    // 2) фолбек — обхід усіх scope через корінь застосунку
     try{
-      var s = window.angular.element(anchor).scope();
-      while(s && !s.viewModel) s = s.$parent;
-      var o = s && s.viewModel && s.viewModel.order;
-      return o || null;
-    }catch(e){ return null; }
+      var root = window.angular.element(document.querySelector('[ng-app], body')).injector();
+      var rs = window.angular.element(document.querySelector('.ng-scope')).scope();
+      var o2 = scopeOrder(rs);
+      if(o2) return o2;
+    }catch(e){}
+    return null;
   }
 
   function amountOf(o){
@@ -3988,7 +4008,7 @@ function __sdPageMain() {
 
   function addBtn(){
     if(!onOrderPage()) return;
-    var anchor = document.querySelector('[ng-click*="viewModel.createComment"]');
+    var anchor = document.querySelector('button[ng-click*="viewModel.createComment"]');
     if(!anchor) return;
     if(anchor.parentNode.querySelector('.lk-paylink-btn')) return;
     var b = document.createElement('button');
