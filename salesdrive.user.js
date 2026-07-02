@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.53
+// @version      1.54
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4410,112 +4410,75 @@ function __sdPageMain() {
 /* ▲▲▲ МОДУЛЬ-END • lkCheckCashbox ▲▲▲ */
 
 
-/* ▼▼▼ МОДУЛЬ-START • lkSenderBySource — відправник СМС за джерелом замовлення ▼▼▼ */
+/* ▼▼▼ МОДУЛЬ-START • lkSenderBySource — відправник у формі СМС за джерелом замовлення ▼▼▼ */
 (function lkSenderBySource(){
   'use strict';
   var DEBUG=true; // true → логи [SD-Відправник]
   function dbg(){ if(!DEBUG) return; try{ console.log.apply(console,['[SD-Відправник]'].concat([].slice.call(arguments))); }catch(e){} }
 
-  // Мапа «нормалізоване джерело → назва відправника» (з випадаючого списку select2).
-  // Значення точно з HTML: Fixland, KOMPLEKTOM, Lartek, MAGAZIN, Refort.
+  // Мапа «нормалізоване джерело → значення option у select СМС»
+  // Значення option такі: string:Fixland | string:KOMPLEKTOM | string:Lartek | string:MAGAZIN | string:Refort
   var MAP={
-    'fixland'            : 'Fixland',
-    'refort'             : 'Refort',
-    'lartek.com.ua'      : 'Lartek',
-    'сайт'               : 'KOMPLEKTOM',
-    'mobile_catalog_app' : 'KOMPLEKTOM',
-    'bigl'               : 'KOMPLEKTOM'
+    'fixland'            : 'string:Fixland',
+    'refort'             : 'string:Refort',
+    'lartek.com.ua'      : 'string:Lartek',
+    'сайт'               : 'string:KOMPLEKTOM',
+    'mobile_catalog_app' : 'string:KOMPLEKTOM',
+    'bigl'               : 'string:KOMPLEKTOM'
     // інші джерела — не чіпаємо (менеджер обирає сам)
   };
-  var ALLOWED = { 'Fixland':1,'KOMPLEKTOM':1,'Lartek':1,'MAGAZIN':1,'Refort':1 };
 
-  function onOrderPage(){ return /\/order\/\w+\/\d+/.test(location.hash||''); }
   function norm(s){ return String(s==null?'':s).replace(/\s+/g,' ').trim().toLowerCase(); }
   function txt(f){ return (f?f.textContent:'').replace(/\s+/g,' ').trim(); }
-  function optionsVisible(){ return document.querySelectorAll('li.select2-results__option').length>0; }
+  function onOrderPage(){ return /\/order\/\w+\/\d+/.test(location.hash||''); }
 
   function sourceField(){ return document.querySelector('.stylized-select[attr-field-name="dzereloZamovlenna"]'); }
-
-  // поле «Відправник» знаходимо через його підпис (щоб не залежати від attr-field-name).
-  // Додатково перевіряємо, що поточний текст поля — з нашого списку {Fixland, …, ---}.
-  function senderField(){
-    var groups=document.querySelectorAll('.form-group');
-    for(var i=0;i<groups.length;i++){
-      var lb=groups[i].querySelector('label');
-      if(!lb) continue;
-      if(!/^\s*відправник\s*$/i.test(lb.textContent||'')) continue;
-      var f=groups[i].querySelector('.stylized-select[attr-field-name]');
-      if(!f) continue;
-      var t=txt(f);
-      if(!t || t==='---' || /ph-is-empty/.test(f.innerHTML) || ALLOWED[t]) return f;
-    }
-    return null;
-  }
+  function smsSelect(){ return document.querySelector('select[ng-model="viewModel.smsSender"]'); }
 
   var REALWIN=(typeof unsafeWindow!=='undefined'&&unsafeWindow)?unsafeWindow:window;
-  function clickIt(el){
-    ['mousedown','mouseup','click'].forEach(function(t){
-      var ev; try{ ev=new MouseEvent(t,{bubbles:true,cancelable:true,view:REALWIN}); }
-      catch(e){ ev=new MouseEvent(t,{bubbles:true,cancelable:true}); }
-      el.dispatchEvent(ev);
-    });
-  }
-  function findOption(name){
-    var lis=document.querySelectorAll('.select2-container--open li.select2-results__option, li.select2-results__option');
-    for(var i=0;i<lis.length;i++){
-      var sp=lis[i].querySelector('span')||lis[i];
-      if(norm(sp.textContent)===norm(name)) return lis[i];
-    }
-    return null;
+
+  function setSelect(sel, value){
+    // 1) Пряма зміна value + Angular/Change event — це те, що робить сам SalesDrive
+    try{
+      sel.value=value;
+      sel.dispatchEvent(new Event('change',{bubbles:true}));
+    }catch(e){}
+    // 2) Дублювати через jQuery+select2 (SalesDrive використовує jQuery)
+    try{
+      var jq = REALWIN.jQuery || REALWIN.$;
+      if(jq){ jq(sel).val(value).trigger('change'); }
+    }catch(e){}
   }
 
-  function isEmpty(f){ var t=txt(f); return (!t || t==='---' || /ph-is-empty/.test(f.innerHTML)); }
-
-  var busy=false, attempts={}, lastState='';
-  function tick(){
-    if(busy) return;
+  var appliedFor=null; // ключ = hash+джерело+ціль, щоб не робити двічі підряд
+  function tryApply(){
     if(!onOrderPage()) return;
-    var sf=sourceField(); if(!sf) return;
-    var sender=senderField();
-    var srcRaw=txt(sf);
-    var target=MAP[norm(srcRaw)];
-    var state=(sender?'S+':'S-')+'|'+srcRaw+'|'+(target||'-')+'|'+(sender?txt(sender):'-');
-    if(state!==lastState){ lastState=state;
-      dbg('перевірка: джерело =', srcRaw||'—', '| ціль =', target||'(немає мапи)', '| зараз =', sender?txt(sender):'(поля немає)');
-    }
-    if(!sender) return;
-    if(!target) return;              // джерела немає в мапі — не чіпаємо
-    if(txt(sender)===target) return; // вже правильно
-    if(!isEmpty(sender)) return;     // менеджер обрав інше вручну — не перезаписуємо
-    if(optionsVisible()){ dbg('відкритий інший попап — чекаю'); return; }
-    var key=location.hash+'|'+target;
-    attempts[key]=(attempts[key]||0)+1;
-    if(attempts[key]>10){ dbg('вичерпано спроби'); return; }
-    dbg('виставляю відправника →', target);
-    busy=true;
-    clickIt(sender);
-    var tries=0;
-    var iv=setInterval(function(){
-      tries++;
-      if(optionsVisible()){
-        clearInterval(iv);
-        var s=0;
-        var iv2=setInterval(function(){
-          s++;
-          var opt=findOption(target);
-          if(opt){ clearInterval(iv2); clickIt(opt.querySelector('span')||opt); dbg('обрано'); setTimeout(function(){ busy=false; },250); }
-          else if(s>30){ clearInterval(iv2); busy=false; dbg('пункт «'+target+'» не знайдено у списку'); }
-        },90);
+    var sel=smsSelect(); if(!sel) return;   // форма СМС ще не відкрита
+    var src=sourceField(); if(!src) return; // немає джерела в картці
+    var target=MAP[norm(txt(src))];
+    if(!target){ dbg('джерело =', txt(src), '→ немає в мапі, не чіпаю'); return; }
+    if(sel.value===target){ return; }        // вже правильно
+    // Якщо вже щось не-порожнє обране (менеджер вручну поміняв) — не перезаписуємо
+    if(sel.value && sel.value!=='' && sel.value!=='?' && sel.value!==null){
+      // виняток: якщо порожнє значення (---), value буде '' або 'null' — тоді підставляємо
+      // інакше — не чіпаємо
+      var cur=String(sel.value);
+      if(cur!=='' && cur!=='null' && cur!=='?'){
+        dbg('відправник вже обрано (', cur, ') — не перезаписую');
         return;
       }
-      if(tries===1||tries%5===0) clickIt(sender);
-      if(tries>30){ clearInterval(iv); busy=false; dbg('попап відправника не відкрився'); }
-    },110);
+    }
+    var key=location.hash+'|'+txt(src)+'|'+target;
+    if(appliedFor===key) return;
+    appliedFor=key;
+    dbg('джерело =', txt(src), '→ виставляю відправника:', target);
+    setSelect(sel, target);
   }
 
-  var t=null; function soon(){ clearTimeout(t); t=setTimeout(tick,500); }
+  var t=null;
+  function soon(){ clearTimeout(t); t=setTimeout(tryApply,150); }
   try{ new MutationObserver(soon).observe(document.body,{childList:true,subtree:true}); }catch(e){}
-  window.addEventListener('hashchange', function(){ attempts={}; lastState=''; soon(); });
+  window.addEventListener('hashchange', function(){ appliedFor=null; soon(); });
   dbg('модуль завантажено');
   soon();
 })();
