@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.52
+// @version      1.53
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -31,6 +31,7 @@
      • lkQuickPickup   — ➕ швидка кнопка нової заявки самовивозу
      • lkAutoOrgByPayment — організація: самовивіз→Кучер Василь, інакше→ФОП з платежу
      • lkCheckCashbox   — підстановка «каса самовивозу» у формі чека (оплата готівка/термінал)
+     • lkSenderBySource — відправник СМС за джерелом замовлення (FIXLAND/Refort/lartek/Сайт/mobile_catalog_app/Bigl)
    ╚══════════════════════════════════════════════════════════════════╝ */
 
 /* ▼▼▼ МОДУЛЬ-START • core — ЯДРО — шина подій, дані з Google-таблиць, стилі; містить content.js (підказки/ціни/рейтинг/ТТН) і Базу знань ▼▼▼ */
@@ -4407,3 +4408,115 @@ function __sdPageMain() {
   soon();
 })();
 /* ▲▲▲ МОДУЛЬ-END • lkCheckCashbox ▲▲▲ */
+
+
+/* ▼▼▼ МОДУЛЬ-START • lkSenderBySource — відправник СМС за джерелом замовлення ▼▼▼ */
+(function lkSenderBySource(){
+  'use strict';
+  var DEBUG=true; // true → логи [SD-Відправник]
+  function dbg(){ if(!DEBUG) return; try{ console.log.apply(console,['[SD-Відправник]'].concat([].slice.call(arguments))); }catch(e){} }
+
+  // Мапа «нормалізоване джерело → назва відправника» (з випадаючого списку select2).
+  // Значення точно з HTML: Fixland, KOMPLEKTOM, Lartek, MAGAZIN, Refort.
+  var MAP={
+    'fixland'            : 'Fixland',
+    'refort'             : 'Refort',
+    'lartek.com.ua'      : 'Lartek',
+    'сайт'               : 'KOMPLEKTOM',
+    'mobile_catalog_app' : 'KOMPLEKTOM',
+    'bigl'               : 'KOMPLEKTOM'
+    // інші джерела — не чіпаємо (менеджер обирає сам)
+  };
+  var ALLOWED = { 'Fixland':1,'KOMPLEKTOM':1,'Lartek':1,'MAGAZIN':1,'Refort':1 };
+
+  function onOrderPage(){ return /\/order\/\w+\/\d+/.test(location.hash||''); }
+  function norm(s){ return String(s==null?'':s).replace(/\s+/g,' ').trim().toLowerCase(); }
+  function txt(f){ return (f?f.textContent:'').replace(/\s+/g,' ').trim(); }
+  function optionsVisible(){ return document.querySelectorAll('li.select2-results__option').length>0; }
+
+  function sourceField(){ return document.querySelector('.stylized-select[attr-field-name="dzereloZamovlenna"]'); }
+
+  // поле «Відправник» знаходимо через його підпис (щоб не залежати від attr-field-name).
+  // Додатково перевіряємо, що поточний текст поля — з нашого списку {Fixland, …, ---}.
+  function senderField(){
+    var groups=document.querySelectorAll('.form-group');
+    for(var i=0;i<groups.length;i++){
+      var lb=groups[i].querySelector('label');
+      if(!lb) continue;
+      if(!/^\s*відправник\s*$/i.test(lb.textContent||'')) continue;
+      var f=groups[i].querySelector('.stylized-select[attr-field-name]');
+      if(!f) continue;
+      var t=txt(f);
+      if(!t || t==='---' || /ph-is-empty/.test(f.innerHTML) || ALLOWED[t]) return f;
+    }
+    return null;
+  }
+
+  var REALWIN=(typeof unsafeWindow!=='undefined'&&unsafeWindow)?unsafeWindow:window;
+  function clickIt(el){
+    ['mousedown','mouseup','click'].forEach(function(t){
+      var ev; try{ ev=new MouseEvent(t,{bubbles:true,cancelable:true,view:REALWIN}); }
+      catch(e){ ev=new MouseEvent(t,{bubbles:true,cancelable:true}); }
+      el.dispatchEvent(ev);
+    });
+  }
+  function findOption(name){
+    var lis=document.querySelectorAll('.select2-container--open li.select2-results__option, li.select2-results__option');
+    for(var i=0;i<lis.length;i++){
+      var sp=lis[i].querySelector('span')||lis[i];
+      if(norm(sp.textContent)===norm(name)) return lis[i];
+    }
+    return null;
+  }
+
+  function isEmpty(f){ var t=txt(f); return (!t || t==='---' || /ph-is-empty/.test(f.innerHTML)); }
+
+  var busy=false, attempts={}, lastState='';
+  function tick(){
+    if(busy) return;
+    if(!onOrderPage()) return;
+    var sf=sourceField(); if(!sf) return;
+    var sender=senderField();
+    var srcRaw=txt(sf);
+    var target=MAP[norm(srcRaw)];
+    var state=(sender?'S+':'S-')+'|'+srcRaw+'|'+(target||'-')+'|'+(sender?txt(sender):'-');
+    if(state!==lastState){ lastState=state;
+      dbg('перевірка: джерело =', srcRaw||'—', '| ціль =', target||'(немає мапи)', '| зараз =', sender?txt(sender):'(поля немає)');
+    }
+    if(!sender) return;
+    if(!target) return;              // джерела немає в мапі — не чіпаємо
+    if(txt(sender)===target) return; // вже правильно
+    if(!isEmpty(sender)) return;     // менеджер обрав інше вручну — не перезаписуємо
+    if(optionsVisible()){ dbg('відкритий інший попап — чекаю'); return; }
+    var key=location.hash+'|'+target;
+    attempts[key]=(attempts[key]||0)+1;
+    if(attempts[key]>10){ dbg('вичерпано спроби'); return; }
+    dbg('виставляю відправника →', target);
+    busy=true;
+    clickIt(sender);
+    var tries=0;
+    var iv=setInterval(function(){
+      tries++;
+      if(optionsVisible()){
+        clearInterval(iv);
+        var s=0;
+        var iv2=setInterval(function(){
+          s++;
+          var opt=findOption(target);
+          if(opt){ clearInterval(iv2); clickIt(opt.querySelector('span')||opt); dbg('обрано'); setTimeout(function(){ busy=false; },250); }
+          else if(s>30){ clearInterval(iv2); busy=false; dbg('пункт «'+target+'» не знайдено у списку'); }
+        },90);
+        return;
+      }
+      if(tries===1||tries%5===0) clickIt(sender);
+      if(tries>30){ clearInterval(iv); busy=false; dbg('попап відправника не відкрився'); }
+    },110);
+  }
+
+  var t=null; function soon(){ clearTimeout(t); t=setTimeout(tick,500); }
+  try{ new MutationObserver(soon).observe(document.body,{childList:true,subtree:true}); }catch(e){}
+  window.addEventListener('hashchange', function(){ attempts={}; lastState=''; soon(); });
+  dbg('модуль завантажено');
+  soon();
+})();
+/* ▲▲▲ МОДУЛЬ-END • lkSenderBySource ▲▲▲ */
