@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.60
+// @version      1.61
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -3470,6 +3470,9 @@ function __sdPageMain() {
   var CARD_ID   = 100;   // Термінал 💳
   var BARCODE_URL   = 'https://barcode-printer-production-2b32.up.railway.app';
   var BARCODE_TOKEN = 'nab_8Kx2pQ7mLr4tW9vZ';
+  // фіскальні чеки — для розрізнення «фіскалізований» vs «чернетка»
+  var CHECKS    = '/api/check/list/';
+  var CHECK_KEY = 'Bfmy2OEwDnw022CI7GACrjwHOTLgyyZomtZOnTg-zLv3x_lsPTxiGSs6rFxQwAiWHWVqyYvH0JJYNgV2gJ2u14nnZMx8yMlBEI7E';
 
   function pad(n){ return n<10?'0'+n:''+n; }
   function ymd(d){ return d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate()); }
@@ -3606,6 +3609,35 @@ function __sdPageMain() {
     return all;
   }
 
+  // Мапа orderId → fiscalizationStatus ('done' | 'draft' | 'err' | ...).
+  // Потрібна щоб розрізняти справжній чек від чернетки (нефіскалізованого).
+  async function fetchChecks(from,to){
+    var byOrder={}, page=1, guard=0;
+    var ff=from+' 00:00:00', tt=to+' 23:59:59';
+    while(guard++<10){
+      var url=CHECKS+'?page='+page+'&limit=100'
+        +'&filter[date][from]='+encodeURIComponent(ff)
+        +'&filter[date][to]='+encodeURIComponent(tt);
+      var r; try{ r=await fetch(url,{headers:{'X-Api-Key':CHECK_KEY,'Accept':'application/json'}}); }catch(e){ break; }
+      if(r.status===400){ await sleep(65000); continue; }
+      var j=await r.json().catch(function(){return {};});
+      var arr=j.data||[];
+      arr.forEach(function(c){
+        var oid=c.order&&c.order.id; if(!oid) return;
+        var st=String(c.fiscalizationStatus||'').toLowerCase();
+        // якщо для одного замовлення кілька чеків — 'done' у пріоритеті
+        var prev=byOrder[oid];
+        if(prev==='done') return;
+        byOrder[oid]=st;
+      });
+      var pg=j.pagination||{};
+      if(arr.length<100) break;
+      if(pg.currentPage && pg.pageCount && pg.currentPage>=pg.pageCount) break;
+      page++; await sleep(6500);
+    }
+    return byOrder;
+  }
+
   /* ---- заявки «Оплачено САМОВИВІЗ», але БЕЗ обраного способу оплати ---- */
   // дивимось останні 100 заявок статусу 5 (забута оплата — завжди серед свіжих),
   // лишаємо ті, де payId(o)===null (спосіб оплати порожній).
@@ -3717,6 +3749,7 @@ function __sdPageMain() {
     +'#lk-cash-list .am{white-space:nowrap;font-weight:700}'
     +'#lk-cash-list .chk.ok{font-size:12px}'
     +'#lk-cash-list .chk.no{font-size:11px;color:#c0392b;font-weight:700;background:#fdecea;border:1px solid #f5b7a8;border-radius:4px;padding:0 4px;margin-left:4px}'
+    +'#lk-cash-list .chk.draft{font-size:11px;color:#8a5a00;font-weight:700;background:#fff3d6;border:1px solid #ecd9a0;border-radius:4px;padding:0 4px;margin-left:4px}'
     +'#lk-cash-day-sum .row.card.warn{background:#fff7e6;border-color:#f0c36d}'
     +'#lk-cash-day-sum .nochk{color:#b9770e}'
     +'#lk-cash-day-sum a.row{text-decoration:none;color:inherit;cursor:pointer;transition:filter .1s}'
@@ -3776,19 +3809,19 @@ function __sdPageMain() {
     var hasBal=(span.to>=bdate);
     var uFrom=hasBal?(bdate<span.from?bdate:span.from):span.from;
     var uTo=span.to;
-    // Кеш orders+видатків (Рівень 1, 90с). Ознака чека тепер береться прямо
-    // із замовлення (поле document_ord_check) — окремий запит чеків не потрібен.
+    // Кеш orders+видатків+чеків (Рівень 1, 90с). Чеки потрібні, щоб відрізнити
+    // фіскалізований чек від чернетки (fiscalizationStatus !== 'done').
     var okey=uFrom+'|'+uTo;
     var od;
     if(_rangeCache && _rangeCache.key===okey && (Date.now()-_rangeCache.t)<90000){
       od=_rangeCache.data;
     } else {
-      od=await Promise.all([ fetchOrders(uFrom,uTo), fetchOutcoming(uFrom,uTo) ]);
+      od=await Promise.all([ fetchOrders(uFrom,uTo), fetchOutcoming(uFrom,uTo), fetchChecks(uFrom,uTo) ]);
       if(myseq!==renderSeq) return;
       _rangeCache={key:okey, t:Date.now(), data:od};
     }
     if(myseq!==renderSeq) return;
-    var allOrders=od[0], allOut=od[1];
+    var allOrders=od[0], allOut=od[1], checkStatus=od[2]||{};
 
     function inPeriod(d){ return d>=span.from && d<=span.to; }
 
@@ -3811,7 +3844,7 @@ function __sdPageMain() {
     var outItems=allOut.items.filter(function(x){ return inPeriod(x.date); });
     var outSum=0; outItems.forEach(function(x){ outSum+=x.amount; });
     var out={sum:outSum,items:outItems};
-    var pCash=0,pCashN=0,pCard=0,pCardN=0,rows=[],noCheckN=0;
+    var pCash=0,pCashN=0,pCard=0,pCardN=0,rows=[],noCheckN=0,draftN=0;
     orders.forEach(function(o){
       var p=payId(o), a=amount(o), d=payDate(o);
       if(p===CASH_ID){ pCash+=a; pCashN++; } else if(p===CARD_ID){ pCard+=a; pCardN++; } else return;
@@ -3819,7 +3852,10 @@ function __sdPageMain() {
       var dd=(span.from!==span.to)?'<span class="dt">'+dstr(d)+'</span>':'';
       var badge='';
       if(p===CARD_ID){
-        if(hasCheck(o)){ badge=' <span class="chk ok" title="Чек є">✅</span>'; }
+        var st=checkStatus[String(o.id)]; // fiscalizationStatus | undefined
+        if(st==='done'){ badge=' <span class="chk ok" title="Чек фіскалізовано">✅</span>'; }
+        else if(st){ badge=' <span class="chk draft" title="Чек є, але це чернетка (не фіскалізовано, статус: '+st+')">📝 чернетка</span>'; draftN++; }
+        else if(hasCheck(o)){ badge=' <span class="chk draft" title="Чек прив`язано до заявки, але у списку чеків не знайдено підтвердження фіскалізації">📝 чернетка</span>'; draftN++; }
         else { badge=' <span class="chk no">⚠️ без чека</span>'; noCheckN++; }
       }
       rows.push('<a href="/ua/index.html?formId=1#/order/update/'+o.id+'"><span class="nm">'+dd+ic+' №'+o.id+' · '+clientName(o)+badge+'</span><span class="am">'+fmt(a)+'</span></a>');
@@ -3837,7 +3873,10 @@ function __sdPageMain() {
       balanceTxt
       +'<div id="lk-cash-day-sum">'
       +' <a class="row cash" href="'+ordUrl(CASH_ID,span.from,span.to)+'" target="_blank" title="Відкрити у SalesDrive"><span class="lbl">💵 Готівка продажі <span class="cnt">'+pCashN+' зам.</span></span><span class="val">'+fmt(pCash)+' ↗</span></a>'
-      +' <a class="row card'+(noCheckN?' warn':'')+'" href="'+ordUrl(CARD_ID,span.from,span.to)+'" target="_blank" title="Відкрити у SalesDrive"><span class="lbl">💳 Термінал <span class="cnt">'+pCardN+' зам.'+(noCheckN?' · <b class="nochk">⚠️ без чека: '+noCheckN+'</b>':'')+'</span></span><span class="val">'+fmt(pCard)+' ↗</span></a>'
+      +' <a class="row card'+((noCheckN||draftN)?' warn':'')+'" href="'+ordUrl(CARD_ID,span.from,span.to)+'" target="_blank" title="Відкрити у SalesDrive"><span class="lbl">💳 Термінал <span class="cnt">'+pCardN+' зам.'
+        +(draftN?' · <b class="nochk">📝 чернеток: '+draftN+'</b>':'')
+        +(noCheckN?' · <b class="nochk">⚠️ без чека: '+noCheckN+'</b>':'')
+      +'</span></span><span class="val">'+fmt(pCard)+' ↗</span></a>'
       +(out.items.length?' <div class="row out"><span class="lbl">📤 Видатки <span class="cnt">'+out.items.length+' шт.</span></span><span class="val">−'+fmt(out.sum)+'</span></div>':'')
       +'</div>'
       +outHtml
