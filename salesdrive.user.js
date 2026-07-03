@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.62
+// @version      1.63
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -3494,6 +3494,36 @@ function __sdPageMain() {
   var rangeFrom=null, rangeTo=null;// для 'range' (рядки ymd)
   var _rangeCache=null;            // Рівень-1 кеш orders+видатків {key,t,data}; 90с
   var _checksCache=null;           // кеш мапи чеків {key, map}; живе до зміни періоду
+
+  /* ---- журнал коригувань каси (стартових точок) ---- */
+  // Зберігається у браузері (GM-сховище). Коригування з ІНШОГО компʼютера теж
+  // потрапляють у журнал: adjLogSync() порівнює стартову точку з сервера з
+  // останніми записами і додає відсутню з позначкою «інший ПК».
+  var ADJLOG_KEY='lk_cash_adjlog_v1';
+  function adjLogRead(){ try{ var s=GM_getValue(ADJLOG_KEY,null); var a=s?JSON.parse(s):[]; return Array.isArray(a)?a:[]; }catch(e){ return []; } }
+  function adjLogWrite(a){ try{ GM_setValue(ADJLOG_KEY, JSON.stringify(a.slice(-50))); }catch(e){} }
+  function adjLogAdd(e){ var a=adjLogRead(); a.push(e); adjLogWrite(a); }
+  function adjLogSync(base){
+    if(!base) return;
+    var ts=dtnorm(base.ts||base.date);
+    var a=adjLogRead();
+    for(var i=a.length-1;i>=0;i--){ if(a[i].ts===ts) return; } // вже є в журналі
+    a.push({ts:ts, open:num(base.amount), src:'remote'});
+    adjLogWrite(a);
+  }
+  function adjLogHtml(){
+    var a=adjLogRead();
+    if(!a.length) return '';
+    var items=a.slice().reverse().map(function(e){
+      var d=String(e.ts||'').slice(0,10), tm=String(e.ts||'').slice(11,16);
+      var what=(e.entered!=null)
+        ? 'внесено <b>'+fmt(e.entered)+'</b> <span class="op">(опорний '+fmt(e.open)+')</span>'
+        : 'опорний <b>'+fmt(e.open)+'</b> <span class="op">(інший ПК)</span>';
+      return '<div class="it"><span class="dt">'+dstr(d)+' '+tm+'</span> — '+what+'</div>';
+    }).join('');
+    return '<div id="lk-cash-adjlog-t">🗒 Історія коригувань ('+a.length+') ▾</div>'
+         + '<div id="lk-cash-adjlog" style="display:none">'+items+'</div>';
+  }
   var _checksLoading=null;         // ключ періоду, для якого чеки вже вантажаться
   // фонове завантаження чеків: НЕ блокує відкриття каси; коли готово — перемальовує
   function loadChecksBg(okey, from, to, seqAtStart){
@@ -3768,8 +3798,15 @@ function __sdPageMain() {
     +'#lk-cash-day-sum a.row{text-decoration:none;color:inherit;cursor:pointer;transition:filter .1s}'
     +'#lk-cash-day-sum a.row:hover{filter:brightness(.97)}'
     +'#lk-cash-day-sum a.row .val{white-space:nowrap}'
-    +'#lk-cash-adj{margin:4px 16px 16px;padding:9px;border:1px dashed #ccc;border-radius:9px;text-align:center;font-size:13px;color:#666;cursor:pointer}'
+    +'#lk-cash-adj{margin:4px 16px 4px;padding:9px;border:1px dashed #ccc;border-radius:9px;text-align:center;font-size:13px;color:#666;cursor:pointer}'
     +'#lk-cash-adj:hover{background:#fafafa}'
+    +'#lk-cash-adjlog-t{margin:0 16px 14px;padding:4px 9px;text-align:center;font-size:12px;color:#999;cursor:pointer;user-select:none}'
+    +'#lk-cash-adjlog-t:hover{color:#666}'
+    +'#lk-cash-adjlog{margin:0 16px 16px;padding:6px 12px;border:1px solid #eee;border-radius:9px;background:#fcfcfc;font-size:12px;color:#555;max-height:180px;overflow-y:auto}'
+    +'#lk-cash-adjlog .it{padding:4px 0;border-bottom:1px dashed #f0f0f0}'
+    +'#lk-cash-adjlog .it:last-child{border-bottom:none}'
+    +'#lk-cash-adjlog .dt{color:#999;font-size:11px}'
+    +'#lk-cash-adjlog .op{color:#aaa;font-size:11px}'
     +'#lk-cash-unpaid{margin:2px 16px 8px;border:1px solid #f0b8a8;background:#fdeeea;border-radius:11px;overflow:hidden}'
     +'#lk-cash-unpaid .lk-unpaid-ttl{padding:10px 14px;font-size:13px;font-weight:800;color:#b2391c;background:#fbe2da}'
     +'#lk-cash-unpaid .lk-unpaid-list a{display:flex;justify-content:space-between;gap:8px;padding:7px 14px;text-decoration:none;color:#7a3b28;font-size:13px;border-top:1px solid #f3d3c9}'
@@ -3908,8 +3945,17 @@ function __sdPageMain() {
       +'</div>'
       +outHtml
       +'<div id="lk-cash-list"><div class="ttl">Замовлення за період ('+(pCashN+pCardN)+')</div>'+(rows.join('')||'<div style="color:#999;padding:6px 0">Немає</div>')+'</div>'
-      +'<div id="lk-cash-adj">⚙️ Задати стартовий залишок каси (під PIN)</div>';
+      +'<div id="lk-cash-adj">⚙️ Задати стартовий залишок каси (під PIN)</div>'
+      +adjLogHtml();
     box.querySelector('#lk-cash-adj').onclick=adjust;
+    adjLogSync(base); // коригування з іншого ПК → у журнал
+    var lt=box.querySelector('#lk-cash-adjlog-t');
+    if(lt) lt.onclick=function(){
+      var l=box.querySelector('#lk-cash-adjlog'); if(!l) return;
+      var open=l.style.display!=='none';
+      l.style.display=open?'none':'block';
+      lt.textContent=lt.textContent.replace(open?'▴':'▾', open?'▾':'▴');
+    };
   }
 
   async function adjust(){
@@ -3931,7 +3977,10 @@ function __sdPageMain() {
       var sCash=0; wm[0].forEach(function(o){ if(payId(o)===CASH_ID) sCash+=amount(o); });
       var sOut=0;  wm[1].items.forEach(function(x){ sOut+=x.amount; });
       var openFloat=Math.round((n - sCash + sOut)*100)/100;
-      await setBaseline(openFloat,pin); _rangeCache=null; mode='day'; anchor=new Date(); await render();
+      var nb=await setBaseline(openFloat,pin);
+      // журнал: локальний запис (введена сума + опорний залишок + момент)
+      adjLogAdd({ ts: dtnorm((nb&&(nb.ts||nb.date))||ymdhms(new Date())), entered:n, open:openFloat, src:'local' });
+      _rangeCache=null; mode='day'; anchor=new Date(); await render();
     }
     catch(e){
       if(/HTTP 403|bad pin/.test(e.message)) alert('Невірний PIN — залишок не змінено.');
