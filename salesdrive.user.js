@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.61
+// @version      1.62
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -3493,6 +3493,19 @@ function __sdPageMain() {
   var anchor=new Date();           // опорна дата для day/week/month
   var rangeFrom=null, rangeTo=null;// для 'range' (рядки ymd)
   var _rangeCache=null;            // Рівень-1 кеш orders+видатків {key,t,data}; 90с
+  var _checksCache=null;           // кеш мапи чеків {key, map}; живе до зміни періоду
+  var _checksLoading=null;         // ключ періоду, для якого чеки вже вантажаться
+  // фонове завантаження чеків: НЕ блокує відкриття каси; коли готово — перемальовує
+  function loadChecksBg(okey, from, to, seqAtStart){
+    if(_checksLoading===okey) return;   // вже вантажиться для цього періоду
+    _checksLoading=okey;
+    fetchChecks(from,to).catch(function(){ return {}; }).then(function(map){
+      _checksLoading=null;
+      _checksCache={key:okey, map:map||{}};
+      // якщо користувач досі на тому ж рендері — оновлюємо бейджі перемальовкою
+      if(seqAtStart===renderSeq && document.getElementById('lk-cash-box')) render();
+    });
+  }
 
   // Поточний понеділок тижня опорної дати
   function weekBounds(d){
@@ -3809,19 +3822,23 @@ function __sdPageMain() {
     var hasBal=(span.to>=bdate);
     var uFrom=hasBal?(bdate<span.from?bdate:span.from):span.from;
     var uTo=span.to;
-    // Кеш orders+видатків+чеків (Рівень 1, 90с). Чеки потрібні, щоб відрізнити
-    // фіскалізований чек від чернетки (fiscalizationStatus !== 'done').
+    // Кеш orders+видатків (Рівень 1, 90с). Каса рендериться ОДРАЗУ (як у 1.59),
+    // а чеки (для «📝 чернетка») довантажуються У ФОНІ й оновлюють бейджі потім —
+    // тож відкриття не гальмує ні повільне API чеків, ні його rate-limit.
     var okey=uFrom+'|'+uTo;
     var od;
     if(_rangeCache && _rangeCache.key===okey && (Date.now()-_rangeCache.t)<90000){
       od=_rangeCache.data;
     } else {
-      od=await Promise.all([ fetchOrders(uFrom,uTo), fetchOutcoming(uFrom,uTo), fetchChecks(uFrom,uTo) ]);
+      od=await Promise.all([ fetchOrders(uFrom,uTo), fetchOutcoming(uFrom,uTo) ]);
       if(myseq!==renderSeq) return;
       _rangeCache={key:okey, t:Date.now(), data:od};
     }
     if(myseq!==renderSeq) return;
-    var allOrders=od[0], allOut=od[1], checkStatus=od[2]||{};
+    var allOrders=od[0], allOut=od[1];
+    // чеки: беремо з фонового кешу, якщо вже є; інакше стартуємо фонове завантаження
+    var checkStatus = (_checksCache && _checksCache.key===okey) ? (_checksCache.map||{}) : {};
+    if(!(_checksCache && _checksCache.key===okey)) loadChecksBg(okey, uFrom, uTo, myseq);
 
     function inPeriod(d){ return d>=span.from && d<=span.to; }
 
@@ -3844,6 +3861,10 @@ function __sdPageMain() {
     var outItems=allOut.items.filter(function(x){ return inPeriod(x.date); });
     var outSum=0; outItems.forEach(function(x){ outSum+=x.amount; });
     var out={sum:outSum,items:outItems};
+    // Якщо мапа чеків порожня (fetchChecks впав / timeout / 401) —
+    // повертаємось до старої поведінки (hasCheck → ✅ або ⚠️ без чека),
+    // щоб каса виглядала як раніше і не фарбувала все у «чернетка».
+    var checksAvailable = Object.keys(checkStatus).length>0;
     var pCash=0,pCashN=0,pCard=0,pCardN=0,rows=[],noCheckN=0,draftN=0;
     orders.forEach(function(o){
       var p=payId(o), a=amount(o), d=payDate(o);
@@ -3852,11 +3873,17 @@ function __sdPageMain() {
       var dd=(span.from!==span.to)?'<span class="dt">'+dstr(d)+'</span>':'';
       var badge='';
       if(p===CARD_ID){
-        var st=checkStatus[String(o.id)]; // fiscalizationStatus | undefined
-        if(st==='done'){ badge=' <span class="chk ok" title="Чек фіскалізовано">✅</span>'; }
-        else if(st){ badge=' <span class="chk draft" title="Чек є, але це чернетка (не фіскалізовано, статус: '+st+')">📝 чернетка</span>'; draftN++; }
-        else if(hasCheck(o)){ badge=' <span class="chk draft" title="Чек прив`язано до заявки, але у списку чеків не знайдено підтвердження фіскалізації">📝 чернетка</span>'; draftN++; }
-        else { badge=' <span class="chk no">⚠️ без чека</span>'; noCheckN++; }
+        if(!checksAvailable){
+          // fallback: як у 1.59 — просто чек є / чека немає
+          if(hasCheck(o)){ badge=' <span class="chk ok" title="Чек є">✅</span>'; }
+          else { badge=' <span class="chk no">⚠️ без чека</span>'; noCheckN++; }
+        } else {
+          var st=checkStatus[String(o.id)]; // fiscalizationStatus | undefined
+          if(st==='done'){ badge=' <span class="chk ok" title="Чек фіскалізовано">✅</span>'; }
+          else if(st){ badge=' <span class="chk draft" title="Чек є, але це чернетка (не фіскалізовано, статус: '+st+')">📝 чернетка</span>'; draftN++; }
+          else if(hasCheck(o)){ badge=' <span class="chk draft" title="Чек прив`язано до заявки, але у списку чеків не знайдено підтвердження фіскалізації">📝 чернетка</span>'; draftN++; }
+          else { badge=' <span class="chk no">⚠️ без чека</span>'; noCheckN++; }
+        }
       }
       rows.push('<a href="/ua/index.html?formId=1#/order/update/'+o.id+'"><span class="nm">'+dd+ic+' №'+o.id+' · '+clientName(o)+badge+'</span><span class="am">'+fmt(a)+'</span></a>');
     });
@@ -3939,7 +3966,7 @@ function __sdPageMain() {
     document.body.appendChild(ov);
     ov.addEventListener('click',function(e){ if(e.target===ov) ov.remove(); });
     ov.querySelector('.x').onclick=function(){ ov.remove(); };
-    ov.querySelector('.rf').onclick=function(){ _rangeCache=null; render(); loadUnpaid(true); };
+    ov.querySelector('.rf').onclick=function(){ _rangeCache=null; _checksCache=null; render(); loadUnpaid(true); };
     ov.querySelectorAll('#lk-cash-modes button').forEach(function(b){
       b.onclick=function(){ setMode(b.getAttribute('data-m')); };
     });
