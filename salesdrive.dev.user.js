@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      1.73
+// @version      1.74
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4294,7 +4294,6 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   function curOrderId(){ var m=(location.hash||'').match(/\/order\/update\/(\d+)/); return m?m[1]:null; }
   function nativeCopyBtn(){ return document.querySelector('button[ng-click="viewModel.copyOrder($event)"]'); }
   function scopeOf(el){ try{ return el && W.angular && W.angular.element(el).scope(); }catch(e){ return null; } }
-  function orderVM(){ var el=document.querySelector('button[ng-click*="updateOrder"]'); var sc=scopeOf(el); return { sc:sc, vm: sc && sc.viewModel }; }
   // товарні рядки: a.link-product-field трапляється і в стрічці історії
   // (запис «Видалено: …») — рядки .comment-to-order виключаємо.
   function productRows(){
@@ -4327,75 +4326,82 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   var DBG=true; // замір у консоль (тег [SD-Копія]); вимкнути після налагодження
   function log(){ if(!DBG) return; try{ var a=['%c[SD-Копія]','color:#c0392b;font-weight:bold'].concat([].slice.call(arguments)); console.log.apply(console,a); }catch(_){}}
 
-  // МИТТЄВА чистка: НЕ клікаємо deleteComment по кожному товару (SalesDrive на
-  // кожен виклик робить окрему важку операцію → повільно). Одразу спорожняємо
-  // масив товарів у моделі й робимо ОДИН updateOrder.
-  function cleanNow(clickTs){
+  // Модель СКОПІЙОВАНОЇ заявки шукаємо СТРОГО за id з URL. Під час копіювання в
+  // DOM якусь мить існують ОБИДВІ заявки — глобальний селектор може зачепити
+  // ПЕРВИННУ. Тому беремо лише ту viewModel, у якої order.id === id копії.
+  function copyVM(copyId){
+    var want=String(copyId), found=null;
+    function consider(sc){
+      if(found||!sc) return;
+      var s=sc, g=0;
+      while(s && !s.viewModel && g++<12) s=s.$parent;
+      var vm=s && s.viewModel;
+      if(vm && vm.order && String(vm.order.id)===want && typeof vm.updateOrder==='function') found={vm:vm, sc:s};
+    }
+    document.querySelectorAll('button[ng-click*="updateOrder"]').forEach(function(b){ consider(scopeOf(b)); });
+    if(!found) productRows().forEach(function(tr){ consider(scopeOf(tr)); });
+    return found;
+  }
+
+  // Чистка: спорожняємо масив товарів у моделі КОПІЇ й робимо ОДИН updateOrder
+  // (deleteComment по кожному товару НЕ використовуємо — SalesDrive на кожен
+  // виклик робить окрему важку операцію → повільно).
+  function cleanNow(copyId, srcId, clickTs){
     var t0=Date.now();
-    var o=orderVM();
-    if(!o.vm){ log('немає viewModel — чистка неможлива'); return false; }
-    var ord=o.vm.order;
-    var before=productRows().length;
+    if(String(copyId)===String(srcId)){ log('ЗАХИСТ: id копії == id первинної — пропускаю'); return false; }
+    var c=copyVM(copyId);
+    if(!c){ log('модель копії', copyId, 'ще не готова'); return false; }
+    var ord=c.vm.order;
+    // потрійний запобіжник: чистимо ЛИШЕ модель копії, ніколи не первинну
+    if(!ord || String(ord.id)!==String(copyId) || String(ord.id)===String(srcId)){ log('ЗАХИСТ: модель не відповідає копії', copyId); return false; }
+    var before=(ord.products&&ord.products.length)||0;
     try{
-      var method='';
-      if(ord && Array.isArray(ord.products)){ ord.products.length=0; method='array'; }
-      else if(ord && ord.products && typeof ord.products==='object'){ Object.keys(ord.products).forEach(function(k){ delete ord.products[k]; }); method='object-keys'; }
-      else {
-        // крайній фолбек: старий шлях через deleteComment
-        var delFn=null, indices=[];
-        productRows().forEach(function(tr){
-          var rs=scopeOf(tr); if(rs && rs.item && rs.item.index!=null) indices.push(rs.item.index);
-          if(!delFn){ var db=tr.querySelector('a[ng-click*="deleteComment"]'); var ds=db&&scopeOf(db);
-            if(ds && ds.viewModel && typeof ds.viewModel.deleteComment==='function') delFn=ds.viewModel.deleteComment.bind(ds.viewModel); }
-        });
-        if(!delFn || !indices.length){ log('не знайшов ні order.products, ні deleteComment'); return false; }
-        indices.sort(function(a,b){ return b-a; }); indices.forEach(function(ix){ try{ delFn(ix); }catch(e){} });
-        method='deleteComment';
-      }
+      if(Array.isArray(ord.products)) ord.products.length=0;
+      else if(ord.products && typeof ord.products==='object'){ Object.keys(ord.products).forEach(function(k){ delete ord.products[k]; }); }
+      else { log('немає order.products'); return false; }
       var tSave=Date.now();
-      if(typeof o.vm.updateOrder==='function') o.vm.updateOrder(ord);
-      if(o.sc && typeof o.sc.$applyAsync==='function') o.sc.$applyAsync();
+      c.vm.updateOrder(ord);
+      if(c.sc && typeof c.sc.$applyAsync==='function') c.sc.$applyAsync();
       var now=Date.now();
-      log('очищено', before, 'товарів; метод:', method,
-          '| від кліку:', (clickTs? (now-clickTs):'?')+'мс',
-          '| чистка+save:', (now-t0)+'мс', '(save:', (now-tSave)+'мс)');
-      // контроль зникнення рядків у DOM
+      log('копія', copyId, '— очищено', before, 'товарів | від кліку:', (clickTs?(now-clickTs):'?')+'мс | чистка+save:', (now-t0)+'мс (save:', (now-tSave)+'мс)');
       var poll0=Date.now(), tries=0;
-      (function watch(){
-        tries++;
-        var left=productRows().length;
+      (function watch(){ tries++; var left=productRows().length;
         if(left===0){ log('DOM: товари зникли за', (Date.now()-poll0)+'мс після save'); return; }
-        if(tries>100){ log('DOM: ще лишилось', left, 'рядків через', (Date.now()-poll0)+'мс'); return; }
+        if(tries>100){ log('DOM: лишилось', left, 'рядків через', (Date.now()-poll0)+'мс'); return; }
         setTimeout(watch, 100);
       })();
       return true;
     }catch(e){ log('помилка чистки:', e.message); return false; }
   }
 
-  var busy=false, fastT=null;
+  var busy=false, fastT=null, copyArrivedTs=0;
   function soonFast(){ clearTimeout(fastT); fastT=setTimeout(tick, 100); } // швидке дожидання копії
   function tick(){
     addBtn();
     if(busy) return;
     var raw=null; try{ raw=sessionStorage.getItem(FLAG); }catch(_){}
-    if(!raw) return;
+    if(!raw){ copyArrivedTs=0; return; }
     var f=null; try{ f=JSON.parse(raw); }catch(_){}
-    if(!f || (Date.now()-f.ts)>40000){ try{ sessionStorage.removeItem(FLAG); }catch(_){} return; }
+    if(!f || (Date.now()-f.ts)>40000){ try{ sessionStorage.removeItem(FLAG); }catch(_){} copyArrivedTs=0; return; }
     var id=curOrderId();
-    if(!id || id===String(f.src)){ soonFast(); return; }   // ще на джерелі / триває перехід
-    // копія має домалювати стільки ж товарів, скільки в джерелі — тоді безпечно чистити
-    var need=f.srcRows||1;
-    if(productRows().length < need){ soonFast(); return; }
+    if(!id || id===String(f.src)){ copyArrivedTs=0; soonFast(); return; }   // ще на джерелі / триває перехід
+    // чекаємо, поки МОДЕЛЬ саме копії (за збігом id) завантажить свої товари
+    var c=copyVM(id);
+    if(!c || !c.vm.order || !c.vm.order.products){ soonFast(); return; }
+    if(!copyArrivedTs) copyArrivedTs=Date.now();
+    var have=c.vm.order.products.length, need=f.srcRows||1;
+    // готово, коли товарів стільки ж, як у джерелі; або є хоч якісь і минуло >4с
+    if(have<need && !(have>0 && (Date.now()-copyArrivedTs)>4000)){ soonFast(); return; }
     busy=true;
-    try{ sessionStorage.removeItem(FLAG); }catch(_){}
-    log('копія відкрилась (', id, '), товарів у ній:', productRows().length,
-        '| перехід зайняв:', (Date.now()-f.ts)+'мс');
-    cleanNow(f.ts);
+    log('копія відкрилась (', id, '), товарів у моделі:', have, '| перехід:', (Date.now()-f.ts)+'мс');
+    var ok=cleanNow(id, f.src, f.ts);
+    if(ok){ try{ sessionStorage.removeItem(FLAG); }catch(_){} copyArrivedTs=0; }
+    else soonFast();
     busy=false;
   }
   window.addEventListener('lkdom', function(){ setTimeout(tick, 40); });
   window.addEventListener('hashchange', soonFast);
-  log('модуль активний (v1.73)');
+  log('модуль активний (v1.74)');
   tick();
 })();
 /* ▲▲▲ МОДУЛЬ-END • lkCopyNoGoods ▲▲▲ */
