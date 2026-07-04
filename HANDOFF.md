@@ -1,11 +1,28 @@
 # 📋 Вижимка для перенесення в іншу сесію
 
+## ‼️ НАЙВАЖЛИВІШЕ ПРАВИЛО — два канали (стабільний і тестовий)
+`salesdrive.user.js` — **ПРОДАКШН**: авто-оновлюється на всіх компʼютерах
+менеджерів за ~5 хв після пушу. **НЕ вносити зміни в цей файл напряму!**
+
+Робочий процес для БУДЬ-ЯКОЇ зміни коду:
+1. Зміни робити ТІЛЬКИ у **`salesdrive.dev.user.js`** (тестовий канал, ім'я
+   «…(ТЕСТ)», стоїть лише у Василя) + `node --check` + пуш.
+2. Василь тестує на своєму ПК і підтверджує в чаті, що працює.
+3. ЛИШЕ ПІСЛЯ підтвердження — перенести у стабільний:
+   `cp salesdrive.dev.user.js salesdrive.user.js` і повернути в шапці
+   стабільні `@name` (без «(ТЕСТ)») та `@updateURL/@downloadURL`
+   (на `salesdrive.user.js`), підняти версію, запушити.
+Дев-файл відрізняється від стабільного ЛИШЕ шапкою (@name + URLи).
+
 ## Проєкт
 - **Репозиторій:** `vasilkucherlv-del/salesdrive-userscript`
-- **Файл:** `salesdrive.user.js` — Tampermonkey-юзерскрипт для CRM SalesDrive (`komplektom.salesdrive.me`)
-- **Гілка/пуш:** усі зміни — у `main`. Файл **паралельно редагують і на GitHub**, тож перед пушем завжди `git fetch origin main && git rebase origin/main`.
-- **Поточна версія:** **1.41** (`// @version` піднімається з кожним комітом)
-- **Перевірка перед пушем:** `node --check salesdrive.user.js`
+- **Файли:** `salesdrive.user.js` (СТАБІЛЬНИЙ, менеджери) та
+  `salesdrive.dev.user.js` (ТЕСТ, тільки Василь) — Tampermonkey-юзерскрипти
+  для CRM SalesDrive (`komplektom.salesdrive.me`)
+- **Збірка-розширення:** `manifest.json` + `gm-shim.js` + `background.js`
+  (той самий salesdrive.user.js як content script; встановлюється unpacked)
+- **Гілка/пуш:** усе у `main`. Файл **паралельно редагують і на GitHub**, тож перед пушем завжди `git fetch origin main && git rebase origin/main`.
+- **Перевірка перед пушем:** `node --check <файл>.js`
 - **Автооновлення:** у шапці є `@updateURL`/`@downloadURL` на raw GitHub (raw кешується ~5 хв). Щоб оновити у Tampermonkey: Утиліти → «Перевірити оновлення».
 
 ## Структура файлу — модулі в рамках
