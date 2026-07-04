@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      1.70
+// @version      1.71
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4350,9 +4350,17 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
         setTimeout(function(){
           if(rowsCount()>0 && round<3){ round++; cleanRound(); return; }
           if(AUTO_SAVE){
-            var save=[].slice.call(document.querySelectorAll('button'))
-              .find(function(b){ return /зберегти/i.test((b.textContent||'')) && b.offsetParent; });
-            if(save) save.click();
+            // кнопка «Зберегти» може лишатись disabled (видалення рядка не завжди
+            // «бруднить» форму) — тому зберігаємо напряму через Angular
+            try{
+              var W=(typeof unsafeWindow!=='undefined'&&unsafeWindow)?unsafeWindow:window;
+              var sb=document.querySelector('button[ng-click*="updateOrder"]');
+              var sc=sb && W.angular && W.angular.element(sb).scope();
+              if(sc && sc.viewModel && sc.viewModel.updateOrder){
+                sc.viewModel.updateOrder(sc.viewModel.order);
+                if(sc.$applyAsync) sc.$applyAsync();
+              } else if(sb){ sb.removeAttribute('disabled'); sb.click(); }
+            }catch(e){}
           }
           busy=false;
         }, 1200);
