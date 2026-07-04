@@ -1,0 +1,1 @@
+javascript:(function(){var d=document;fetch('https://raw.githubusercontent.com/vasilkucherlv-del/salesdrive-userscript/main/mobile-loader.js?_='+(+new Date())).then(function(r){return r.text()}).then(function(t){var s=d.createElement('script');s.textContent=t;(d.head||d.documentElement).appendChild(s);s.remove();}).catch(function(e){alert('SalesDrive-скрипт: '+e.message)});})();
