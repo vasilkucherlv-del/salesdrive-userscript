@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      1.69
+// @version      1.70
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4322,32 +4322,43 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     nb.parentNode.insertBefore(b, nb.nextSibling);
   }
 
-  var busy=false;
+  var busy=false, arrivedAt=0;
+  function rowsCount(){ return document.querySelectorAll('a.link-product-field').length; }
   function tick(){
     addBtn();
     if(busy) return;
     var raw=null; try{ raw=sessionStorage.getItem(FLAG); }catch(_){}
-    if(!raw) return;
+    if(!raw){ arrivedAt=0; return; }
     var f=null; try{ f=JSON.parse(raw); }catch(_){}
-    if(!f || (Date.now()-f.ts)>40000){ try{ sessionStorage.removeItem(FLAG); }catch(_){} return; } // позначка згоріла
+    if(!f || (Date.now()-f.ts)>40000){ try{ sessionStorage.removeItem(FLAG); }catch(_){} arrivedAt=0; return; } // позначка згоріла
     var id=curOrderId();
-    if(!id || id===String(f.src)) return;          // ще не на НОВІЙ (скопійованій) заявці
+    if(!id || id===String(f.src)){ arrivedAt=0; return; } // ще не на НОВІЙ (скопійованій) заявці
+    // ВАЖЛИВО: одразу після переходу Angular ще домальовує копію — якщо чистити
+    // зарано, CRM відновить рядки. Чекаємо ~3с стабілізації від моменту прибуття.
+    if(!arrivedAt){ arrivedAt=Date.now(); return; }
+    if(Date.now()-arrivedAt<3000) return;
     if(!productDelBtn()) return;                    // рядки ще не домальовані
     busy=true;
     try{ sessionStorage.removeItem(FLAG); }catch(_){}
-    var n=0;
-    (function delNext(){
-      var d=productDelBtn();
-      if(d && n<50){ n++; d.click(); setTimeout(delNext, 350); return; }
-      if(AUTO_SAVE){
+    var round=0;
+    function cleanRound(){
+      var n=0;
+      (function delNext(){
+        var d=productDelBtn();
+        if(d && n<50){ n++; d.click(); setTimeout(delNext, 350); return; }
+        // контроль: чи не відновила CRM рядки? (до 3 повторів)
         setTimeout(function(){
-          var save=[].slice.call(document.querySelectorAll('button'))
-            .find(function(b){ return /зберегти/i.test((b.textContent||'')) && b.offsetParent; });
-          if(save) save.click();
+          if(rowsCount()>0 && round<3){ round++; cleanRound(); return; }
+          if(AUTO_SAVE){
+            var save=[].slice.call(document.querySelectorAll('button'))
+              .find(function(b){ return /зберегти/i.test((b.textContent||'')) && b.offsetParent; });
+            if(save) save.click();
+          }
           busy=false;
-        }, 700);
-      } else { busy=false; }
-    })();
+        }, 1200);
+      })();
+    }
+    cleanRound();
   }
   window.addEventListener('lkdom', function(){ setTimeout(tick,150); });
   tick();
