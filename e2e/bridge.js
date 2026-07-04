@@ -4,7 +4,7 @@ async function openSD(opts = {}) {
   const browser = await chromium.launch({ headless: true });
   const ctx = await browser.newContext({
     viewport: { width: 1500, height: 950 },
-    storageState: opts.session || 'sd-session.json'
+    storageState: ('session' in opts) ? opts.session : (__dirname + '/sd-session.json')
   });
   await ctx.route('**/*', async (route) => {
     try {
