@@ -1,13 +1,13 @@
 {
   "manifest_version": 3,
   "name": "SalesDrive — Допродажі + Каса + База знань",
-  "version": "1.64",
+  "version": "1.65",
   "description": "Підказки допродажу, аналоги, каса самовивозу, база знань та автопідстановки для SalesDrive CRM. Та сама кодова база, що й Tampermonkey-скрипт.",
   "content_scripts": [
     {
       "matches": ["https://*.salesdrive.me/*"],
       "js": ["gm-shim.js", "salesdrive.user.js"],
-      "run_at": "document_end"
+      "run_at": "document_idle"
     }
   ],
   "background": { "service_worker": "background.js" },
