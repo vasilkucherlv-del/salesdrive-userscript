@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      1.71
+// @version      1.72
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4293,12 +4293,21 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 
   function curOrderId(){ var m=(location.hash||'').match(/\/order\/update\/(\d+)/); return m?m[1]:null; }
   function nativeCopyBtn(){ return document.querySelector('button[ng-click="viewModel.copyOrder($event)"]'); }
-  // кнопки видалення САМЕ товарних рядків (шукаємо в рядку з товаром)
+  // кнопки видалення САМЕ товарних рядків. ВАЖЛИВО: a.link-product-field є і в
+  // стрічці коментарів (напр. «Видалено: …») — рядки .comment-to-order виключаємо,
+  // інакше можна зачепити історію заявки.
+  function productRows(){
+    var out=[];
+    document.querySelectorAll('a.link-product-field').forEach(function(a){
+      var tr=a.closest('tr');
+      if(tr && !tr.classList.contains('comment-to-order')) out.push(tr);
+    });
+    return out;
+  }
   function productDelBtn(){
-    var links=document.querySelectorAll('a.link-product-field');
-    for(var i=0;i<links.length;i++){
-      var tr=links[i].closest('tr'); if(!tr) continue;
-      var d=tr.querySelector('a[ng-click*="deleteComment"], a.glyphicon-remove-circle');
+    var rows=productRows();
+    for(var i=0;i<rows.length;i++){
+      var d=rows[i].querySelector('a[ng-click*="deleteComment"], a.glyphicon-remove-circle');
       if(d) return d;
     }
     return null;
@@ -4323,7 +4332,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   }
 
   var busy=false, arrivedAt=0;
-  function rowsCount(){ return document.querySelectorAll('a.link-product-field').length; }
+  function rowsCount(){ return productRows().length; }
   function tick(){
     addBtn();
     if(busy) return;
