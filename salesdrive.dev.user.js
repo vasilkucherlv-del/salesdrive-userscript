@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      1.76
+// @version      1.77
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -3782,6 +3782,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   var PICKUP_LIST_URL = '/ua/index.html?formId=1#/order/index?'
     + 'filter%5BstatusId%5D%5B%5D=__NOTDELETED__'
     + '&filter%5Bshipping_method%5D%5B%5D=' + SHIP_PICKUP;
+  // нативний список УСІХ заявок (усі статуси, будь-яка доставка)
+  var ALL_ORDERS_URL = '/ua/index.html?formId=1#/order/index?filter%5BstatusId%5D%5B%5D=__NOTDELETED__';
   // організація за замовчуванням для швидкого самовивозу: ФОП Кучер Василь Богданович
 
   function setShipping(sel, val){
@@ -3899,6 +3901,18 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       l.textContent = '📋 Самовивози';
       l.onclick = function(){ try{ window.open(PICKUP_LIST_URL, '_blank', 'noopener'); }catch(e){ location.href = PICKUP_LIST_URL; } };
       prev.parentNode.insertBefore(l, prev.nextSibling);
+    }
+    // 📋 перегляд УСІХ заявок (усі статуси, будь-яка доставка) — нова вкладка
+    if(!document.getElementById('lk-all-orders-btn')){
+      var prev2 = document.getElementById('lk-pickup-list-btn') || document.getElementById('lk-pickup-btn') || anchor;
+      var a = document.createElement('span');
+      a.id = 'lk-all-orders-btn';
+      a.className = 'btn btn-default cursor-pointer';
+      a.title = 'Показати всі заявки (усі статуси)';
+      a.style.marginLeft = '6px';
+      a.textContent = '📋 Усі заявки';
+      a.onclick = function(){ try{ window.open(ALL_ORDERS_URL, '_blank', 'noopener'); }catch(e){ location.href = ALL_ORDERS_URL; } };
+      prev2.parentNode.insertBefore(a, prev2.nextSibling);
     }
   }
   window.addEventListener('lkdom', addBtn); addBtn();
