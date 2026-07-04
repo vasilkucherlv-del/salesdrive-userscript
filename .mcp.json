@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": [
+        "@playwright/mcp@latest",
+        "--headless",
+        "--executable-path", "/opt/pw-browsers/chromium"
+      ]
+    }
+  }
+}
