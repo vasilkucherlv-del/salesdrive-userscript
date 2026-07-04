@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      1.72
+// @version      1.73
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4324,33 +4324,52 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     nb.parentNode.insertBefore(b, nb.nextSibling);
   }
 
-  // МИТТЄВА чистка: видаляємо всі товарні рядки через їхні Angular-функції
-  // deleteComment за один цикл (спадання індексів, щоб не зсувались), далі — save.
-  function cleanNow(){
+  var DBG=true; // замір у консоль (тег [SD-Копія]); вимкнути після налагодження
+  function log(){ if(!DBG) return; try{ var a=['%c[SD-Копія]','color:#c0392b;font-weight:bold'].concat([].slice.call(arguments)); console.log.apply(console,a); }catch(_){}}
+
+  // МИТТЄВА чистка: НЕ клікаємо deleteComment по кожному товару (SalesDrive на
+  // кожен виклик робить окрему важку операцію → повільно). Одразу спорожняємо
+  // масив товарів у моделі й робимо ОДИН updateOrder.
+  function cleanNow(clickTs){
+    var t0=Date.now();
     var o=orderVM();
-    if(!o.vm || typeof o.vm.updateOrder!=='function') return false;
-    var rows=productRows();
-    var delFn=null, indices=[];
-    rows.forEach(function(tr){
-      var rs=scopeOf(tr);
-      if(rs && rs.item && rs.item.index!=null) indices.push(rs.item.index);
-      if(!delFn){
-        var db=tr.querySelector('a[ng-click*="deleteComment"]');
-        var ds=db && scopeOf(db);
-        if(ds && ds.viewModel && typeof ds.viewModel.deleteComment==='function') delFn=ds.viewModel.deleteComment.bind(ds.viewModel);
-      }
-    });
+    if(!o.vm){ log('немає viewModel — чистка неможлива'); return false; }
+    var ord=o.vm.order;
+    var before=productRows().length;
     try{
-      if(delFn && indices.length){
-        indices.sort(function(a,b){ return b-a; });
-        indices.forEach(function(ix){ try{ delFn(ix); }catch(e){} });
-      } else if(o.vm.order && o.vm.order.products){
-        o.vm.order.products.length=0; // фолбек: пряме очищення масиву товарів
-      } else { return false; }
-      o.vm.updateOrder(o.vm.order);
+      var method='';
+      if(ord && Array.isArray(ord.products)){ ord.products.length=0; method='array'; }
+      else if(ord && ord.products && typeof ord.products==='object'){ Object.keys(ord.products).forEach(function(k){ delete ord.products[k]; }); method='object-keys'; }
+      else {
+        // крайній фолбек: старий шлях через deleteComment
+        var delFn=null, indices=[];
+        productRows().forEach(function(tr){
+          var rs=scopeOf(tr); if(rs && rs.item && rs.item.index!=null) indices.push(rs.item.index);
+          if(!delFn){ var db=tr.querySelector('a[ng-click*="deleteComment"]'); var ds=db&&scopeOf(db);
+            if(ds && ds.viewModel && typeof ds.viewModel.deleteComment==='function') delFn=ds.viewModel.deleteComment.bind(ds.viewModel); }
+        });
+        if(!delFn || !indices.length){ log('не знайшов ні order.products, ні deleteComment'); return false; }
+        indices.sort(function(a,b){ return b-a; }); indices.forEach(function(ix){ try{ delFn(ix); }catch(e){} });
+        method='deleteComment';
+      }
+      var tSave=Date.now();
+      if(typeof o.vm.updateOrder==='function') o.vm.updateOrder(ord);
       if(o.sc && typeof o.sc.$applyAsync==='function') o.sc.$applyAsync();
+      var now=Date.now();
+      log('очищено', before, 'товарів; метод:', method,
+          '| від кліку:', (clickTs? (now-clickTs):'?')+'мс',
+          '| чистка+save:', (now-t0)+'мс', '(save:', (now-tSave)+'мс)');
+      // контроль зникнення рядків у DOM
+      var poll0=Date.now(), tries=0;
+      (function watch(){
+        tries++;
+        var left=productRows().length;
+        if(left===0){ log('DOM: товари зникли за', (Date.now()-poll0)+'мс після save'); return; }
+        if(tries>100){ log('DOM: ще лишилось', left, 'рядків через', (Date.now()-poll0)+'мс'); return; }
+        setTimeout(watch, 100);
+      })();
       return true;
-    }catch(e){ return false; }
+    }catch(e){ log('помилка чистки:', e.message); return false; }
   }
 
   var busy=false, fastT=null;
@@ -4369,11 +4388,14 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     if(productRows().length < need){ soonFast(); return; }
     busy=true;
     try{ sessionStorage.removeItem(FLAG); }catch(_){}
-    cleanNow();
+    log('копія відкрилась (', id, '), товарів у ній:', productRows().length,
+        '| перехід зайняв:', (Date.now()-f.ts)+'мс');
+    cleanNow(f.ts);
     busy=false;
   }
   window.addEventListener('lkdom', function(){ setTimeout(tick, 40); });
   window.addEventListener('hashchange', soonFast);
+  log('модуль активний (v1.73)');
   tick();
 })();
 /* ▲▲▲ МОДУЛЬ-END • lkCopyNoGoods ▲▲▲ */
