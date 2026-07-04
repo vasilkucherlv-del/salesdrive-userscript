@@ -1,11 +1,11 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.63
+// @version      1.64
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
-// @run-at       document-idle
+// @run-at       document-end
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -156,64 +156,64 @@
     return out;
   }
 
-  function getMap(force) {
+  // ---- stale-while-revalidate для Google-таблиць ----
+  // Якщо кеш існує — віддаємо його МИТТЄВО (навіть застарілий), а коли він
+  // старший за TTL — тихо оновлюємо у фоні. Тож відкриття заявки ніколи не
+  // чекає на docs.google.com; свіжі дані підтягнуться до наступного разу.
+  var _swrBusy = {};
+  function swrGet(cacheKey, listField, fetchFresh, force) {
     var now = Date.now();
-    var cached = gmGetJSON("sd_upsell_cache_v1");
-    if (!force && cached && cached.pairs && cached.pairs.length && now - cached.ts < TTL_MS) {
-      return Promise.resolve({ pairs: cached.pairs, source: "cache" });
+    var cached = gmGetJSON(cacheKey);
+    var has = cached && cached[listField] && cached[listField].length;
+    if (!force && has) {
+      if (now - cached.ts >= TTL_MS && !_swrBusy[cacheKey]) {
+        _swrBusy[cacheKey] = 1;
+        fetchFresh().then(function () { _swrBusy[cacheKey] = 0; },
+                          function () { _swrBusy[cacheKey] = 0; });
+      }
+      var out = { source: (now - cached.ts < TTL_MS) ? "cache" : "cache-stale" };
+      out[listField] = cached[listField];
+      return Promise.resolve(out);
     }
+    return fetchFresh().catch(function (err) {
+      if (has) { var o = { source: "cache-after-error", error: String(err) }; o[listField] = cached[listField]; return o; }
+      var e = { source: "error", error: String(err) }; e[listField] = []; return e;
+    });
+  }
+
+  function fetchMapFresh() {
     return gmFetch(gvizUrl(SHEET_ID, GID)).then(function (txt) {
       var pairs = parseGviz(txt);
       if (!pairs.length) throw new Error("у таблиці 0 придатних рядків");
-      gmSetJSON("sd_upsell_cache_v1", { ts: now, pairs: pairs });
+      gmSetJSON("sd_upsell_cache_v1", { ts: Date.now(), pairs: pairs });
       return { pairs: pairs, source: "sheet" };
-    }).catch(function (err) {
-      if (cached && cached.pairs && cached.pairs.length) {
-        return { pairs: cached.pairs, source: "cache-after-error", error: String(err) };
-      }
-      return { pairs: [], source: "error", error: String(err) };
     });
   }
+  function getMap(force) { return swrGet("sd_upsell_cache_v1", "pairs", fetchMapFresh, force); }
 
-  function getAnalog(force) {
-    // не налаштовано — мовчки повертаємо порожньо (банер аналогів не зʼявиться)
-    if (!ANALOG_SHEET_ID) return Promise.resolve({ pairs: [], source: "disabled" });
-    var now = Date.now();
-    var cached = gmGetJSON("sd_analog_cache_v1");
-    if (!force && cached && cached.pairs && cached.pairs.length && now - cached.ts < TTL_MS) {
-      return Promise.resolve({ pairs: cached.pairs, source: "cache" });
-    }
+  function fetchAnalogFresh() {
     return gmFetch(gvizUrl(ANALOG_SHEET_ID, ANALOG_GID)).then(function (txt) {
       var pairs = parseAnalog(txt);
       if (!pairs.length) throw new Error("у таблиці 0 придатних рядків");
-      gmSetJSON("sd_analog_cache_v1", { ts: now, pairs: pairs });
+      gmSetJSON("sd_analog_cache_v1", { ts: Date.now(), pairs: pairs });
       return { pairs: pairs, source: "sheet" };
-    }).catch(function (err) {
-      if (cached && cached.pairs && cached.pairs.length) {
-        return { pairs: cached.pairs, source: "cache-after-error", error: String(err) };
-      }
-      return { pairs: [], source: "error", error: String(err) };
     });
   }
+  function getAnalog(force) {
+    // не налаштовано — мовчки повертаємо порожньо (банер аналогів не зʼявиться)
+    if (!ANALOG_SHEET_ID) return Promise.resolve({ pairs: [], source: "disabled" });
+    return swrGet("sd_analog_cache_v1", "pairs", fetchAnalogFresh, force);
+  }
 
-  function getKb(force) {
-    var now = Date.now();
-    var cached = gmGetJSON("sd_kb_cache_v1");
-    if (!force && cached && cached.rows && cached.rows.length && now - cached.ts < TTL_MS) {
-      return Promise.resolve({ rows: cached.rows, source: "cache" });
-    }
+  function fetchKbFresh() {
     return gmFetch(gvizUrl(KB_SHEET_ID, KB_GID)).then(function (txt) {
       var rows = parseKb(txt);
       if (!rows.length) throw new Error("у таблиці 0 придатних рядків");
-      gmSetJSON("sd_kb_cache_v1", { ts: now, rows: rows });
+      gmSetJSON("sd_kb_cache_v1", { ts: Date.now(), rows: rows });
       return { rows: rows, source: "sheet" };
-    }).catch(function (err) {
-      if (cached && cached.rows && cached.rows.length) {
-        return { rows: cached.rows, source: "cache-after-error", error: String(err) };
-      }
-      return { rows: [], source: "error", error: String(err) };
     });
   }
+  function getKb(force) { return swrGet("sd_kb_cache_v1", "rows", fetchKbFresh, force); }
 
   // ---- шим chrome.* — щоб перенесений код content.js/kb.js працював без змін ----
   var chrome = {
