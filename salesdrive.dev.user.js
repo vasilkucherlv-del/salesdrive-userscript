@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      1.67
+// @version      1.68
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -394,7 +394,7 @@ var UPSELL_MAP_DATA = []; // вбудований запас прибрано: �
               BUS.__sdAnalogBySku = buildAnalogBySku(resp.pairs);
               BUS.dispatchEvent(new Event("sdAnalogReady"));
             } catch (e) {}
-            console.log(
+            console.debug(
               "[SalesDrive Аналоги] карта з таблиці:",
               resp.pairs.length, "пар (джерело:", resp.source + ")"
             );
@@ -1227,7 +1227,7 @@ var UPSELL_MAP_DATA = []; // вбудований запас прибрано: �
   requestSheet(false);
   requestAnalogSheet(false); // аналоги — окрема таблиця (якщо налаштовано ANALOG_SHEET_ID)
 
-  console.log("[SalesDrive Допродаж] активний. Якорів у вбудованій карті:", GROUPS.length);
+  console.debug("[SalesDrive Допродаж] активний. Якорів у вбудованій карті:", GROUPS.length);
 })();
 
 
@@ -1263,7 +1263,7 @@ var UPSELL_MAP_DATA = []; // вбудований запас прибрано: �
           rows = resp.rows;
           loaded = true;
           loadError = "";
-          console.log("[SalesDrive База знань] записів:", rows.length, "(джерело:", resp.source + ")");
+          console.debug("[SalesDrive База знань] записів:", rows.length, "(джерело:", resp.source + ")");
         } else {
           loadError = (resp && resp.error) ? resp.error : "empty";
           console.log("[SalesDrive База знань] таблиця недоступна:", loadError);
@@ -3274,7 +3274,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       if(r.status===400){ cashNote('⏳ Забагато запитів до SalesDrive.<br>Зачекайте ~1 хв, рахунок продовжиться сам…'); await sleep(65000); cashNote('Рахую…'); continue; }
       var j=await r.json().catch(function(){return {};});
       var arr=j.data||j.orders||[]; all=all.concat(arr);
-      if(arr.length<100) break; page++; await sleep(6500);
+      if(arr.length<100) break; page++; await sleep(400);
     }
     return all;
   }
@@ -3303,7 +3303,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       var pg=j.pagination||{};
       if(arr.length<100) break;
       if(pg.currentPage && pg.pageCount && pg.currentPage>=pg.pageCount) break;
-      page++; await sleep(6500);
+      page++; await sleep(400);
     }
     return byOrder;
   }
