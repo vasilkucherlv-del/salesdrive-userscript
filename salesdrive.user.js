@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.74
+// @version      1.78
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -28,7 +28,7 @@
      • lkUpsellRedesign— компактний вигляд картки допродажу
      • lkStockPayWarn  — попередження: передоплата + малий залишок
      • lkCashRegister  — 💰 Каса самовивозу
-     • lkQuickPickup   — ➕ швидка кнопка нової заявки самовивозу
+     • lkQuickPickup   — ➕ нова заявка самовивозу + 📋 список усіх самовивозів
      • lkAutoOrgByPayment — організація: самовивіз→Кучер Василь, інакше→ФОП з платежу
      • lkPayLink        — 💳 кнопка «Оплата»: платіжний лінк НБУ з сумою й номером заявки
      • lkCheckCashbox   — підстановка «каса самовивозу» у формі чека (оплата готівка/термінал)
@@ -3776,6 +3776,14 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 (function lkQuickPickup(){
   'use strict';
   var SHIP_PICKUP = 43; // id способу доставки «Самовивіз»
+  // нативний список УСІХ заявок самовивозу (будь-який спосіб оплати).
+  // filter[statusId][]=__NOTDELETED__ — це пункт «[все]» у фільтрі статусів
+  // (інакше список за замовчуванням показує лише статуси «у процесі»).
+  var PICKUP_LIST_URL = '/ua/index.html?formId=1#/order/index?'
+    + 'filter%5BstatusId%5D%5B%5D=__NOTDELETED__'
+    + '&filter%5Bshipping_method%5D%5B%5D=' + SHIP_PICKUP;
+  // нативний список УСІХ заявок (усі статуси, будь-яка доставка)
+  var ALL_ORDERS_URL = '/ua/index.html?formId=1#/order/index?filter%5BstatusId%5D%5B%5D=__NOTDELETED__';
   // організація за замовчуванням для швидкого самовивозу: ФОП Кучер Василь Богданович
 
   function setShipping(sel, val){
@@ -3869,17 +3877,44 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     applyPickup(); // лише доставка; організацію підхопить lkAutoOrgByPayment
   }
   function addBtn(){
-    if(document.getElementById('lk-pickup-btn')) return;
     var anchor = document.querySelector('span.btn-check');
     if(!anchor || !anchor.parentNode) return;
-    var b = document.createElement('span');
-    b.id = 'lk-pickup-btn';
-    b.className = 'btn btn-primary-alt cursor-pointer';
-    b.title = 'Швидко: нова заявка із самовивозом';
-    b.style.marginLeft = '6px';
-    b.textContent = '➕ Самовивіз';
-    b.onclick = openPickupOrder;
-    anchor.parentNode.insertBefore(b, anchor.nextSibling);
+    // ➕ швидка нова заявка самовивозу
+    if(!document.getElementById('lk-pickup-btn')){
+      var b = document.createElement('span');
+      b.id = 'lk-pickup-btn';
+      b.className = 'btn btn-primary-alt cursor-pointer';
+      b.title = 'Швидко: нова заявка із самовивозом';
+      b.style.marginLeft = '6px';
+      b.textContent = '➕ Самовивіз';
+      b.onclick = openPickupOrder;
+      anchor.parentNode.insertBefore(b, anchor.nextSibling);
+    }
+    // 📋 перегляд УСІХ заявок самовивозу — справжнє посилання <a target=_blank>,
+    // щоб працювали і звичайний клік, і колесико (середня кнопка), і Ctrl+клік.
+    if(!document.getElementById('lk-pickup-list-btn')){
+      var prev = document.getElementById('lk-pickup-btn') || anchor;
+      var l = document.createElement('a');
+      l.id = 'lk-pickup-list-btn';
+      l.className = 'btn btn-default cursor-pointer';
+      l.title = 'Показати всі заявки із самовивозом (будь-який спосіб оплати)';
+      l.style.marginLeft = '6px';
+      l.textContent = '📋 Самовивози';
+      l.href = PICKUP_LIST_URL; l.target = '_blank'; l.rel = 'noopener';
+      prev.parentNode.insertBefore(l, prev.nextSibling);
+    }
+    // 📋 перегляд УСІХ заявок (усі статуси) — так само <a target=_blank>
+    if(!document.getElementById('lk-all-orders-btn')){
+      var prev2 = document.getElementById('lk-pickup-list-btn') || document.getElementById('lk-pickup-btn') || anchor;
+      var a = document.createElement('a');
+      a.id = 'lk-all-orders-btn';
+      a.className = 'btn btn-default cursor-pointer';
+      a.title = 'Показати всі заявки (усі статуси)';
+      a.style.marginLeft = '6px';
+      a.textContent = '📋 Усі заявки';
+      a.href = ALL_ORDERS_URL; a.target = '_blank'; a.rel = 'noopener';
+      prev2.parentNode.insertBefore(a, prev2.nextSibling);
+    }
   }
   window.addEventListener('lkdom', addBtn); addBtn();
 
