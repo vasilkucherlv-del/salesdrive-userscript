@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      1.68
+// @version      1.69
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -32,6 +32,7 @@
      • lkAutoOrgByPayment — організація: самовивіз→Кучер Василь, інакше→ФОП з платежу
      • lkPayLink        — 💳 кнопка «Оплата»: платіжний лінк НБУ з сумою й номером заявки
      • lkCheckCashbox   — підстановка «каса самовивозу» у формі чека (оплата готівка/термінал)
+     • lkCopyNoGoods    — кнопка «🗐 без товарів» (копія заявки без товарних рядків)
      • lkSenderBySource — відправник СМС за джерелом замовлення (FIXLAND/Refort/lartek/Сайт/mobile_catalog_app/Bigl)
    ╚══════════════════════════════════════════════════════════════════╝ */
 
@@ -4282,3 +4283,73 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 })();
 }catch(e){ try{ console.warn("[SD] модуль «lkSenderBySource» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkSenderBySource ▲▲▲ */
+
+
+/* ▼▼▼ МОДУЛЬ-START • lkCopyNoGoods — кнопка «Копіювати заявку БЕЗ товарів» ▼▼▼ */
+(function lkCopyNoGoods(){
+  'use strict';
+  var AUTO_SAVE = true;   // після чистки натиснути «Зберегти» (інакше товари повернуться після F5)
+  var FLAG = 'lk_copy_nogoods'; // sessionStorage: {src, ts}
+
+  function curOrderId(){ var m=(location.hash||'').match(/\/order\/update\/(\d+)/); return m?m[1]:null; }
+  function nativeCopyBtn(){ return document.querySelector('button[ng-click="viewModel.copyOrder($event)"]'); }
+  // кнопки видалення САМЕ товарних рядків (шукаємо в рядку з товаром)
+  function productDelBtn(){
+    var links=document.querySelectorAll('a.link-product-field');
+    for(var i=0;i<links.length;i++){
+      var tr=links[i].closest('tr'); if(!tr) continue;
+      var d=tr.querySelector('a[ng-click*="deleteComment"], a.glyphicon-remove-circle');
+      if(d) return d;
+    }
+    return null;
+  }
+
+  function addBtn(){
+    if(document.getElementById('lk-copy-ng')) return;
+    var nb=nativeCopyBtn(); if(!nb || !nb.parentNode) return;
+    var b=document.createElement('button');
+    b.id='lk-copy-ng'; b.type='button';
+    b.className='btn btn-default';
+    b.title='Копіювати заявку БЕЗ товарів (клієнт/доставка/дані — так, товари — ні)';
+    b.textContent='🗐 без товарів';
+    b.style.marginLeft='4px';
+    b.addEventListener('click', function(e){
+      e.preventDefault();
+      var src=curOrderId(); if(!src) return;
+      try{ sessionStorage.setItem(FLAG, JSON.stringify({ src:src, ts:Date.now() })); }catch(_){}
+      nb.click(); // рідне копіювання SalesDrive
+    });
+    nb.parentNode.insertBefore(b, nb.nextSibling);
+  }
+
+  var busy=false;
+  function tick(){
+    addBtn();
+    if(busy) return;
+    var raw=null; try{ raw=sessionStorage.getItem(FLAG); }catch(_){}
+    if(!raw) return;
+    var f=null; try{ f=JSON.parse(raw); }catch(_){}
+    if(!f || (Date.now()-f.ts)>40000){ try{ sessionStorage.removeItem(FLAG); }catch(_){} return; } // позначка згоріла
+    var id=curOrderId();
+    if(!id || id===String(f.src)) return;          // ще не на НОВІЙ (скопійованій) заявці
+    if(!productDelBtn()) return;                    // рядки ще не домальовані
+    busy=true;
+    try{ sessionStorage.removeItem(FLAG); }catch(_){}
+    var n=0;
+    (function delNext(){
+      var d=productDelBtn();
+      if(d && n<50){ n++; d.click(); setTimeout(delNext, 350); return; }
+      if(AUTO_SAVE){
+        setTimeout(function(){
+          var save=[].slice.call(document.querySelectorAll('button'))
+            .find(function(b){ return /зберегти/i.test((b.textContent||'')) && b.offsetParent; });
+          if(save) save.click();
+          busy=false;
+        }, 700);
+      } else { busy=false; }
+    })();
+  }
+  window.addEventListener('lkdom', function(){ setTimeout(tick,150); });
+  tick();
+})();
+/* ▲▲▲ МОДУЛЬ-END • lkCopyNoGoods ▲▲▲ */
