@@ -21,6 +21,10 @@
   для CRM SalesDrive (`komplektom.salesdrive.me`)
 - **Збірка-розширення:** `manifest.json` + `gm-shim.js` + `background.js`
   (той самий salesdrive.user.js як content script; встановлюється unpacked)
+- **РІШЕННЯ (04.07.2026): у Chrome Web Store НЕ публікуємо.** Причина:
+  кожен фікс проходив би перевірку Google (години-дні), а зараз фікс
+  долітає за ~5 хв через raw GitHub. Основний канал — Tampermonkey
+  (стабільний + ТЕСТ). Не пропонувати магазин повторно.
 - **Гілка/пуш:** усе у `main`. Файл **паралельно редагують і на GitHub**, тож перед пушем завжди `git fetch origin main && git rebase origin/main`.
 - **Перевірка перед пушем:** `node --check <файл>.js`
 - **Автооновлення:** у шапці є `@updateURL`/`@downloadURL` на raw GitHub (raw кешується ~5 хв). Щоб оновити у Tampermonkey: Утиліти → «Перевірити оновлення».
