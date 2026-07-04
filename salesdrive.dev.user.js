@@ -4323,7 +4323,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     nb.parentNode.insertBefore(b, nb.nextSibling);
   }
 
-  var DBG=true; // замір у консоль (тег [SD-Копія]); вимкнути після налагодження
+  var DBG=false; // замір у консоль (тег [SD-Копія]); вимкнути після налагодження
   function log(){ if(!DBG) return; try{ var a=['%c[SD-Копія]','color:#c0392b;font-weight:bold'].concat([].slice.call(arguments)); console.log.apply(console,a); }catch(_){}}
 
   // Модель СКОПІЙОВАНОЇ заявки шукаємо СТРОГО за id з URL. Під час копіювання в

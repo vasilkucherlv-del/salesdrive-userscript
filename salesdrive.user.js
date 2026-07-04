@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.65
+// @version      1.74
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -20,6 +20,7 @@
    Кожен модуль обгорнуто рамкою «МОДУЛЬ-START … МОДУЛЬ-END • <id>».
    Правити код модуля ТІЛЬКИ в межах його рамок, щоб не зачепити інші.
    Список (зверху вниз):
+     • lkDomTick       — спільний «пульс» DOM (подія 'lkdom') для всіх модулів
      • core            — ядро: шина, дані з таблиць, стилі, content.js, База знань
      • lkNaboryInline  — позначка «входить у набори» в рядках заявки
      • lkAnalogInline  — інлайн-значок «🔁 аналог» у рядку товару
@@ -27,15 +28,36 @@
      • lkUpsellRedesign— компактний вигляд картки допродажу
      • lkStockPayWarn  — попередження: передоплата + малий залишок
      • lkCashRegister  — 💰 Каса самовивозу
-     • lkAnalogStyles  — стилі банера «Аналоги»
      • lkQuickPickup   — ➕ швидка кнопка нової заявки самовивозу
      • lkAutoOrgByPayment — організація: самовивіз→Кучер Василь, інакше→ФОП з платежу
      • lkPayLink        — 💳 кнопка «Оплата»: платіжний лінк НБУ з сумою й номером заявки
      • lkCheckCashbox   — підстановка «каса самовивозу» у формі чека (оплата готівка/термінал)
+     • lkCopyNoGoods    — кнопка «🗐 без товарів» (копія заявки без товарних рядків)
      • lkSenderBySource — відправник СМС за джерелом замовлення (FIXLAND/Refort/lartek/Сайт/mobile_catalog_app/Bigl)
    ╚══════════════════════════════════════════════════════════════════╝ */
 
 /* ▼▼▼ МОДУЛЬ-START • core — ЯДРО — шина подій, дані з Google-таблиць, стилі; містить content.js (підказки/ціни/рейтинг/ТТН) і Базу знань ▼▼▼ */
+/* ▼▼▼ МОДУЛЬ-START • lkDomTick — спільний «пульс» DOM для всіх модулів ▼▼▼ */
+/* Один MutationObserver на сторінку замість окремого в кожному модулі.
+   Розсилає подію 'lkdom' (дебаунс 250мс) + страховий пульс кожні 2с. */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
+(function lkDomTick(){
+  'use strict';
+  var t=null;
+  function fire(){ try{ window.dispatchEvent(new Event('lkdom')); }catch(e){} }
+  function soon(){ clearTimeout(t); t=setTimeout(fire,250); }
+  function arm(){
+    try{ new MutationObserver(soon).observe(document.body,{childList:true,subtree:true}); }
+    catch(e){ setTimeout(arm,500); return; }
+    fire();
+  }
+  if(document.body) arm(); else document.addEventListener('DOMContentLoaded', arm);
+  setInterval(fire, 2000); // страховий пульс: зміни без DOM-мутацій теж підхопляться
+})();
+}catch(e){ try{ console.warn("[SD] модуль «lkDomTick» не запустився:", e); }catch(_){} }
+/* ▲▲▲ МОДУЛЬ-END • lkDomTick ▲▲▲ */
+
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
 (function () {
   "use strict";
 
@@ -260,176 +282,7 @@
 
   // ====== карта-запас (вбудована, як у upsell_map.js) ======
 
-var UPSELL_MAP_DATA = [
- {
-  "k": "мішок для пилососа samsung багат",
-  "a": "Мішок для пилососа Samsung багаторазовий VT-50 DJ69-00420B",
-  "c": "Передмоторний фільтр для пилососа Samsung SC4180 DJ63-00539A",
-  "sku": "104",
-  "c2": "Тримач мішка для пилососу Samsung DJ61-00935A",
-  "s": "До цього зазвичай беруть «Передмоторний фільтр для пилососа Samsung SC4180 DJ63-00539A». Додати одразу, щоб не замовляти окремо й не платити ще раз за доставку?"
- },
- {
-  "k": "набір фільтрів для пилососа thom",
-  "a": "Набір фільтрів для пилососа Thomas Twin Tiger T2 T1 Genius Овал (787203)",
-  "c": "HEPA фільтр для пилососа Thomas",
-  "sku": "106",
-  "c2": "Набір фільтрів мотора HEPA (2 шт) для пилососа Thomas",
-  "s": "До цього зазвичай беруть «HEPA фільтр для пилососа Thomas». Додати одразу, щоб не замовляти окремо й не платити ще раз за доставку?"
- },
- {
-  "k": "ніж для м'ясорубки zelmer №8 дво",
-  "a": "Ніж для м'ясорубки Zelmer №8 двосторонній 632543 86.3109 (ZMMA128X)",
-  "c": "Муфта, втулка для м'ясорубки Zelmer та Bosch",
-  "sku": "061",
-  "c2": "Шнек для м'ясорубки Zelmer двостороннього ножа №8",
-  "s": "До цього зазвичай беруть «Муфта, втулка для м'ясорубки Zelmer та Bosch». Додати одразу, щоб не замовляти окремо й не платити ще раз за доставку?"
- },
- {
-  "k": "муфта, втулка для м'ясорубки zel",
-  "a": "Муфта, втулка для м'ясорубки Zelmer та Bosch 86.1203, 00792328 (3шт)",
-  "c": "Ніж для м'ясорубки Zelmer №8 двосторонній",
-  "sku": "040",
-  "c2": "Ніж для м'ясорубки Zelmer #8 двосторонній ZMMA028X (A863109.00)",
-  "s": "До цього зазвичай беруть «Ніж для м'ясорубки Zelmer №8 двосторонній». Додати одразу, щоб не замовляти окремо й не платити ще раз за доставку?"
- },
- {
-  "k": "фільтр для пилососа karcher 6.41",
-  "a": "Фільтр для пилососа Karcher 6.414-552.0",
-  "c": "Мішок для пилососа Karcher",
-  "sku": "164",
-  "c2": "Мішки для пилососу Karcher",
-  "s": "До цього зазвичай беруть «Мішок для пилососа Karcher». Додати одразу, щоб не замовляти окремо й не платити ще раз за доставку?"
- },
- {
-  "k": "набір фільтрів для пилососа thom",
-  "a": "Набір фільтрів для пилососа Thomas XT/XS 787241",
-  "c": "HEPA фільтр для пилососа Thomas",
-  "sku": "134",
-  "c2": "Мішки для пилососу Thomas",
-  "s": "До цього зазвичай беруть «HEPA фільтр для пилососа Thomas». Додати одразу, щоб не замовляти окремо й не платити ще раз за доставку?"
- },
- {
-  "k": "корпус терок + защолка для м'ясо",
-  "a": "Корпус терок + защолка для м'ясорубки Zelmer 986.7001 + 986.7002",
-  "c": "Защолка корпусу-тримача терок Zelmer 986.7002",
-  "sku": "231",
-  "c2": "Барабан-терка для м'ясорубки Zelmer",
-  "s": "До цього зазвичай беруть «Защолка корпусу-тримача терок Zelmer». Додати одразу, щоб не замовляти окремо й не платити ще раз за доставку?"
- },
- {
-  "k": "щітка для пилососа універсальна ",
-  "a": "Щітка для пилососа універсальна паркетна D=30-37 мм",
-  "c": "Мішок багаторазовий для пилососа LG",
-  "sku": "013",
-  "c2": "",
-  "s": "До цього зазвичай беруть «Мішок багаторазовий для пилососа LG». Додати одразу, щоб не замовляти окремо й не платити ще раз за доставку?"
- },
- {
-  "k": "ріжучий блок і сітка для електро",
-  "a": "Ріжучий блок і сітка для електробритв Braun 10B",
-  "c": "Бриючий блок і сітка для бритви Braun 32B",
-  "sku": "020",
-  "c2": "",
-  "s": "До цього зазвичай беруть «Бриючий блок і сітка для бритви Braun 32B». Додати одразу, щоб не замовляти окремо й не платити ще раз за доставку?"
- },
- {
-  "k": "харчове мастило для кухонної тех",
-  "a": "Харчове мастило для кухонної техніки MOL Food Grease 2 (NLGI2) 50 мл",
-  "c": "Набір шестерень для м'ясорубок Zelmer (187.0003",
-  "sku": "210",
-  "c2": "",
-  "s": "До цього зазвичай беруть «Набір шестерень для м'ясорубок Zelmer (187.0003». Додати одразу, щоб не замовляти окремо й не платити ще раз за доставку?"
- },
- {
-  "k": "мішки для пилососа s-bag clasic ",
-  "a": "Мішки для пилососа S-bag Clasic long performance (4шт)",
-  "c": "Комплект фільтрів для пилососа Philips",
-  "sku": "01583",
-  "c2": "Фільтр для пилососа Philips EFS1W",
-  "s": "До цього зазвичай беруть «Комплект фільтрів для пилососа Philips». Додати одразу, щоб не замовляти окремо й не платити ще раз за доставку?"
- },
- {
-  "k": "мішок багаторазовий для пилососа",
-  "a": "Мішок багаторазовий для пилососа LG 5231FI2308C",
-  "c": "Мішок для пилососа Samsung багаторазовий VT-50 DJ69-00420B",
-  "sku": "122",
-  "c2": "Універсальний фільтр для пилососа (200 х 140мм)",
-  "s": "До цього зазвичай беруть «Мішок для пилососа Samsung багаторазовий VT-50 DJ69-00420B». Додати одразу, щоб не замовляти окремо й не платити ще раз за доставку?"
- },
- {
-  "k": "ніж двосторонній для м'ясорубки ",
-  "a": "Ніж двосторонній для м'ясорубки Zelmer №5 86.1009 (нержавіюча сталь)",
-  "c": "Шнек для м'ясорубки Zelmer №5",
-  "sku": "0287",
-  "c2": "Решітка для м'ясорубки Zelmer №5 (середня)",
-  "s": "До цього зазвичай беруть «Шнек для м'ясорубки Zelmer №5». Додати одразу, щоб не замовляти окремо й не платити ще раз за доставку?"
- },
- {
-  "k": "ручка дверей для холодильника су",
-  "a": "Ручка дверей для холодильника сумісна із Liebherr 743067000",
-  "c": "Комплект заглушок (накладок) для ручки для холодильника Liebherr",
-  "sku": "02595",
-  "c2": "",
-  "s": "До цього зазвичай беруть «Комплект заглушок (накладок) для ручки для холодильника Liebherr». Додати одразу, щоб не замовляти окремо й не платити ще раз за доставку?"
- },
- {
-  "k": "комплект фільтрів для пилососа p",
-  "a": "Комплект фільтрів для пилососа Philips 900167768 + 432200039731",
-  "c": "Мішок -пилозбірник для пилососа Philips s-bag (многоразовий)",
-  "sku": "0691",
-  "c2": "Мішки для пилососа S-bag Clasic long performance (4шт)",
-  "s": "До цього зазвичай беруть «Мішок -пилозбірник для пилососа Philips s-bag (многоразовий)». Додати одразу, щоб не замовляти окремо й не платити ще раз за доставку?"
- },
- {
-  "k": "набір фільтрів для пилососа sams",
-  "a": "Набір фільтрів для пилососа Samsung DJ97-00492A+DJ97-01159A",
-  "c": "Фільтр двигуна для пилососу Samsung DJ63-00599A SC6500",
-  "sku": "146",
-  "c2": "Фільтр для пилососу Samsung DJ97-01159A",
-  "s": "До цього зазвичай беруть «Фільтр двигуна для пилососу Samsung DJ63-00599A SC6500». Додати одразу, щоб не замовляти окремо й не платити ще раз за доставку?"
- },
- {
-  "k": "щітка для пилососа килимова d=32",
-  "a": "Щітка для пилососа килимова D=32 mm",
-  "c": "Труба телескоп для пилососа Ø 32мм",
-  "sku": "206",
-  "c2": "",
-  "s": "До цього зазвичай беруть «Труба телескоп для пилососа Ø 32мм». Додати одразу, щоб не замовляти окремо й не платити ще раз за доставку?"
- },
- {
-  "k": "мішки для пилососу karcher 6.959",
-  "a": "Мішки для пилососу Karcher 6.959-130.0 5шт.",
-  "c": "Фільтр для пилососа Karcher",
-  "sku": "0128",
-  "c2": "Мішок для пилососа Karcher",
-  "s": "До цього зазвичай беруть «Фільтр для пилососа Karcher». Додати одразу, щоб не замовляти окремо й не платити ще раз за доставку?"
- },
- {
-  "k": "комплект підшипників для прально",
-  "a": "Комплект підшипників для пральної машини Electrolux Zanussi EBI COD.098 + COD.099 (6203 - 2Z)",
-  "c": "Амортизатори для пральної машини Electrolux",
-  "sku": "01439",
-  "c2": "",
-  "s": "До цього зазвичай беруть «Амортизатори для пральної машини Electrolux». Додати одразу, щоб не замовляти окремо й не платити ще раз за доставку?"
- },
- {
-  "k": "шнек для м'ясорубки zelmer двост",
-  "a": "Шнек для м'ясорубки Zelmer двостороннього ножа №8 86.3140 12000524",
-  "c": "Ніж для м'ясорубки Zelmer №8 двосторонній",
-  "sku": "040",
-  "c2": "",
-  "s": "До цього зазвичай беруть «Ніж для м'ясорубки Zelmer №8 двосторонній». Додати одразу, щоб не замовляти окремо й не платити ще раз за доставку?"
- },
- {
-  "k": "комплект фільтрів для пилососа s",
-  "a": "Комплект фільтрів для пилососа Samsung DJ97-01040C+DJ63-00672D",
-  "c": "Вхідний фільтр для пилососа Samsung DJ63-00671A",
-  "sku": "0324",
-  "c2": "",
-  "s": "До цього зазвичай беруть «Вхідний фільтр для пилососа Samsung DJ63-00671A». Додати одразу, щоб не замовляти окремо й не платити ще раз за доставку?"
- }
-];
+var UPSELL_MAP_DATA = []; // вбудований запас прибрано: дані миттєво приходять із кешу таблиці (SWR)
 
 
   // ====== content.js (підказки/ціни/рейтинг/ТТН) ======
@@ -510,7 +363,6 @@ var UPSELL_MAP_DATA = [
   }
 
   // ---- аналоги (окрема таблиця): якір -> список товарів-замін ----
-  var ANALOG_GROUPS = [];
   // карта «код товару -> [аналоги]» (ВЗАЄМНА) для інлайн-значка в рядку товару
   function buildAnalogBySku(pairs) {
     var m = {};
@@ -538,29 +390,19 @@ var UPSELL_MAP_DATA = [
         function (resp) {
           if (chrome.runtime.lastError) return;
           if (resp && resp.pairs && resp.pairs.length) {
-            ANALOG_GROUPS = buildGroups(resp.pairs);
             // міст для інлайн-модуля: карта код якоря -> аналоги
             try {
               BUS.__sdAnalogBySku = buildAnalogBySku(resp.pairs);
               BUS.dispatchEvent(new Event("sdAnalogReady"));
             } catch (e) {}
-            console.log(
+            console.debug(
               "[SalesDrive Аналоги] карта з таблиці:",
-              resp.pairs.length, "пар,",
-              ANALOG_GROUPS.length, "якорів (джерело:", resp.source + ")"
+              resp.pairs.length, "пар (джерело:", resp.source + ")"
             );
           }
         }
       );
     } catch (e) {}
-  }
-  function matchAnalogGroup(label) {
-    var t = norm(label);
-    if (t.length < 4) return null;
-    for (var i = 0; i < ANALOG_GROUPS.length; i++) {
-      if (t.indexOf(ANALOG_GROUPS[i].key) !== -1) return ANALOG_GROUPS[i];
-    }
-    return null;
   }
 
   function cleanLabel(a) {
@@ -586,10 +428,6 @@ var UPSELL_MAP_DATA = [
   var existingShownSig = null;    // підпис набору, показаного для товарів у заявці
   var existingDismissedKey = null;// заявка, для якої авто-підказку закрили
   var lastOrderKey = "";          // поточна заявка (щоб ловити перехід)
-  var analogHideTimer = null;     // авто-приховування банера аналогів
-  var analogShownSig = null;      // підпис показаних аналогів (товари заявки)
-  var analogDismissedKey = null;  // заявка, для якої банер аналогів закрили
-  var lastAnalogOrderKey = "";    // поточна заявка для логіки аналогів
 
   function removeHint() {
     var old = document.getElementById("sd-upsell-hint");
@@ -732,152 +570,6 @@ var UPSELL_MAP_DATA = [
     if (!opts.existing) armHideTimer();
   }
 
-  function removeAnalogHint() {
-    var old = document.getElementById("sd-analog-hint");
-    if (old) old.remove();
-    if (analogHideTimer) { clearTimeout(analogHideTimer); analogHideTimer = null; }
-  }
-  function armAnalogHideTimer() {
-    if (analogHideTimer) clearTimeout(analogHideTimer);
-    analogHideTimer = setTimeout(removeAnalogHint, 45000);
-  }
-
-  // Банер аналогів-замін. Структура й логіка — як у showHint (допродаж),
-  // але окремий банер (#sd-analog-hint) і свій підпис «аналог/заміна».
-  function showAnalogHint(items, headerText, opts) {
-    // Банер аналогів вимкнено: аналоги показуються інлайн-значком «🔁 аналог»
-    // прямо в рядку товару (модуль lkAnalogInline). Нижній банер більше не потрібен.
-    removeAnalogHint();
-    return;
-    /* eslint-disable no-unreachable */
-    if (/\/document\/arrival-product\//.test(location.hash || "")) { removeAnalogHint(); return; }
-    opts = opts || {};
-    removeAnalogHint();
-    if (!opts.existing) analogShownSig = null;
-
-    var box = document.createElement("div");
-    box.id = "sd-analog-hint";
-
-    var x = document.createElement("button");
-    x.className = "sd-x";
-    x.textContent = "×";
-    x.title = "Сховати";
-    x.addEventListener("click", function () { removeAnalogHint(); if (opts.onClose) opts.onClose(); });
-    box.appendChild(x);
-
-    if (headerText) {
-      var top = document.createElement("div");
-      top.className = "sd-top";
-      top.textContent = headerText;
-      box.appendChild(top);
-    }
-
-    var slots = {};
-    items.forEach(function (it) {
-      var item = document.createElement("div");
-      item.className = "sd-item";
-
-      var cimg = document.createElement("img");
-      cimg.className = "sd-comp-img";
-      cimg.alt = "";
-      cimg.loading = "eager";
-      cimg.style.display = "none";
-      cimg.onerror = function () { cimg.style.display = "none"; };
-      item.appendChild(cimg);
-
-      var main = document.createElement("div");
-      main.className = "sd-main";
-
-      if (it.c) {
-        var nameEl = document.createElement("div");
-        nameEl.className = "sd-name";
-        nameEl.textContent = it.c;
-        main.appendChild(nameEl);
-      }
-
-      var say = document.createElement("div");
-      say.className = "sd-say";
-      say.textContent = "Аналог / заміна";
-      main.appendChild(say);
-
-      if (it.s) {
-        var script = document.createElement("div");
-        script.className = "sd-script";
-        script.textContent = it.s;
-        main.appendChild(script);
-      }
-
-      var stock = null;
-      if (it.sku) {
-        stock = document.createElement("span");
-        stock.className = "sd-stock sd-stock-wait";
-        stock.textContent = "перевіряю залишок…";
-        main.appendChild(stock);
-      }
-      item.appendChild(main);
-
-      var action = document.createElement("div");
-      action.className = "sd-action";
-
-      var priceEl = null, priceLab = null, priceVal = null;
-      if (it.sku) {
-        priceEl = document.createElement("div");
-        priceEl.className = "sd-price";
-        priceEl.style.display = "none";
-        priceLab = document.createElement("div");
-        priceLab.className = "sd-price-lab";
-        priceVal = document.createElement("div");
-        priceVal.className = "sd-price-val";
-        priceEl.appendChild(priceLab);
-        priceEl.appendChild(priceVal);
-        action.appendChild(priceEl);
-      }
-
-      var addBtn = document.createElement("button");
-      addBtn.className = "sd-add";
-      addBtn.type = "button";
-      addBtn.appendChild(document.createTextNode("➕ Додати аналог"));
-      if (it.sku) {
-        var sku = document.createElement("span");
-        sku.className = "sd-sku";
-        sku.textContent = "код " + it.sku;
-        addBtn.appendChild(document.createTextNode("  "));
-        addBtn.appendChild(sku);
-      }
-      addBtn.addEventListener("click", function () {
-        addCompanion(it.sku, addBtn);
-      });
-      action.appendChild(addBtn);
-
-      item.appendChild(action);
-
-      if (it.sku) {
-        slots[it.sku] = { badge: stock, img: cimg, item: item,
-          price: priceEl, priceLab: priceLab, priceVal: priceVal };
-      }
-
-      box.appendChild(item);
-    });
-
-    var spot = findInsertPoint();
-    if (spot && spot.parent) {
-      // ставимо під банером допродажу (якщо він є), інакше — одразу після таблиці
-      var ref = document.getElementById("sd-upsell-hint") || (spot.ref ? spot.ref.nextSibling : null);
-      spot.parent.insertBefore(box, ref ? ref.nextSibling : null);
-    } else {
-      box.style.position = "fixed";
-      box.style.bottom = "20px";
-      box.style.left = "50%";
-      box.style.transform = "translateX(-50%)";
-      box.style.maxWidth = "820px";
-      box.style.width = "90%";
-      document.body.appendChild(box);
-    }
-
-    if (opts.scrollIntoView) { try { box.scrollIntoView({ block: "nearest", behavior: "smooth" }); } catch (e) {} }
-    requestStock(slots, "sd-analog-hint");
-    if (!opts.existing) armAnalogHideTimer();
-  }
 
   function fmtQty(n) {
     if (n == null) return "";
@@ -1041,13 +733,6 @@ var UPSELL_MAP_DATA = [
       var many = group.items.length > 1;
       showHint(group.items, "💡 Допродаж до: " + truncate(group.a, 52) +
         (many ? "  (" + group.items.length + " варіанти)" : ""));
-    }
-    var ag = matchAnalogGroup(label);
-    if (ag) {
-      showAnalogHint(ag.items, "🔁 Аналоги до: " + truncate(ag.a, 52) +
-        (ag.items.length > 1 ? "  (" + ag.items.length + " варіанти)" : ""));
-    } else {
-      removeAnalogHint();
     }
   }
 
@@ -1218,75 +903,6 @@ var UPSELL_MAP_DATA = [
   }
 
   BUS.addEventListener("sdOrderItems", onOrderItems);
-
-  // ---- аналоги за товарами, що ВЖЕ є у відкритій заявці (незалежно від допродажу) ----
-  function onOrderItemsAnalog() {
-    if (!ANALOG_GROUPS.length) return; // таблиця аналогів не налаштована/не завантажена
-    var key = orderKey();
-    if (key !== lastAnalogOrderKey) {
-      lastAnalogOrderKey = key;
-      analogDismissedKey = null;
-      analogShownSig = null;
-    }
-    if (Date.now() - lastTypeahead < 3000) return; // не перебиваємо підказку з пошуку
-
-    var items = [];
-    try { items = JSON.parse(document.documentElement.getAttribute("data-sd-order-items")) || []; }
-    catch (e) { return; }
-    if (!items.length) return;
-
-    var presentCodes = {}, presentNames = [];
-    items.forEach(function (it) {
-      (it.codes || []).forEach(function (c) { presentCodes[String(c).toLowerCase()] = 1; });
-      if (it.name) presentNames.push(norm(it.name));
-    });
-    function alreadyInOrder(comp) {
-      if (presentCodes[String(comp.sku).toLowerCase()]) return true;
-      var cn = norm(comp.c);
-      if (cn.length > 10) {
-        for (var i = 0; i < presentNames.length; i++) {
-          if (presentNames[i].indexOf(cn) !== -1) return true;
-        }
-      }
-      return false;
-    }
-
-    var seenAnchor = {}, seenComp = {}, analogs = [];
-    items.forEach(function (it) {
-      var g = matchAnalogGroup(it.name || "");
-      if (!g || seenAnchor[g.key]) return;
-      seenAnchor[g.key] = 1;
-      g.items.forEach(function (ci) {
-        if (seenComp[ci.sku] || alreadyInOrder(ci)) return;
-        seenComp[ci.sku] = 1;
-        analogs.push({ sku: ci.sku, c: ci.c, s: ci.s, anchor: g.a });
-      });
-    });
-
-    if (!analogs.length) {
-      if (analogShownSig !== null) { removeAnalogHint(); analogShownSig = null; }
-      return;
-    }
-    if (analogDismissedKey === key) return;
-
-    var sig = analogs.map(function (c) { return c.sku; }).sort().join(",");
-    if (analogShownSig === sig && document.getElementById("sd-analog-hint")) return;
-
-    var anchors = {};
-    analogs.forEach(function (c) { anchors[c.anchor] = 1; });
-    var names = Object.keys(anchors);
-    var header = names.length === 1
-      ? "🔁 Аналоги до «" + truncate(names[0], 44) + "»:"
-      : "🔁 Аналоги (заміни) до товарів заявки:";
-
-    showAnalogHint(analogs, header, {
-      existing: true,
-      onClose: function () { analogDismissedKey = key; analogShownSig = null; }
-    });
-    analogShownSig = sig;
-  }
-
-  BUS.addEventListener("sdOrderItems", onOrderItemsAnalog);
 
   // ---------- ПЕРЕДУПЕРЕДЖЕННЯ ПРО ЦІНУ ROZETKA ----------
   function pwMoney(n) {
@@ -1612,7 +1228,7 @@ var UPSELL_MAP_DATA = [
   requestSheet(false);
   requestAnalogSheet(false); // аналоги — окрема таблиця (якщо налаштовано ANALOG_SHEET_ID)
 
-  console.log("[SalesDrive Допродаж] активний. Якорів у вбудованій карті:", GROUPS.length);
+  console.debug("[SalesDrive Допродаж] активний. Якорів у вбудованій карті:", GROUPS.length);
 })();
 
 
@@ -1648,7 +1264,7 @@ var UPSELL_MAP_DATA = [
           rows = resp.rows;
           loaded = true;
           loadError = "";
-          console.log("[SalesDrive База знань] записів:", rows.length, "(джерело:", resp.source + ")");
+          console.debug("[SalesDrive База знань] записів:", rows.length, "(джерело:", resp.source + ")");
         } else {
           loadError = (resp && resp.error) ? resp.error : "empty";
           console.log("[SalesDrive База знань] таблиця недоступна:", loadError);
@@ -2767,10 +2383,12 @@ function __sdPageMain() {
   }
 
 })();
+}catch(e){ try{ console.warn("[SD] модуль «core» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • core ▲▲▲ */
 
 /* ▼▼▼ МОДУЛЬ-START • lkNaboryInline — Набори: позначка «входить у набори» в рядках заявки ▼▼▼ */
 /* ===== Набори: позначка «входить у набори» в рядках заявки (джерело: баркод) ===== */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
 (function lkNaboryInline() {
   'use strict';
 
@@ -2913,14 +2531,16 @@ function __sdPageMain() {
   (async function init() {
     await ensureData();
     scan();
-    new MutationObserver(scanSoon).observe(document.body, { childList: true, subtree: true });
+    window.addEventListener('lkdom', scanSoon);
   })();
 })();
+}catch(e){ try{ console.warn("[SD] модуль «lkNaboryInline» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkNaboryInline ▲▲▲ */
 
 
 /* ▼▼▼ МОДУЛЬ-START • lkAnalogInline — Інлайн-значок «🔁 аналог» у рядку товару ▼▼▼ */
 /* ===== Інлайн-значок «🔁 аналог» у рядку товару (праворуч від «+» комплектів) ===== */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
 (function lkAnalogInline() {
   'use strict';
   var PAGE = (typeof unsafeWindow !== 'undefined' && unsafeWindow) || window;
@@ -3065,13 +2685,15 @@ function __sdPageMain() {
   function scanSoon() { clearTimeout(t); t = setTimeout(scan, 250); }
 
   scan();
-  new MutationObserver(scanSoon).observe(document.body, { childList: true, subtree: true });
+  window.addEventListener('lkdom', scanSoon);
 })();
+}catch(e){ try{ console.warn("[SD] модуль «lkAnalogInline» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkAnalogInline ▲▲▲ */
 
 
 /* ▼▼▼ МОДУЛЬ-START • lkModalKits — Картка товару (модалка): рядок «Входить у набори» ▼▼▼ */
 /* ===== Картка товару (модалка): рядок «Входить у набори» (джерело: баркод, ключ — ID) ===== */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
 (function lkModalKits() {
   'use strict';
 
@@ -3258,13 +2880,15 @@ function __sdPageMain() {
   (async function init() {
     await ensureData();
     process();
-    new MutationObserver(scanSoon).observe(document.body, { childList: true, subtree: true });
+    window.addEventListener('lkdom', scanSoon);
   })();
 })();
+}catch(e){ try{ console.warn("[SD] модуль «lkModalKits» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkModalKits ▲▲▲ */
 
 /* ▼▼▼ МОДУЛЬ-START • lkUpsellRedesign — Компактний вигляд картки допродажу ▼▼▼ */
 /* ===== Компактний сучасний вигляд картки допродажу ===== */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
 (function lkUpsellRedesign() {
   'use strict';
   var css = ''
@@ -3306,10 +2930,12 @@ function __sdPageMain() {
   st.textContent = css;
   (document.head || document.documentElement).appendChild(st);
 })();
+}catch(e){ try{ console.warn("[SD] модуль «lkUpsellRedesign» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkUpsellRedesign ▲▲▲ */
 
 /* ▼▼▼ МОДУЛЬ-START • lkStockPayWarn — Банер: передоплата + малий залишок → перевір склад ▼▼▼ */
 /* ===== Банер: передоплатна оплата + малий залишок → перевір склад ===== */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
 (function lkStockPayWarn() {
   'use strict';
 
@@ -3455,10 +3081,12 @@ function __sdPageMain() {
   setInterval(evaluate, 2500);        // ловить зміну способу оплати
   setTimeout(evaluate, 800);
 })();
+}catch(e){ try{ console.warn("[SD] модуль «lkStockPayWarn» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkStockPayWarn ▲▲▲ */
 
 /* ▼▼▼ МОДУЛЬ-START • lkCashRegister — 💰 Каса самовивозу (день/тиждень/місяць/період) ▼▼▼ */
 /* ===== 💰 Каса самовивозу — день / тиждень / місяць / період ===== */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
 (function lkCashRegister(){
   'use strict';
 
@@ -3647,7 +3275,7 @@ function __sdPageMain() {
       if(r.status===400){ cashNote('⏳ Забагато запитів до SalesDrive.<br>Зачекайте ~1 хв, рахунок продовжиться сам…'); await sleep(65000); cashNote('Рахую…'); continue; }
       var j=await r.json().catch(function(){return {};});
       var arr=j.data||j.orders||[]; all=all.concat(arr);
-      if(arr.length<100) break; page++; await sleep(6500);
+      if(arr.length<100) break; page++; await sleep(400);
     }
     return all;
   }
@@ -3676,7 +3304,7 @@ function __sdPageMain() {
       var pg=j.pagination||{};
       if(arr.length<100) break;
       if(pg.currentPage && pg.pageCount && pg.currentPage>=pg.pageCount) break;
-      page++; await sleep(6500);
+      page++; await sleep(400);
     }
     return byOrder;
   }
@@ -4038,10 +3666,12 @@ function __sdPageMain() {
     b.onclick=function(){ mode='day'; anchor=new Date(); open(); };
     document.body.appendChild(b);
   }
-  setInterval(addBtn,800); addBtn();
+  window.addEventListener('lkdom', addBtn); addBtn();
 })();
+}catch(e){ try{ console.warn("[SD] модуль «lkCashRegister» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkCashRegister ▲▲▲ */
 /* ▼▼▼ МОДУЛЬ-START • lkPayLink — 💳 Кнопка «Оплата»: платіжний лінк НБУ (BCB/002) з сумою й номером заявки ▼▼▼ */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
 (function lkPayLink(){
   'use strict';
   // Реквізити отримувача (ФОП). Формат перевірено сканером Privat24 — НЕ міняти теґ/версію/домен.
@@ -4135,77 +3765,18 @@ function __sdPageMain() {
     anchor.parentNode.insertBefore(b, anchor.nextSibling);
   }
 
-  setInterval(addBtn, 800); addBtn();
+  window.addEventListener('lkdom', addBtn); addBtn();
 })();
+}catch(e){ try{ console.warn("[SD] модуль «lkPayLink» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkPayLink ▲▲▲ */
 
-/* ▼▼▼ МОДУЛЬ-START • lkAnalogStyles — Стилі банера «Аналоги» ▼▼▼ */
-/* ===== Стилі банера «Аналоги» (бірюзовий, окремо від жовтого допродажу) ===== */
-(function lkAnalogStyles() {
-  'use strict';
-  var css = ''
-    + '#sd-analog-hint{position:relative;box-sizing:border-box;width:100%;'
-    + '  max-width:none;margin:6px 0 14px 0;'
-    + '  padding:9px 36px 9px 12px;background:#F2FBFA;border:1px solid #7FCBC2;'
-    + '  border-left:5px solid #00897B;border-radius:11px;'
-    + '  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;'
-    + '  color:#0f3d39;box-shadow:0 6px 18px rgba(0,0,0,.08);z-index:9999;animation:sdpop .18s ease-out}'
-    + '#sd-analog-hint .sd-top{font-size:11.5px;opacity:.95;font-weight:800;margin-bottom:6px;'
-    + '  color:#00695C;text-transform:uppercase;letter-spacing:.4px}'
-    + '#sd-analog-hint .sd-item{display:flex;flex-wrap:wrap;align-items:flex-start;gap:6px 14px;'
-    + '  padding:9px 0;margin-top:0;border-top:1px solid rgba(0,137,123,.16)}'
-    + '#sd-analog-hint .sd-item:first-of-type{border-top:none;padding-top:3px}'
-    + '#sd-analog-hint .sd-main{flex:1 1 420px;min-width:0;display:flex;flex-direction:column;'
-    + '  align-items:flex-start;gap:3px}'
-    + '#sd-analog-hint .sd-name{font-size:11.5px;font-weight:700;letter-spacing:.3px;color:#3a5e5a;'
-    + '  line-height:1.25;text-transform:uppercase;overflow-wrap:anywhere}'
-    + '#sd-analog-hint .sd-say{display:inline-block;font-size:10px;font-weight:800;letter-spacing:.5px;'
-    + '  text-transform:uppercase;color:#00897B;margin:0}'
-    + '#sd-analog-hint .sd-say::before{content:"🔁 "}'
-    + '#sd-analog-hint .sd-script{font-size:13.5px;font-weight:500;line-height:1.4;color:#0f2b29;'
-    + '  background:#fff;border:1px solid #c8e7e2;border-left:3px solid #00897B;border-radius:8px;'
-    + '  padding:7px 11px;overflow-wrap:anywhere;box-shadow:none}'
-    + '#sd-analog-hint .sd-action{flex:0 0 auto;width:138px;max-width:100%;display:flex;'
-    + '  flex-direction:column;align-items:stretch;gap:6px}'
-    + '#sd-analog-hint .sd-add{width:100%;box-sizing:border-box;white-space:normal;word-break:break-word;'
-    + '  display:flex;align-items:center;justify-content:center;gap:5px;flex-wrap:wrap;line-height:1.2;'
-    + '  padding:8px 10px;background:#00897B;color:#fff;border:none;border-radius:9px;'
-    + '  font-size:13px;font-weight:700;cursor:pointer}'
-    + '#sd-analog-hint .sd-add:hover{background:#00695C}'
-    + '#sd-analog-hint .sd-add:active{transform:translateY(1px)}'
-    + '#sd-analog-hint .sd-add.sd-done{background:#9e9e9e;cursor:default}'
-    + '#sd-analog-hint .sd-add.sd-done:hover{background:#9e9e9e}'
-    + '#sd-analog-hint .sd-sku{background:rgba(255,255,255,.22);padding:1px 6px;border-radius:5px;'
-    + '  font-size:11px;margin-left:0}'
-    + '#sd-analog-hint .sd-x{position:absolute;top:7px;right:11px;cursor:pointer;font-size:19px;'
-    + '  line-height:1;color:#00897B;border:none;background:none}'
-    + '#sd-analog-hint .sd-x:hover{color:#004d40}'
-    + '#sd-analog-hint .sd-stock{flex:0 0 auto;max-width:100%;font-size:11px;font-weight:600;'
-    + '  padding:3px 9px;border-radius:999px;white-space:normal;overflow-wrap:anywhere}'
-    + '#sd-analog-hint .sd-stock-wait{background:#eee;color:#777;font-weight:normal}'
-    + '#sd-analog-hint .sd-stock-yes{background:#E6F4EA;color:#1B5E20;border:1px solid #A5D6A7}'
-    + '#sd-analog-hint .sd-stock-no{background:#FDECEA;color:#B71C1C;border:1px solid #F5B7B1}'
-    + '#sd-analog-hint .sd-stock-unk{background:#f0f0f0;color:#777;font-weight:normal}'
-    + '#sd-analog-hint .sd-comp-img{flex:0 0 auto;width:38px;height:38px;object-fit:contain;'
-    + '  border:1px solid #b9ddd7;border-radius:8px;background:#fff}'
-    + '#sd-analog-hint .sd-price{background:#E8F0FE;border:1px solid #BBD3F5;border-radius:9px;'
-    + '  text-align:center;padding:4px 6px;box-sizing:border-box}'
-    + '#sd-analog-hint .sd-price-lab{font-size:10px;color:#4d6285;line-height:1.2}'
-    + '#sd-analog-hint .sd-price-val{font-size:17px;font-weight:800;color:#14418f;line-height:1.15;white-space:nowrap}'
-    + 'html.sd-modal-open #sd-analog-hint{display:none !important}';
-  var st = document.createElement('style');
-  st.textContent = css;
-  (document.head || document.documentElement).appendChild(st);
-})();
-/* ▲▲▲ МОДУЛЬ-END • lkAnalogStyles ▲▲▲ */
 /* ▼▼▼ МОДУЛЬ-START • lkQuickPickup — ➕ Швидка кнопка: нова заявка із самовивозом ▼▼▼ */
 /* ===== ➕ Швидка кнопка: нова заявка із самовивозом ===== */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
 (function lkQuickPickup(){
   'use strict';
   var SHIP_PICKUP = 43; // id способу доставки «Самовивіз»
   // організація за замовчуванням для швидкого самовивозу: ФОП Кучер Василь Богданович
-  var DEFAULT_ORG_NUM = 1;              // number:1 у списку organizationId
-  var DEFAULT_ORG_RE  = /кучер василь/i; // запасний пошук за назвою (не плутати з «Кучер Вікторія»)
 
   function setShipping(sel, val){
     try{
@@ -4310,7 +3881,7 @@ function __sdPageMain() {
     b.onclick = openPickupOrder;
     anchor.parentNode.insertBefore(b, anchor.nextSibling);
   }
-  setInterval(addBtn, 800); addBtn();
+  window.addEventListener('lkdom', addBtn); addBtn();
 
   /* ---- дві плитки швидкої оплати (готівка / термінал) для самовивозу ---- */
   // знайти пункт у відкритому select2-попапі: спершу за точним значенням number:NN, далі за текстом
@@ -4396,8 +3967,9 @@ function __sdPageMain() {
     if(isPickup && !paySet) wrap.classList.add('show');
     else wrap.classList.remove('show');
   }
-  setInterval(updatePayTiles, 800); updatePayTiles();
+  window.addEventListener('lkdom', updatePayTiles); updatePayTiles();
 })();
+}catch(e){ try{ console.warn("[SD] модуль «lkQuickPickup» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkQuickPickup ▲▲▲ */
 
 
@@ -4407,9 +3979,12 @@ function __sdPageMain() {
    ║ САМОДОСТАТНІЙ — не залежить від інших модулів і нічого з них не вживає.   ║
    ║ Правити ТІЛЬКИ в межах рамок START…END, щоб не зачепити сусідні модулі.   ║
    ╚════════════════════════════════════════════════════════════════════════╝ */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
 (function lkAutoOrgByPayment(){
   'use strict';
-  function onOrderPage(){ return /\/order\/\w+\/\d+/.test(location.hash||''); }
+  // картка заявки З номером АБО сторінка СТВОРЕННЯ (#/order/create) — на створенні
+  // організацію для самовивозу теж треба ставити (кнопка «➕ Самовивіз»)
+  function onOrderPage(){ var h=location.hash||''; return /\/order\/create/.test(h) || /\/order\/\w+\/\d+/.test(h); }
   // організація САМОЇ заявки — виключаємо поле у формі чека (.invoice-form-containers),
   // бо там теж є attr-field-name="organizationId" і воно збиває вибір
   function orgField(){
@@ -4475,7 +4050,7 @@ function __sdPageMain() {
   document.addEventListener('mousedown',blocker,true);
   document.addEventListener('click',blocker,true);
 
-  var DEBUG=true; // true → діагностика автопідстановки в консолі ([SD-Орг]) — тимчасово
+  var DEBUG=false; // true → діагностика автопідстановки в консолі ([SD-Орг])
   function dbg(){ if(!DEBUG) return; try{ console.log.apply(console,['[SD-Орг]'].concat([].slice.call(arguments))); }catch(e){} }
 
   var busy=false, attempts={}, override={};
@@ -4552,15 +4127,17 @@ function __sdPageMain() {
   }
 
   var t=null; function soon(){ clearTimeout(t); t=setTimeout(tick,500); }
-  try{ new MutationObserver(soon).observe(document.body,{childList:true,subtree:true}); }catch(e){}
+  window.addEventListener('lkdom', soon);
   window.addEventListener('hashchange',function(){ attempts={}; override={}; lastState=''; soon(); });
   dbg('модуль автопідстановки організації завантажено');
   soon();
 })();
+}catch(e){ try{ console.warn("[SD] модуль «lkAutoOrgByPayment» не запустився:", e); }catch(_){} }
 /* ╚════ ▲▲▲ МОДУЛЬ-END • lkAutoOrgByPayment ════════════════════════════════╝ */
 
 
 /* ▼▼▼ МОДУЛЬ-START • lkCheckCashbox — підстановка «каса самовивозу» у формі чека (оплата готівка/термінал) ▼▼▼ */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
 (function lkCheckCashbox(){
   'use strict';
   var DEBUG=false; // true → логи [SD-Каса-чек] у консоль
@@ -4623,17 +4200,19 @@ function __sdPageMain() {
   }
 
   var t=null; function soon(){ clearTimeout(t); t=setTimeout(trySet,400); }
-  try{ new MutationObserver(soon).observe(document.body,{childList:true,subtree:true}); }catch(e){}
+  window.addEventListener('lkdom', soon);
   window.addEventListener('hashchange', soon);
   soon();
 })();
+}catch(e){ try{ console.warn("[SD] модуль «lkCheckCashbox» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkCheckCashbox ▲▲▲ */
 
 
 /* ▼▼▼ МОДУЛЬ-START • lkSenderBySource — відправник у формі СМС за джерелом замовлення ▼▼▼ */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
 (function lkSenderBySource(){
   'use strict';
-  var DEBUG=true; // true → логи [SD-Відправник]
+  var DEBUG=false; // true → логи [SD-Відправник]
   function dbg(){ if(!DEBUG) return; try{ console.log.apply(console,['[SD-Відправник]'].concat([].slice.call(arguments))); }catch(e){} }
 
   // Мапа «нормалізоване джерело → значення option у select СМС»
@@ -4697,9 +4276,132 @@ function __sdPageMain() {
 
   var t=null;
   function soon(){ clearTimeout(t); t=setTimeout(tryApply,150); }
-  try{ new MutationObserver(soon).observe(document.body,{childList:true,subtree:true}); }catch(e){}
+  window.addEventListener('lkdom', soon);
   window.addEventListener('hashchange', function(){ appliedFor=null; soon(); });
   dbg('модуль завантажено');
   soon();
 })();
+}catch(e){ try{ console.warn("[SD] модуль «lkSenderBySource» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkSenderBySource ▲▲▲ */
+
+
+/* ▼▼▼ МОДУЛЬ-START • lkCopyNoGoods — кнопка «Копіювати заявку БЕЗ товарів» ▼▼▼ */
+(function lkCopyNoGoods(){
+  'use strict';
+  var FLAG = 'lk_copy_nogoods'; // sessionStorage: {src, ts, srcRows}
+  var W = (typeof unsafeWindow!=='undefined' && unsafeWindow) ? unsafeWindow : window;
+
+  function curOrderId(){ var m=(location.hash||'').match(/\/order\/update\/(\d+)/); return m?m[1]:null; }
+  function nativeCopyBtn(){ return document.querySelector('button[ng-click="viewModel.copyOrder($event)"]'); }
+  function scopeOf(el){ try{ return el && W.angular && W.angular.element(el).scope(); }catch(e){ return null; } }
+  // товарні рядки: a.link-product-field трапляється і в стрічці історії
+  // (запис «Видалено: …») — рядки .comment-to-order виключаємо.
+  function productRows(){
+    var out=[];
+    document.querySelectorAll('a.link-product-field').forEach(function(a){
+      var tr=a.closest('tr');
+      if(tr && !tr.classList.contains('comment-to-order')) out.push(tr);
+    });
+    return out;
+  }
+
+  function addBtn(){
+    if(document.getElementById('lk-copy-ng')) return;
+    var nb=nativeCopyBtn(); if(!nb || !nb.parentNode) return;
+    var b=document.createElement('button');
+    b.id='lk-copy-ng'; b.type='button';
+    b.className='btn btn-default';
+    b.title='Копіювати заявку БЕЗ товарів (клієнт/доставка/дані — так, товари — ні)';
+    b.textContent='🗐 без товарів';
+    b.style.marginLeft='4px';
+    b.addEventListener('click', function(e){
+      e.preventDefault();
+      var src=curOrderId(); if(!src) return;
+      try{ sessionStorage.setItem(FLAG, JSON.stringify({ src:src, ts:Date.now(), srcRows: productRows().length })); }catch(_){}
+      nb.click(); // рідне копіювання SalesDrive
+    });
+    nb.parentNode.insertBefore(b, nb.nextSibling);
+  }
+
+  var DBG=false; // замір у консоль (тег [SD-Копія]); вимкнути після налагодження
+  function log(){ if(!DBG) return; try{ var a=['%c[SD-Копія]','color:#c0392b;font-weight:bold'].concat([].slice.call(arguments)); console.log.apply(console,a); }catch(_){}}
+
+  // Модель СКОПІЙОВАНОЇ заявки шукаємо СТРОГО за id з URL. Під час копіювання в
+  // DOM якусь мить існують ОБИДВІ заявки — глобальний селектор може зачепити
+  // ПЕРВИННУ. Тому беремо лише ту viewModel, у якої order.id === id копії.
+  function copyVM(copyId){
+    var want=String(copyId), found=null;
+    function consider(sc){
+      if(found||!sc) return;
+      var s=sc, g=0;
+      while(s && !s.viewModel && g++<12) s=s.$parent;
+      var vm=s && s.viewModel;
+      if(vm && vm.order && String(vm.order.id)===want && typeof vm.updateOrder==='function') found={vm:vm, sc:s};
+    }
+    document.querySelectorAll('button[ng-click*="updateOrder"]').forEach(function(b){ consider(scopeOf(b)); });
+    if(!found) productRows().forEach(function(tr){ consider(scopeOf(tr)); });
+    return found;
+  }
+
+  // Чистка: спорожняємо масив товарів у моделі КОПІЇ й робимо ОДИН updateOrder
+  // (deleteComment по кожному товару НЕ використовуємо — SalesDrive на кожен
+  // виклик робить окрему важку операцію → повільно).
+  function cleanNow(copyId, srcId, clickTs){
+    var t0=Date.now();
+    if(String(copyId)===String(srcId)){ log('ЗАХИСТ: id копії == id первинної — пропускаю'); return false; }
+    var c=copyVM(copyId);
+    if(!c){ log('модель копії', copyId, 'ще не готова'); return false; }
+    var ord=c.vm.order;
+    // потрійний запобіжник: чистимо ЛИШЕ модель копії, ніколи не первинну
+    if(!ord || String(ord.id)!==String(copyId) || String(ord.id)===String(srcId)){ log('ЗАХИСТ: модель не відповідає копії', copyId); return false; }
+    var before=(ord.products&&ord.products.length)||0;
+    try{
+      if(Array.isArray(ord.products)) ord.products.length=0;
+      else if(ord.products && typeof ord.products==='object'){ Object.keys(ord.products).forEach(function(k){ delete ord.products[k]; }); }
+      else { log('немає order.products'); return false; }
+      var tSave=Date.now();
+      c.vm.updateOrder(ord);
+      if(c.sc && typeof c.sc.$applyAsync==='function') c.sc.$applyAsync();
+      var now=Date.now();
+      log('копія', copyId, '— очищено', before, 'товарів | від кліку:', (clickTs?(now-clickTs):'?')+'мс | чистка+save:', (now-t0)+'мс (save:', (now-tSave)+'мс)');
+      var poll0=Date.now(), tries=0;
+      (function watch(){ tries++; var left=productRows().length;
+        if(left===0){ log('DOM: товари зникли за', (Date.now()-poll0)+'мс після save'); return; }
+        if(tries>100){ log('DOM: лишилось', left, 'рядків через', (Date.now()-poll0)+'мс'); return; }
+        setTimeout(watch, 100);
+      })();
+      return true;
+    }catch(e){ log('помилка чистки:', e.message); return false; }
+  }
+
+  var busy=false, fastT=null, copyArrivedTs=0;
+  function soonFast(){ clearTimeout(fastT); fastT=setTimeout(tick, 100); } // швидке дожидання копії
+  function tick(){
+    addBtn();
+    if(busy) return;
+    var raw=null; try{ raw=sessionStorage.getItem(FLAG); }catch(_){}
+    if(!raw){ copyArrivedTs=0; return; }
+    var f=null; try{ f=JSON.parse(raw); }catch(_){}
+    if(!f || (Date.now()-f.ts)>40000){ try{ sessionStorage.removeItem(FLAG); }catch(_){} copyArrivedTs=0; return; }
+    var id=curOrderId();
+    if(!id || id===String(f.src)){ copyArrivedTs=0; soonFast(); return; }   // ще на джерелі / триває перехід
+    // чекаємо, поки МОДЕЛЬ саме копії (за збігом id) завантажить свої товари
+    var c=copyVM(id);
+    if(!c || !c.vm.order || !c.vm.order.products){ soonFast(); return; }
+    if(!copyArrivedTs) copyArrivedTs=Date.now();
+    var have=c.vm.order.products.length, need=f.srcRows||1;
+    // готово, коли товарів стільки ж, як у джерелі; або є хоч якісь і минуло >4с
+    if(have<need && !(have>0 && (Date.now()-copyArrivedTs)>4000)){ soonFast(); return; }
+    busy=true;
+    log('копія відкрилась (', id, '), товарів у моделі:', have, '| перехід:', (Date.now()-f.ts)+'мс');
+    var ok=cleanNow(id, f.src, f.ts);
+    if(ok){ try{ sessionStorage.removeItem(FLAG); }catch(_){} copyArrivedTs=0; }
+    else soonFast();
+    busy=false;
+  }
+  window.addEventListener('lkdom', function(){ setTimeout(tick, 40); });
+  window.addEventListener('hashchange', soonFast);
+  log('модуль активний (v1.74)');
+  tick();
+})();
+/* ▲▲▲ МОДУЛЬ-END • lkCopyNoGoods ▲▲▲ */
