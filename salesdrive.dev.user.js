@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      1.75
+// @version      1.76
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -3776,8 +3776,12 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 (function lkQuickPickup(){
   'use strict';
   var SHIP_PICKUP = 43; // id способу доставки «Самовивіз»
-  // нативний список УСІХ заявок самовивозу (будь-який спосіб оплати, будь-який статус)
-  var PICKUP_LIST_URL = '/ua/index.html?formId=1#/order/index?filter%5Bshipping_method%5D%5B%5D=' + SHIP_PICKUP;
+  // нативний список УСІХ заявок самовивозу (будь-який спосіб оплати).
+  // filter[statusId][]=__NOTDELETED__ — це пункт «[все]» у фільтрі статусів
+  // (інакше список за замовчуванням показує лише статуси «у процесі»).
+  var PICKUP_LIST_URL = '/ua/index.html?formId=1#/order/index?'
+    + 'filter%5BstatusId%5D%5B%5D=__NOTDELETED__'
+    + '&filter%5Bshipping_method%5D%5B%5D=' + SHIP_PICKUP;
   // організація за замовчуванням для швидкого самовивозу: ФОП Кучер Василь Богданович
 
   function setShipping(sel, val){
