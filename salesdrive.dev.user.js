@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      1.66
+// @version      1.67
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -3981,7 +3981,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 try{ // SD-ізоляція: помилка цього модуля не зупинить решту
 (function lkAutoOrgByPayment(){
   'use strict';
-  function onOrderPage(){ return /\/order\/\w+\/\d+/.test(location.hash||''); }
+  // картка заявки З номером АБО сторінка СТВОРЕННЯ (#/order/create) — на створенні
+  // організацію для самовивозу теж треба ставити (кнопка «➕ Самовивіз»)
+  function onOrderPage(){ var h=location.hash||''; return /\/order\/create/.test(h) || /\/order\/\w+\/\d+/.test(h); }
   // організація САМОЇ заявки — виключаємо поле у формі чека (.invoice-form-containers),
   // бо там теж є attr-field-name="organizationId" і воно збиває вибір
   function orgField(){
