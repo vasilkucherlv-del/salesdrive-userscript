@@ -4288,14 +4288,15 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 /* ▼▼▼ МОДУЛЬ-START • lkCopyNoGoods — кнопка «Копіювати заявку БЕЗ товарів» ▼▼▼ */
 (function lkCopyNoGoods(){
   'use strict';
-  var AUTO_SAVE = true;   // після чистки натиснути «Зберегти» (інакше товари повернуться після F5)
-  var FLAG = 'lk_copy_nogoods'; // sessionStorage: {src, ts}
+  var FLAG = 'lk_copy_nogoods'; // sessionStorage: {src, ts, srcRows}
+  var W = (typeof unsafeWindow!=='undefined' && unsafeWindow) ? unsafeWindow : window;
 
   function curOrderId(){ var m=(location.hash||'').match(/\/order\/update\/(\d+)/); return m?m[1]:null; }
   function nativeCopyBtn(){ return document.querySelector('button[ng-click="viewModel.copyOrder($event)"]'); }
-  // кнопки видалення САМЕ товарних рядків. ВАЖЛИВО: a.link-product-field є і в
-  // стрічці коментарів (напр. «Видалено: …») — рядки .comment-to-order виключаємо,
-  // інакше можна зачепити історію заявки.
+  function scopeOf(el){ try{ return el && W.angular && W.angular.element(el).scope(); }catch(e){ return null; } }
+  function orderVM(){ var el=document.querySelector('button[ng-click*="updateOrder"]'); var sc=scopeOf(el); return { sc:sc, vm: sc && sc.viewModel }; }
+  // товарні рядки: a.link-product-field трапляється і в стрічці історії
+  // (запис «Видалено: …») — рядки .comment-to-order виключаємо.
   function productRows(){
     var out=[];
     document.querySelectorAll('a.link-product-field').forEach(function(a){
@@ -4303,14 +4304,6 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       if(tr && !tr.classList.contains('comment-to-order')) out.push(tr);
     });
     return out;
-  }
-  function productDelBtn(){
-    var rows=productRows();
-    for(var i=0;i<rows.length;i++){
-      var d=rows[i].querySelector('a[ng-click*="deleteComment"], a.glyphicon-remove-circle');
-      if(d) return d;
-    }
-    return null;
   }
 
   function addBtn(){
@@ -4325,59 +4318,62 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     b.addEventListener('click', function(e){
       e.preventDefault();
       var src=curOrderId(); if(!src) return;
-      try{ sessionStorage.setItem(FLAG, JSON.stringify({ src:src, ts:Date.now() })); }catch(_){}
+      try{ sessionStorage.setItem(FLAG, JSON.stringify({ src:src, ts:Date.now(), srcRows: productRows().length })); }catch(_){}
       nb.click(); // рідне копіювання SalesDrive
     });
     nb.parentNode.insertBefore(b, nb.nextSibling);
   }
 
-  var busy=false, arrivedAt=0;
-  function rowsCount(){ return productRows().length; }
+  // МИТТЄВА чистка: видаляємо всі товарні рядки через їхні Angular-функції
+  // deleteComment за один цикл (спадання індексів, щоб не зсувались), далі — save.
+  function cleanNow(){
+    var o=orderVM();
+    if(!o.vm || typeof o.vm.updateOrder!=='function') return false;
+    var rows=productRows();
+    var delFn=null, indices=[];
+    rows.forEach(function(tr){
+      var rs=scopeOf(tr);
+      if(rs && rs.item && rs.item.index!=null) indices.push(rs.item.index);
+      if(!delFn){
+        var db=tr.querySelector('a[ng-click*="deleteComment"]');
+        var ds=db && scopeOf(db);
+        if(ds && ds.viewModel && typeof ds.viewModel.deleteComment==='function') delFn=ds.viewModel.deleteComment.bind(ds.viewModel);
+      }
+    });
+    try{
+      if(delFn && indices.length){
+        indices.sort(function(a,b){ return b-a; });
+        indices.forEach(function(ix){ try{ delFn(ix); }catch(e){} });
+      } else if(o.vm.order && o.vm.order.products){
+        o.vm.order.products.length=0; // фолбек: пряме очищення масиву товарів
+      } else { return false; }
+      o.vm.updateOrder(o.vm.order);
+      if(o.sc && typeof o.sc.$applyAsync==='function') o.sc.$applyAsync();
+      return true;
+    }catch(e){ return false; }
+  }
+
+  var busy=false, fastT=null;
+  function soonFast(){ clearTimeout(fastT); fastT=setTimeout(tick, 100); } // швидке дожидання копії
   function tick(){
     addBtn();
     if(busy) return;
     var raw=null; try{ raw=sessionStorage.getItem(FLAG); }catch(_){}
-    if(!raw){ arrivedAt=0; return; }
+    if(!raw) return;
     var f=null; try{ f=JSON.parse(raw); }catch(_){}
-    if(!f || (Date.now()-f.ts)>40000){ try{ sessionStorage.removeItem(FLAG); }catch(_){} arrivedAt=0; return; } // позначка згоріла
+    if(!f || (Date.now()-f.ts)>40000){ try{ sessionStorage.removeItem(FLAG); }catch(_){} return; }
     var id=curOrderId();
-    if(!id || id===String(f.src)){ arrivedAt=0; return; } // ще не на НОВІЙ (скопійованій) заявці
-    // ВАЖЛИВО: одразу після переходу Angular ще домальовує копію — якщо чистити
-    // зарано, CRM відновить рядки. Чекаємо ~3с стабілізації від моменту прибуття.
-    if(!arrivedAt){ arrivedAt=Date.now(); return; }
-    if(Date.now()-arrivedAt<3000) return;
-    if(!productDelBtn()) return;                    // рядки ще не домальовані
+    if(!id || id===String(f.src)){ soonFast(); return; }   // ще на джерелі / триває перехід
+    // копія має домалювати стільки ж товарів, скільки в джерелі — тоді безпечно чистити
+    var need=f.srcRows||1;
+    if(productRows().length < need){ soonFast(); return; }
     busy=true;
     try{ sessionStorage.removeItem(FLAG); }catch(_){}
-    var round=0;
-    function cleanRound(){
-      var n=0;
-      (function delNext(){
-        var d=productDelBtn();
-        if(d && n<50){ n++; d.click(); setTimeout(delNext, 350); return; }
-        // контроль: чи не відновила CRM рядки? (до 3 повторів)
-        setTimeout(function(){
-          if(rowsCount()>0 && round<3){ round++; cleanRound(); return; }
-          if(AUTO_SAVE){
-            // кнопка «Зберегти» може лишатись disabled (видалення рядка не завжди
-            // «бруднить» форму) — тому зберігаємо напряму через Angular
-            try{
-              var W=(typeof unsafeWindow!=='undefined'&&unsafeWindow)?unsafeWindow:window;
-              var sb=document.querySelector('button[ng-click*="updateOrder"]');
-              var sc=sb && W.angular && W.angular.element(sb).scope();
-              if(sc && sc.viewModel && sc.viewModel.updateOrder){
-                sc.viewModel.updateOrder(sc.viewModel.order);
-                if(sc.$applyAsync) sc.$applyAsync();
-              } else if(sb){ sb.removeAttribute('disabled'); sb.click(); }
-            }catch(e){}
-          }
-          busy=false;
-        }, 1200);
-      })();
-    }
-    cleanRound();
+    cleanNow();
+    busy=false;
   }
-  window.addEventListener('lkdom', function(){ setTimeout(tick,150); });
+  window.addEventListener('lkdom', function(){ setTimeout(tick, 40); });
+  window.addEventListener('hashchange', soonFast);
   tick();
 })();
 /* ▲▲▲ МОДУЛЬ-END • lkCopyNoGoods ▲▲▲ */
