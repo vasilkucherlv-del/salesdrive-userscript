@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      1.79
+// @version      1.80
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -2550,7 +2550,11 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     +'.lkcp{display:inline-block;margin-left:8px;padding:1px 8px;border-radius:8px;'
     +'  background:#eef3ff;border:1px solid #c5d6f7;color:#14418f;'
     +'  font:700 11.5px/1.6 sans-serif;vertical-align:middle;white-space:nowrap}'
-    +'.lkcp.wait{background:#f1f1f1;border-color:#e2e2e2;color:#999;font-weight:400}';
+    +'.lkcp.wait{background:#f1f1f1;border-color:#e2e2e2;color:#999;font-weight:400}'
+    +'.lkcp-sum{display:inline-block;margin-left:12px;padding:2px 12px;border-radius:9px;'
+    +'  background:#e6f4ea;border:1px solid #a5d6a7;color:#1b5e20;'
+    +'  font:800 14px/1.5 sans-serif;vertical-align:middle;white-space:nowrap}'
+    +'.lkcp-sum.wait{background:#f1f1f1;border-color:#e2e2e2;color:#999;font-weight:600}';
   var st=document.createElement('style'); st.textContent=css;
   (document.head||document.documentElement).appendChild(st);
 
@@ -2585,6 +2589,13 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   }
   function fmt(n){ return (Math.round(n*100)/100).toString().replace(/\.00$/,'').replace('.',',')+' ₴'; }
 
+  // кількість складника з рядка (колонка «К-ть»); типово 1
+  function qtyOf(tr){
+    var c=tr.querySelector('.td-amount .editing-hide');
+    var v=c && parseFloat((c.textContent||'').replace(',','.').replace(/\s+/g,''));
+    return (v && v>0) ? v : 1;
+  }
+
   function decorate(cell){
     if(cell.querySelector('.lkcp')) return;          // вже додано
     var sku=skuOf(cell); if(!sku) return;
@@ -2594,8 +2605,38 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     if(codeSpan && codeSpan.parentNode) codeSpan.insertAdjacentElement('afterend', badge);
     else { var a=cell.querySelector('a.link-product-field'); if(a) a.insertAdjacentElement('afterend', badge); else cell.appendChild(badge); }
     priceBySku(sku).then(function(p){
-      if(p==null || p===0){ try{ badge.remove(); }catch(e){} return; }
-      badge.className='lkcp'; badge.textContent='Роздріб: '+fmt(p);
+      if(p==null || p===0){ try{ badge.remove(); }catch(e){} }
+      else { badge.className='lkcp'; badge.textContent='Роздріб: '+fmt(p); }
+      updateTotals();
+    });
+  }
+
+  // підсумок «сума складників за роздрібом» у заголовку «Товари в комплекті»
+  function h3For(table){
+    var box=table.closest('div[ng-show*="isComplect"]') || table.parentElement && table.parentElement.parentElement;
+    var h=box && box.querySelector('h3');
+    if(h) return h;
+    var all=document.querySelectorAll('h3');
+    for(var i=0;i<all.length;i++){ if(/Товари в комплект/i.test(all[i].textContent||'')) return all[i]; }
+    return null;
+  }
+  function updateTotals(){
+    document.querySelectorAll('table.products-complect-table').forEach(function(table){
+      var h=h3For(table); if(!h) return;
+      var sum=0, known=0, total=0;
+      table.querySelectorAll('tbody tr').forEach(function(tr){
+        var a=tr.querySelector('a.link-product-field'); if(!a) return;
+        var cell=a.closest('.editing-hide')||a.parentElement;
+        var sku=skuOf(cell); if(!sku) return;
+        total++;
+        var p=cache[sku];
+        if(typeof p==='number' && p>0){ sum+=p*qtyOf(tr); known++; }
+      });
+      var badge=h.querySelector('.lkcp-sum');
+      if(!total){ if(badge) badge.remove(); return; }
+      if(!badge){ badge=document.createElement('span'); badge.className='lkcp-sum'; h.appendChild(badge); }
+      if(known<total){ badge.className='lkcp-sum wait'; badge.textContent='Сума за роздрібом: '+fmt(sum)+' …'; }
+      else { badge.className='lkcp-sum'; badge.textContent='Сума за роздрібом: '+fmt(sum); }
     });
   }
 
@@ -2605,6 +2646,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       var cell=a.closest('.editing-hide')||a.parentElement;
       if(cell) decorate(cell);
     });
+    updateTotals();
   }
   var t=null; function scanSoon(){ clearTimeout(t); t=setTimeout(scan,300); }
   window.addEventListener('lkdom', scanSoon);
