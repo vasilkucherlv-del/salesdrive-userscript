@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      1.86
+// @version      1.87
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -3478,9 +3478,35 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       }
     });
   }
+  // SWR-кеш опорного залишку: каса показує його МИТТЄВО з кешу, а звіряння з
+  // Railway (США) йде у фоні — тож відкриття/перемикання періодів не чекає мережу.
+  var _baseCache=null; // {baseline, ts}
+  try{ var _bs=GM_getValue('lk_cash_base_v1',null); if(_bs){ _baseCache=(typeof _bs==='string')?JSON.parse(_bs):_bs; } }catch(e){}
+  function saveBase(){ try{ GM_setValue('lk_cash_base_v1', JSON.stringify(_baseCache)); }catch(e){} }
+  function fetchBaselineNet(){
+    return gmGet(BARCODE_URL+'/api/cash-baseline?token='+encodeURIComponent(BARCODE_TOKEN))
+      .then(function(t){ var d=JSON.parse(t); return (d&&d.ok)?d.baseline:null; })
+      .catch(function(){ return null; });
+  }
+  var _baseRevBusy=false;
+  function revalidateBaseline(){
+    if(_baseRevBusy) return; _baseRevBusy=true;
+    fetchBaselineNet().then(function(b){
+      _baseRevBusy=false;
+      if(b==null) return;
+      var changed = !_baseCache || JSON.stringify(_baseCache.baseline)!==JSON.stringify(b);
+      _baseCache={baseline:b, ts:Date.now()}; saveBase();
+      if(changed && document.getElementById('lk-cash-box')) render(); // дані змінились — перемалювати
+    });
+  }
   async function getBaseline(){
-    try{ var t=await gmGet(BARCODE_URL+'/api/cash-baseline?token='+encodeURIComponent(BARCODE_TOKEN));
-      var d=JSON.parse(t); return d&&d.ok?d.baseline:null; }catch(e){ return null; }
+    if(_baseCache && _baseCache.baseline!=null){
+      if(Date.now()-(_baseCache.ts||0) >= 20000) revalidateBaseline(); // застаріле — звіряємо у фоні
+      return _baseCache.baseline;                                       // але віддаємо одразу
+    }
+    var b=await fetchBaselineNet();                                     // перший раз — чекаємо мережу
+    if(b!=null){ _baseCache={baseline:b, ts:Date.now()}; saveBase(); }
+    return b;
   }
   async function setBaseline(amount,pin){
     // amount = ОПОРНИЙ залишок на початок дня перерахунку (вже за мінусом сьогоднішніх
@@ -3488,7 +3514,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     var nowStr=ymdhms(new Date());
     var body={amount:amount,date:nowStr,ts:nowStr,by:'',pin:pin};
     var t=await gmPost(BARCODE_URL+'/api/cash-baseline?token='+encodeURIComponent(BARCODE_TOKEN),body);
-    var d=JSON.parse(t); if(!d.ok) throw new Error(d.error||'err'); return d.baseline;
+    var d=JSON.parse(t); if(!d.ok) throw new Error(d.error||'err');
+    _baseCache={baseline:d.baseline, ts:Date.now()}; saveBase(); // одразу в кеш — без зайвого запиту
+    return d.baseline;
   }
 
   /* ---- продажі ---- */
