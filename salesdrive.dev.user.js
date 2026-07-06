@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      1.81
+// @version      1.82
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -2559,7 +2559,11 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     +'.lkcp-chip{display:inline-flex;align-items:center;gap:6px;padding:2px 10px;border-radius:8px;'
     +'  background:#f4f6fb;border:1px solid #d6ddef;color:#2a3b63;'
     +'  font:600 12.5px/1.5 sans-serif;white-space:nowrap}'
-    +'.lkcp-chip .l{color:#7a869f;font-weight:700}';
+    +'.lkcp-chip .l{color:#7a869f;font-weight:700}'
+    +'.lkcp-sum,.lkcp-chip{cursor:pointer}'
+    +'.lkcp-sum:hover,.lkcp-chip:hover{filter:brightness(.97)}'
+    +'.lkcp-sum.lkcp-copied,.lkcp-chip.lkcp-copied{outline:2px solid #2e7d32;background:#d7f0dc}'
+    +'.lkcp-copied::after{content:" ✓";color:#2e7d32;font-weight:800}';
   var st=document.createElement('style'); st.textContent=css;
   (document.head||document.documentElement).appendChild(st);
 
@@ -2609,6 +2613,24 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     return sku;
   }
   function fmt(n){ return (Math.round(n*100)/100).toString().replace(/\.00$/,'').replace('.',',')+' ₴'; }
+  function fmtInt(n){ return Math.round(Number(n)||0)+' ₴'; } // підсумки — до цілих
+
+  // копіювання суми в буфер + коротка індикація «✓»
+  function doCopy(text){
+    try{ if(typeof GM_setClipboard==='function'){ GM_setClipboard(String(text)); return true; } }catch(e){}
+    try{ navigator.clipboard.writeText(String(text)); return true; }catch(e){}
+    return false;
+  }
+  function flashCopied(el){
+    el.classList.add('lkcp-copied');
+    setTimeout(function(){ try{ el.classList.remove('lkcp-copied'); }catch(e){} }, 1000);
+  }
+  // делегований клік: копіює число з data-copy елемента (без «₴»)
+  function onCopyClick(e){
+    var el=e.target.closest('[data-copy]'); if(!el) return;
+    e.preventDefault(); e.stopPropagation();
+    if(doCopy(el.getAttribute('data-copy'))) flashCopied(el);
+  }
 
   // кількість складника з рядка (колонка «К-ть»); типово 1
   function qtyOf(tr){
@@ -2667,18 +2689,21 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       items.forEach(function(it){ var info=cache[it.sku]; if(info!=='wait' && info!==undefined) known++; });
       var pend=(known<items.length);
       function sumFor(tierId){ var s=0; items.forEach(function(it){ var info=cache[it.sku]; if(info!=='wait' && info!==undefined) s+=tierValue(info,tierId)*it.qty; }); return s; }
-      // роздрібна — головний зелений бейдж
+      // роздрібна — головний зелений бейдж (клік копіює суму)
+      var retail=sumFor('retail');
       var badge=h.querySelector('.lkcp-sum');
-      if(!badge){ badge=document.createElement('span'); badge.className='lkcp-sum'; h.appendChild(badge); }
+      if(!badge){ badge=document.createElement('span'); badge.className='lkcp-sum'; badge.title='Натисніть, щоб скопіювати суму'; badge.addEventListener('click', onCopyClick); h.appendChild(badge); }
       badge.className='lkcp-sum'+(pend?' wait':'');
-      badge.textContent='Сума за роздрібом: '+fmt(sumFor('retail'))+(pend?' …':'');
-      // типи цін — чипи під заголовком
+      badge.setAttribute('data-copy', String(Math.round(retail)));
+      badge.textContent='Сума за роздрібом: '+fmtInt(retail)+(pend?' …':'');
+      // типи цін — чипи під заголовком (клік по чипу копіює його суму)
       if(TIER_NAMES){
-        if(!box){ box=document.createElement('div'); box.className='lkcp-tiers'; h.insertAdjacentElement('afterend', box); }
+        if(!box){ box=document.createElement('div'); box.className='lkcp-tiers'; box.addEventListener('click', onCopyClick); h.insertAdjacentElement('afterend', box); }
         var ids=Object.keys(TIER_NAMES).sort(function(a,b){ return Number(a)-Number(b); });
         var html='';
         ids.forEach(function(id){
-          html+='<span class="lkcp-chip"><span class="l">'+esc(TIER_NAMES[id])+'</span>'+fmt(sumFor(id))+(pend?' …':'')+'</span>';
+          var s=sumFor(id);
+          html+='<span class="lkcp-chip" data-copy="'+Math.round(s)+'" title="Натисніть, щоб скопіювати суму"><span class="l">'+esc(TIER_NAMES[id])+'</span>'+fmtInt(s)+(pend?' …':'')+'</span>';
         });
         box.innerHTML=html;
       }
