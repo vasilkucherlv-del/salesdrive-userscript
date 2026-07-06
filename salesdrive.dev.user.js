@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      1.80
+// @version      1.81
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -2554,13 +2554,21 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     +'.lkcp-sum{display:inline-block;margin-left:12px;padding:2px 12px;border-radius:9px;'
     +'  background:#e6f4ea;border:1px solid #a5d6a7;color:#1b5e20;'
     +'  font:800 14px/1.5 sans-serif;vertical-align:middle;white-space:nowrap}'
-    +'.lkcp-sum.wait{background:#f1f1f1;border-color:#e2e2e2;color:#999;font-weight:600}';
+    +'.lkcp-sum.wait{background:#f1f1f1;border-color:#e2e2e2;color:#999;font-weight:600}'
+    +'.lkcp-tiers{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0 4px}'
+    +'.lkcp-chip{display:inline-flex;align-items:center;gap:6px;padding:2px 10px;border-radius:8px;'
+    +'  background:#f4f6fb;border:1px solid #d6ddef;color:#2a3b63;'
+    +'  font:600 12.5px/1.5 sans-serif;white-space:nowrap}'
+    +'.lkcp-chip .l{color:#7a869f;font-weight:700}';
   var st=document.createElement('style'); st.textContent=css;
   (document.head||document.documentElement).appendChild(st);
 
-  var cache=Object.create(null); // sku -> ціна(number|null) або 'wait'
+  var cache=Object.create(null); // sku -> {retail:number|null, pt:{typeId:price}} | null | 'wait'
+  var TIER_NAMES=null, tierBusy=false; // {typeId: назва} з meta.priceTypes
 
-  function priceBySku(sku){
+  function esc(s){ return String(s).replace(/[&<>"]/g,function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
+
+  function infoBySku(sku){
     if(sku in cache && cache[sku]!=='wait') return Promise.resolve(cache[sku]);
     cache[sku]='wait';
     var url='/products/data/?active=1&filter[sku]='+encodeURIComponent(sku)+'&formId=1';
@@ -2571,10 +2579,23 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
         var row=null, c=String(sku).trim();
         if(rows) for(var i=0;i<rows.length;i++){ if(String(rows[i].sku).trim()===c){ row=rows[i]; break; } }
         if(!row && rows && rows.length) row=rows[0];
-        var p=(row && row.defaultPrice!=null) ? Number(row.defaultPrice) : null;
-        cache[sku]=p; return p;
+        var info=row ? { retail:(row.defaultPrice!=null?Number(row.defaultPrice):null), pt:(row.priceType||{}) } : null;
+        cache[sku]=info; return info;
       })
       .catch(function(){ cache[sku]=null; return null; });
+  }
+
+  // назви типів цін (Великий опт / середній опт / майстри / …) — з поточного товару
+  function ensureTierNames(){
+    if(TIER_NAMES || tierBusy) return;
+    var m=(location.hash||'').match(/\/product\/update\/(\d+)/); if(!m) return;
+    tierBusy=true;
+    fetch('/products/'+m[1]+'/?formId=1',{credentials:'include',headers:{'accept':'application/json, text/plain, */*','when':'product/index'}})
+      .then(function(r){ return r.ok?r.json():null; })
+      .then(function(j){ var pt=j&&j.response&&j.response.meta&&j.response.meta.priceTypes;
+        if(pt && typeof pt==='object' && Object.keys(pt).length){ TIER_NAMES=pt; updateTotals(); } })
+      .catch(function(){})
+      .then(function(){ tierBusy=false; });
   }
 
   // код товару з рядка — спан «(NNNN)», ігноруючи наші розгорнуті блоки
@@ -2595,6 +2616,13 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     var v=c && parseFloat((c.textContent||'').replace(',','.').replace(/\s+/g,''));
     return (v && v>0) ? v : 1;
   }
+  // ціна складника за типом; якщо тип не заданий (0/нема) — беремо роздрібну
+  function tierValue(info, tierId){
+    if(!info) return 0;
+    var p = (tierId==='retail') ? info.retail : (info.pt && info.pt[tierId]);
+    if(!(p>0)) p = info.retail;
+    return (p>0) ? Number(p) : 0;
+  }
 
   function decorate(cell){
     if(cell.querySelector('.lkcp')) return;          // вже додано
@@ -2604,14 +2632,14 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       .find(function(sp){ return /^\([\w\-]+\)$/.test((sp.textContent||'').trim()); });
     if(codeSpan && codeSpan.parentNode) codeSpan.insertAdjacentElement('afterend', badge);
     else { var a=cell.querySelector('a.link-product-field'); if(a) a.insertAdjacentElement('afterend', badge); else cell.appendChild(badge); }
-    priceBySku(sku).then(function(p){
-      if(p==null || p===0){ try{ badge.remove(); }catch(e){} }
+    infoBySku(sku).then(function(info){
+      var p=info && info.retail;
+      if(!(p>0)){ try{ badge.remove(); }catch(e){} }
       else { badge.className='lkcp'; badge.textContent='Роздріб: '+fmt(p); }
       updateTotals();
     });
   }
 
-  // підсумок «сума складників за роздрібом» у заголовку «Товари в комплекті»
   function h3For(table){
     var box=table.closest('div[ng-show*="isComplect"]') || table.parentElement && table.parentElement.parentElement;
     var h=box && box.querySelector('h3');
@@ -2620,23 +2648,40 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     for(var i=0;i<all.length;i++){ if(/Товари в комплект/i.test(all[i].textContent||'')) return all[i]; }
     return null;
   }
+  // підсумки в заголовку «Товари в комплекті»: роздрібна сума + суми за типами цін
   function updateTotals(){
+    ensureTierNames();
     document.querySelectorAll('table.products-complect-table').forEach(function(table){
       var h=h3For(table); if(!h) return;
-      var sum=0, known=0, total=0;
+      var items=[];
       table.querySelectorAll('tbody tr').forEach(function(tr){
         var a=tr.querySelector('a.link-product-field'); if(!a) return;
         var cell=a.closest('.editing-hide')||a.parentElement;
         var sku=skuOf(cell); if(!sku) return;
-        total++;
-        var p=cache[sku];
-        if(typeof p==='number' && p>0){ sum+=p*qtyOf(tr); known++; }
+        items.push({ sku:sku, qty:qtyOf(tr) });
       });
+      var box=h.parentNode && h.parentNode.querySelector('.lkcp-tiers');
+      if(!items.length){ var b0=h.querySelector('.lkcp-sum'); if(b0) b0.remove(); if(box) box.remove(); return; }
+      // скільки складників уже завантажили ціну
+      var known=0;
+      items.forEach(function(it){ var info=cache[it.sku]; if(info!=='wait' && info!==undefined) known++; });
+      var pend=(known<items.length);
+      function sumFor(tierId){ var s=0; items.forEach(function(it){ var info=cache[it.sku]; if(info!=='wait' && info!==undefined) s+=tierValue(info,tierId)*it.qty; }); return s; }
+      // роздрібна — головний зелений бейдж
       var badge=h.querySelector('.lkcp-sum');
-      if(!total){ if(badge) badge.remove(); return; }
       if(!badge){ badge=document.createElement('span'); badge.className='lkcp-sum'; h.appendChild(badge); }
-      if(known<total){ badge.className='lkcp-sum wait'; badge.textContent='Сума за роздрібом: '+fmt(sum)+' …'; }
-      else { badge.className='lkcp-sum'; badge.textContent='Сума за роздрібом: '+fmt(sum); }
+      badge.className='lkcp-sum'+(pend?' wait':'');
+      badge.textContent='Сума за роздрібом: '+fmt(sumFor('retail'))+(pend?' …':'');
+      // типи цін — чипи під заголовком
+      if(TIER_NAMES){
+        if(!box){ box=document.createElement('div'); box.className='lkcp-tiers'; h.insertAdjacentElement('afterend', box); }
+        var ids=Object.keys(TIER_NAMES).sort(function(a,b){ return Number(a)-Number(b); });
+        var html='';
+        ids.forEach(function(id){
+          html+='<span class="lkcp-chip"><span class="l">'+esc(TIER_NAMES[id])+'</span>'+fmt(sumFor(id))+(pend?' …':'')+'</span>';
+        });
+        box.innerHTML=html;
+      }
     });
   }
 
