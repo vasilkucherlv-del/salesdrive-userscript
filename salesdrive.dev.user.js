@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      1.78
+// @version      1.79
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -25,6 +25,7 @@
      • lkNaboryInline  — позначка «входить у набори» в рядках заявки
      • lkAnalogInline  — інлайн-значок «🔁 аналог» у рядку товару
      • lkModalKits     — рядок «Входить у набори» в картці товару (модалка)
+     • lkComplectPrice — роздрібна ціна біля товару в таблиці «Товари в комплекті»
      • lkUpsellRedesign— компактний вигляд картки допродажу
      • lkStockPayWarn  — попередження: передоплата + малий залишок
      • lkCashRegister  — 💰 Каса самовивозу
@@ -2536,6 +2537,81 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 })();
 }catch(e){ try{ console.warn("[SD] модуль «lkNaboryInline» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkNaboryInline ▲▲▲ */
+
+
+/* ▼▼▼ МОДУЛЬ-START • lkComplectPrice — роздрібна ціна товару в таблиці «Товари в комплекті» ▼▼▼ */
+/* ===== Показує роздрібну ціну (defaultPrice) біля кожного товару-складника
+   у таблиці комплекту на картці товару. Джерело — той самий домен
+   (/products/data/?filter[sku]=…), тож звичайний fetch (працює і без TM). ===== */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
+(function lkComplectPrice(){
+  'use strict';
+  var css=''
+    +'.lkcp{display:inline-block;margin-left:8px;padding:1px 8px;border-radius:8px;'
+    +'  background:#eef3ff;border:1px solid #c5d6f7;color:#14418f;'
+    +'  font:700 11.5px/1.6 sans-serif;vertical-align:middle;white-space:nowrap}'
+    +'.lkcp.wait{background:#f1f1f1;border-color:#e2e2e2;color:#999;font-weight:400}';
+  var st=document.createElement('style'); st.textContent=css;
+  (document.head||document.documentElement).appendChild(st);
+
+  var cache=Object.create(null); // sku -> ціна(number|null) або 'wait'
+
+  function priceBySku(sku){
+    if(sku in cache && cache[sku]!=='wait') return Promise.resolve(cache[sku]);
+    cache[sku]='wait';
+    var url='/products/data/?active=1&filter[sku]='+encodeURIComponent(sku)+'&formId=1';
+    return fetch(url,{credentials:'include',headers:{'accept':'application/json, text/plain, */*','when':'product/index'}})
+      .then(function(r){ return r.ok?r.json():null; })
+      .then(function(j){
+        var rows=j&&j.response&&j.response.meta&&j.response.meta.option&&j.response.meta.option.option;
+        var row=null, c=String(sku).trim();
+        if(rows) for(var i=0;i<rows.length;i++){ if(String(rows[i].sku).trim()===c){ row=rows[i]; break; } }
+        if(!row && rows && rows.length) row=rows[0];
+        var p=(row && row.defaultPrice!=null) ? Number(row.defaultPrice) : null;
+        cache[sku]=p; return p;
+      })
+      .catch(function(){ cache[sku]=null; return null; });
+  }
+
+  // код товару з рядка — спан «(NNNN)», ігноруючи наші розгорнуті блоки
+  function skuOf(cell){
+    var sku='';
+    cell.querySelectorAll('span').forEach(function(sp){
+      if(sp.closest('.lkan-exp,.lknb-exp,.lkmk-exp,.lkcp')) return;
+      var m=(sp.textContent||'').trim().match(/^\(([\w\-]+)\)$/);
+      if(m) sku=m[1];
+    });
+    return sku;
+  }
+  function fmt(n){ return (Math.round(n*100)/100).toString().replace(/\.00$/,'').replace('.',',')+' ₴'; }
+
+  function decorate(cell){
+    if(cell.querySelector('.lkcp')) return;          // вже додано
+    var sku=skuOf(cell); if(!sku) return;
+    var badge=document.createElement('span'); badge.className='lkcp wait'; badge.textContent='роздріб…';
+    var codeSpan=[].slice.call(cell.querySelectorAll('span')).reverse().filter(function(sp){ return !sp.closest('.lkan-exp,.lknb-exp,.lkmk-exp'); })
+      .find(function(sp){ return /^\([\w\-]+\)$/.test((sp.textContent||'').trim()); });
+    if(codeSpan && codeSpan.parentNode) codeSpan.insertAdjacentElement('afterend', badge);
+    else { var a=cell.querySelector('a.link-product-field'); if(a) a.insertAdjacentElement('afterend', badge); else cell.appendChild(badge); }
+    priceBySku(sku).then(function(p){
+      if(p==null || p===0){ try{ badge.remove(); }catch(e){} return; }
+      badge.className='lkcp'; badge.textContent='Роздріб: '+fmt(p);
+    });
+  }
+
+  // тільки таблиця складників комплекту (щоб не чіпати рядки заявки)
+  function scan(){
+    document.querySelectorAll('table.products-complect-table a.link-product-field').forEach(function(a){
+      var cell=a.closest('.editing-hide')||a.parentElement;
+      if(cell) decorate(cell);
+    });
+  }
+  var t=null; function scanSoon(){ clearTimeout(t); t=setTimeout(scan,300); }
+  window.addEventListener('lkdom', scanSoon);
+  scan();
+})();
+}catch(e){ try{ console.warn("[SD] модуль «lkComplectPrice» не запустився:", e); }catch(_){} }
+/* ▲▲▲ МОДУЛЬ-END • lkComplectPrice ▲▲▲ */
 
 
 /* ▼▼▼ МОДУЛЬ-START • lkAnalogInline — Інлайн-значок «🔁 аналог» у рядку товару ▼▼▼ */
