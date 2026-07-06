@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.78
+// @version      1.85
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -25,6 +25,7 @@
      • lkNaboryInline  — позначка «входить у набори» в рядках заявки
      • lkAnalogInline  — інлайн-значок «🔁 аналог» у рядку товару
      • lkModalKits     — рядок «Входить у набори» в картці товару (модалка)
+     • lkComplectPrice — роздрібна ціна біля товару в таблиці «Товари в комплекті»
      • lkUpsellRedesign— компактний вигляд картки допродажу
      • lkStockPayWarn  — попередження: передоплата + малий залишок
      • lkCashRegister  — 💰 Каса самовивозу
@@ -2538,6 +2539,223 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 /* ▲▲▲ МОДУЛЬ-END • lkNaboryInline ▲▲▲ */
 
 
+/* ▼▼▼ МОДУЛЬ-START • lkComplectPrice — роздрібна ціна товару в таблиці «Товари в комплекті» ▼▼▼ */
+/* ===== Показує роздрібну ціну (defaultPrice) біля кожного товару-складника
+   у таблиці комплекту на картці товару. Джерело — той самий домен
+   (/products/data/?filter[sku]=…), тож звичайний fetch (працює і без TM). ===== */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
+(function lkComplectPrice(){
+  'use strict';
+  var css=''
+    +'.lkcp{display:inline-block;margin-left:8px;padding:1px 8px;border-radius:8px;'
+    +'  background:#eef3ff;border:1px solid #c5d6f7;color:#14418f;'
+    +'  font:700 11.5px/1.6 sans-serif;vertical-align:middle;white-space:nowrap}'
+    +'.lkcp.wait{background:#f1f1f1;border-color:#e2e2e2;color:#999;font-weight:400}'
+    +'.lkcp-sum{display:inline-block;margin-left:12px;padding:2px 12px;border-radius:9px;'
+    +'  background:#e6f4ea;border:1px solid #a5d6a7;color:#1b5e20;'
+    +'  font:800 14px/1.5 sans-serif;vertical-align:middle;white-space:nowrap}'
+    +'.lkcp-sum.wait{background:#f1f1f1;border-color:#e2e2e2;color:#999;font-weight:600}'
+    +'.lkcp-tiers{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0 4px}'
+    +'.lkcp-chip{display:inline-flex;align-items:center;gap:6px;padding:2px 10px;border-radius:8px;'
+    +'  background:#f4f6fb;border:1px solid #d6ddef;color:#2a3b63;'
+    +'  font:600 12.5px/1.5 sans-serif;white-space:nowrap}'
+    +'.lkcp-chip .l{color:#7a869f;font-weight:700}'
+    +'.lkcp-sum,.lkcp-chip{cursor:pointer}'
+    +'.lkcp-sum:hover,.lkcp-chip:hover{filter:brightness(.97)}'
+    +'.lkcp-sum.lkcp-copied,.lkcp-chip.lkcp-copied{outline:2px solid #2e7d32;background:#d7f0dc}'
+    +'.lkcp-copied::after{content:" ✓";color:#2e7d32;font-weight:800}';
+  var st=document.createElement('style'); st.textContent=css;
+  (document.head||document.documentElement).appendChild(st);
+
+  var cache=Object.create(null); // sku -> {retail:number|null, pt:{typeId:price}} | null | 'wait'
+  var TIER_NAMES=null, tierBusy=false; // {typeId: назва} з meta.priceTypes
+
+  function esc(s){ return String(s).replace(/[&<>"]/g,function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
+
+  function infoBySku(sku){
+    if(sku in cache && cache[sku]!=='wait') return Promise.resolve(cache[sku]);
+    cache[sku]='wait';
+    var url='/products/data/?active=1&filter[sku]='+encodeURIComponent(sku)+'&formId=1';
+    return fetch(url,{credentials:'include',headers:{'accept':'application/json, text/plain, */*','when':'product/index'}})
+      .then(function(r){ return r.ok?r.json():null; })
+      .then(function(j){
+        var rows=j&&j.response&&j.response.meta&&j.response.meta.option&&j.response.meta.option.option;
+        var row=null, c=String(sku).trim();
+        if(rows) for(var i=0;i<rows.length;i++){ if(String(rows[i].sku).trim()===c){ row=rows[i]; break; } }
+        if(!row && rows && rows.length) row=rows[0];
+        var info=row ? { retail:(row.defaultPrice!=null?Number(row.defaultPrice):null), pt:(row.priceType||{}) } : null;
+        cache[sku]=info; return info;
+      })
+      .catch(function(){ cache[sku]=null; return null; });
+  }
+
+  // назви типів цін (Великий опт / середній опт / майстри / …) — з поточного товару
+  function ensureTierNames(){
+    if(TIER_NAMES || tierBusy) return;
+    var m=(location.hash||'').match(/\/product\/update\/(\d+)/); if(!m) return;
+    tierBusy=true;
+    fetch('/products/'+m[1]+'/?formId=1',{credentials:'include',headers:{'accept':'application/json, text/plain, */*','when':'product/index'}})
+      .then(function(r){ return r.ok?r.json():null; })
+      .then(function(j){ var pt=j&&j.response&&j.response.meta&&j.response.meta.priceTypes;
+        if(pt && typeof pt==='object' && Object.keys(pt).length){ TIER_NAMES=pt; updateTotals(); } })
+      .catch(function(){})
+      .then(function(){ tierBusy=false; });
+  }
+
+  // код товару з рядка — спан «(NNNN)», ігноруючи наші розгорнуті блоки
+  function skuOf(cell){
+    var sku='';
+    cell.querySelectorAll('span').forEach(function(sp){
+      if(sp.closest('.lkan-exp,.lknb-exp,.lkmk-exp,.lkcp')) return;
+      var m=(sp.textContent||'').trim().match(/^\(([\w\-]+)\)$/);
+      if(m) sku=m[1];
+    });
+    return sku;
+  }
+  function fmt(n){ return (Math.round(n*100)/100).toString().replace(/\.00$/,'').replace('.',',')+' ₴'; }
+  function fmtInt(n){ return Math.round(Number(n)||0)+' ₴'; } // підсумки — до цілих
+  // порядок чипів: великий опт → середній опт → майстри → решта
+  function tierRank(name){
+    var n=(name||'').toLowerCase();
+    if(/велик/.test(n)) return 1;
+    if(/серед/.test(n)) return 2;
+    if(/майст/.test(n)) return 3;
+    return 9;
+  }
+
+  // копіювання суми в буфер + коротка індикація «✓»
+  function doCopy(text){
+    try{ if(typeof GM_setClipboard==='function'){ GM_setClipboard(String(text)); return true; } }catch(e){}
+    try{ navigator.clipboard.writeText(String(text)); return true; }catch(e){}
+    return false;
+  }
+  function flashCopied(el){
+    el.classList.add('lkcp-copied');
+    setTimeout(function(){ try{ el.classList.remove('lkcp-copied'); }catch(e){} }, 1000);
+  }
+  // делегований клік: копіює число з data-copy елемента (без «₴»)
+  function onCopyClick(e){
+    var el=e.target.closest('[data-copy]'); if(!el) return;
+    e.preventDefault(); e.stopPropagation();
+    if(doCopy(el.getAttribute('data-copy'))) flashCopied(el);
+  }
+
+  // кількість складника з рядка; надійно — з Angular-моделі (item.amount),
+  // бо колонка «К-ть» у режимі перегляду не має .editing-hide і поруч є «Склад».
+  function qtyOf(tr){
+    try{
+      var W=(typeof unsafeWindow!=='undefined'&&unsafeWindow)||window;
+      var sc=W.angular && W.angular.element(tr).scope();
+      if(sc && sc.item && sc.item.amount!=null){ var q=parseFloat(sc.item.amount); if(q>0) return q; }
+    }catch(e){}
+    var c=tr.querySelector('.td-amount .editing-hide');
+    var v=c && parseFloat((c.textContent||'').replace(',','.').replace(/\s+/g,''));
+    return (v && v>0) ? v : 1;
+  }
+  // усі таблиці комплекту на сторінці (і режим редагування, і перегляду)
+  function kitTables(){
+    var out=[];
+    document.querySelectorAll('table.products-complect-table, div[ng-show*="isComplect"] table').forEach(function(tb){
+      if(out.indexOf(tb)<0 && tb.querySelector('a.link-product-field')) out.push(tb);
+    });
+    return out;
+  }
+  // ціна складника за типом; якщо тип не заданий (0/нема) — беремо роздрібну
+  function tierValue(info, tierId){
+    if(!info) return 0;
+    var p = (tierId==='retail') ? info.retail : (info.pt && info.pt[tierId]);
+    if(!(p>0)) p = info.retail;
+    return (p>0) ? Number(p) : 0;
+  }
+
+  function decorate(cell){
+    if(cell.querySelector('.lkcp')) return;          // вже додано
+    var sku=skuOf(cell); if(!sku) return;
+    var badge=document.createElement('span'); badge.className='lkcp wait'; badge.textContent='роздріб…';
+    var codeSpan=[].slice.call(cell.querySelectorAll('span')).reverse().filter(function(sp){ return !sp.closest('.lkan-exp,.lknb-exp,.lkmk-exp'); })
+      .find(function(sp){ return /^\([\w\-]+\)$/.test((sp.textContent||'').trim()); });
+    if(codeSpan && codeSpan.parentNode) codeSpan.insertAdjacentElement('afterend', badge);
+    else { var a=cell.querySelector('a.link-product-field'); if(a) a.insertAdjacentElement('afterend', badge); else cell.appendChild(badge); }
+    infoBySku(sku).then(function(info){
+      var p=info && info.retail;
+      if(!(p>0)){ try{ badge.remove(); }catch(e){} }
+      else { badge.className='lkcp'; badge.textContent='Роздріб: '+fmt(p); }
+      updateTotals();
+    });
+  }
+
+  function h3For(table){
+    var box=table.closest('div[ng-show*="isComplect"]') || table.parentElement && table.parentElement.parentElement;
+    var h=box && box.querySelector('h3');
+    if(h) return h;
+    var all=document.querySelectorAll('h3');
+    for(var i=0;i<all.length;i++){ if(/Товари в комплект/i.test(all[i].textContent||'')) return all[i]; }
+    return null;
+  }
+  // підсумки в заголовку «Товари в комплекті»: роздрібна сума + суми за типами цін
+  function updateTotals(){
+    ensureTierNames();
+    kitTables().forEach(function(table){
+      // чипи опт/майстри — лише в режимі редагування картки товару;
+      // у режимі перегляду (без products-complect-table) — тільки роздрібна сума.
+      var showTiers=table.classList.contains('products-complect-table');
+      var h=h3For(table); if(!h) return;
+      var items=[];
+      table.querySelectorAll('tbody tr').forEach(function(tr){
+        var a=tr.querySelector('a.link-product-field'); if(!a) return;
+        var cell=a.closest('.editing-hide')||a.parentElement;
+        var sku=skuOf(cell); if(!sku) return;
+        items.push({ sku:sku, qty:qtyOf(tr) });
+      });
+      var box=h.parentNode && h.parentNode.querySelector('.lkcp-tiers');
+      if(!items.length){ var b0=h.querySelector('.lkcp-sum'); if(b0) b0.remove(); if(box) box.remove(); return; }
+      // скільки складників уже завантажили ціну
+      var known=0;
+      items.forEach(function(it){ var info=cache[it.sku]; if(info!=='wait' && info!==undefined) known++; });
+      var pend=(known<items.length);
+      function sumFor(tierId){ var s=0; items.forEach(function(it){ var info=cache[it.sku]; if(info!=='wait' && info!==undefined) s+=tierValue(info,tierId)*it.qty; }); return s; }
+      // роздрібна — головний зелений бейдж (клік копіює суму)
+      var retail=sumFor('retail');
+      var badge=h.querySelector('.lkcp-sum');
+      if(!badge){ badge=document.createElement('span'); badge.className='lkcp-sum'; badge.title='Натисніть, щоб скопіювати суму'; badge.addEventListener('click', onCopyClick); h.appendChild(badge); }
+      badge.className='lkcp-sum'+(pend?' wait':'');
+      badge.setAttribute('data-copy', String(Math.round(retail)));
+      badge.textContent='Сума за роздрібом: '+fmtInt(retail)+(pend?' …':'');
+      // типи цін — чипи під заголовком (клік по чипу копіює його суму)
+      if(TIER_NAMES && showTiers){
+        if(!box){ box=document.createElement('div'); box.className='lkcp-tiers'; box.addEventListener('click', onCopyClick); h.insertAdjacentElement('afterend', box); }
+        var ids=Object.keys(TIER_NAMES).sort(function(a,b){
+          var ra=tierRank(TIER_NAMES[a]), rb=tierRank(TIER_NAMES[b]);
+          return ra!==rb ? ra-rb : Number(a)-Number(b);
+        });
+        var html='';
+        ids.forEach(function(id){
+          var s=sumFor(id);
+          html+='<span class="lkcp-chip" data-copy="'+Math.round(s)+'" title="Натисніть, щоб скопіювати суму"><span class="l">'+esc(TIER_NAMES[id])+'</span>'+fmtInt(s)+(pend?' …':'')+'</span>';
+        });
+        box.innerHTML=html;
+      } else if(box){ box.remove(); }   // режим перегляду — без чипів опт/майстри
+    });
+  }
+
+  // таблиці комплекту (режим редагування + режим перегляду), не чіпаючи рядки заявки
+  function scan(){
+    kitTables().forEach(function(table){
+      table.querySelectorAll('a.link-product-field').forEach(function(a){
+        var cell=a.closest('.editing-hide')||a.parentElement;
+        if(cell) decorate(cell);
+      });
+    });
+    updateTotals();
+  }
+  var t=null; function scanSoon(){ clearTimeout(t); t=setTimeout(scan,300); }
+  window.addEventListener('lkdom', scanSoon);
+  scan();
+})();
+}catch(e){ try{ console.warn("[SD] модуль «lkComplectPrice» не запустився:", e); }catch(_){} }
+/* ▲▲▲ МОДУЛЬ-END • lkComplectPrice ▲▲▲ */
+
+
 /* ▼▼▼ МОДУЛЬ-START • lkAnalogInline — Інлайн-значок «🔁 аналог» у рядку товару ▼▼▼ */
 /* ===== Інлайн-значок «🔁 аналог» у рядку товару (праворуч від «+» комплектів) ===== */
 try{ // SD-ізоляція: помилка цього модуля не зупинить решту
@@ -3264,6 +3482,15 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       +'&filter%5BpaymentDate%5D%5Bfrom%5D='+from
       +'&filter%5BpaymentDate%5D%5Bto%5D='+to;
   }
+  // список за обидва способи оплати разом (готівка + термінал)
+  function ordUrl2(from,to){
+    return '/ua/index.html?formId=1#/order/index?'
+      +'filter%5BstatusId%5D%5B%5D='+STATUS_ID
+      +'&filter%5Bpayment_method%5D%5B%5D='+CASH_ID
+      +'&filter%5Bpayment_method%5D%5B%5D='+CARD_ID
+      +'&filter%5BpaymentDate%5D%5Bfrom%5D='+from
+      +'&filter%5BpaymentDate%5D%5Bto%5D='+to;
+  }
   var OUTC_URL='/ua/index.html?formId=1#/document/cash-order/outcoming';
 
   async function fetchOrders(from,to){
@@ -3401,6 +3628,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     +'#lk-cash-day-sum .cash{background:#eafaf1;border:1px solid #abebc6}'
     +'#lk-cash-day-sum .card{background:#eef4fd;border:1px solid #aed0f5}'
     +'#lk-cash-day-sum .out{background:#fdeeea;border:1px solid #f5b7a8}'
+    +'#lk-cash-day-sum .total{background:#f3ecfb;border:1px solid #d6c3ef;padding:7px 14px;margin-top:-2px}'
+    +'#lk-cash-day-sum .total .lbl{font-weight:600;color:#5b3d8a}'
+    +'#lk-cash-day-sum .total .val{font-size:16px;color:#5b3d8a}'
     +'#lk-cash-day-sum .lbl{font-size:13px;color:#444}'
     +'#lk-cash-day-sum .val{font-size:18px;font-weight:800}'
     +'#lk-cash-day-sum .cnt{font-size:11px;color:#888;font-weight:400}'
@@ -3569,6 +3799,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
         +(draftN?' · <b class="nochk">📝 чернеток: '+draftN+'</b>':'')
         +(noCheckN?' · <b class="nochk">⚠️ без чека: '+noCheckN+'</b>':'')
       +'</span></span><span class="val">'+fmt(pCard)+' ↗</span></a>'
+      +' <a class="row total" href="'+ordUrl2(span.from,span.to)+'" target="_blank" title="Готівка + Термінал разом за період"><span class="lbl">🧮 Готівка + Термінал <span class="cnt">'+(pCashN+pCardN)+' зам.</span></span><span class="val">'+fmt(pCash+pCard)+' ↗</span></a>'
       +(out.items.length?' <div class="row out"><span class="lbl">📤 Видатки <span class="cnt">'+out.items.length+' шт.</span></span><span class="val">−'+fmt(out.sum)+'</span></div>':'')
       +'</div>'
       +outHtml
