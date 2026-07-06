@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      1.82
+// @version      1.83
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -2614,6 +2614,14 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   }
   function fmt(n){ return (Math.round(n*100)/100).toString().replace(/\.00$/,'').replace('.',',')+' ₴'; }
   function fmtInt(n){ return Math.round(Number(n)||0)+' ₴'; } // підсумки — до цілих
+  // порядок чипів: великий опт → середній опт → майстри → решта
+  function tierRank(name){
+    var n=(name||'').toLowerCase();
+    if(/велик/.test(n)) return 1;
+    if(/серед/.test(n)) return 2;
+    if(/майст/.test(n)) return 3;
+    return 9;
+  }
 
   // копіювання суми в буфер + коротка індикація «✓»
   function doCopy(text){
@@ -2699,7 +2707,10 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       // типи цін — чипи під заголовком (клік по чипу копіює його суму)
       if(TIER_NAMES){
         if(!box){ box=document.createElement('div'); box.className='lkcp-tiers'; box.addEventListener('click', onCopyClick); h.insertAdjacentElement('afterend', box); }
-        var ids=Object.keys(TIER_NAMES).sort(function(a,b){ return Number(a)-Number(b); });
+        var ids=Object.keys(TIER_NAMES).sort(function(a,b){
+          var ra=tierRank(TIER_NAMES[a]), rb=tierRank(TIER_NAMES[b]);
+          return ra!==rb ? ra-rb : Number(a)-Number(b);
+        });
         var html='';
         ids.forEach(function(id){
           var s=sumFor(id);
