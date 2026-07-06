@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      1.87
+// @version      1.88
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -3968,6 +3968,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 try{ // SD-ізоляція: помилка цього модуля не зупинить решту
 (function lkPayLink(){
   'use strict';
+  // Angular живе на РЕАЛЬНОМУ вікні сторінки; у пісочниці Tampermonkey window —
+  // це обгортка (angular там undefined), тож беремо з unsafeWindow, як решта модулів.
+  var PAGE = (typeof unsafeWindow!=='undefined' && unsafeWindow) || window;
   // Реквізити отримувача (ФОП). Формат перевірено сканером Privat24 — НЕ міняти теґ/версію/домен.
   var RECIPIENT = 'ФОП Кучер Вікторія Михайлівна';
   var IBAN      = 'UA893052990000026005031027180';
@@ -3988,20 +3991,20 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     return null;
   }
   function getOrder(){
-    if(!window.angular) return null;
+    if(!PAGE.angular) return null;
     // 1) будь-який елемент, що згадує viewModel.order у розмітці
     var hosts = document.querySelectorAll(
       '[comments-to-order], [attr-field-name="paymentAmount"], [ng-click*="viewModel.addOption"], input[ng-model*="newName"], button[ng-click*="viewModel.createComment"], [ng-controller], .p-editable-precompile');
     for(var i=0;i<hosts.length;i++){
       try{
-        var o = scopeOrder(window.angular.element(hosts[i]).scope());
+        var o = scopeOrder(PAGE.angular.element(hosts[i]).scope());
         if(o) return o;
       }catch(e){}
     }
     // 2) фолбек — обхід усіх scope через корінь застосунку
     try{
-      var root = window.angular.element(document.querySelector('[ng-app], body')).injector();
-      var rs = window.angular.element(document.querySelector('.ng-scope')).scope();
+      var root = PAGE.angular.element(document.querySelector('[ng-app], body')).injector();
+      var rs = PAGE.angular.element(document.querySelector('.ng-scope')).scope();
       var o2 = scopeOrder(rs);
       if(o2) return o2;
     }catch(e){}
