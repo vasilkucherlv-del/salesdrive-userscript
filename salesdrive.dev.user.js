@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      1.83
+// @version      1.84
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -3463,6 +3463,15 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       +'&filter%5BpaymentDate%5D%5Bfrom%5D='+from
       +'&filter%5BpaymentDate%5D%5Bto%5D='+to;
   }
+  // список за обидва способи оплати разом (готівка + термінал)
+  function ordUrl2(from,to){
+    return '/ua/index.html?formId=1#/order/index?'
+      +'filter%5BstatusId%5D%5B%5D='+STATUS_ID
+      +'&filter%5Bpayment_method%5D%5B%5D='+CASH_ID
+      +'&filter%5Bpayment_method%5D%5B%5D='+CARD_ID
+      +'&filter%5BpaymentDate%5D%5Bfrom%5D='+from
+      +'&filter%5BpaymentDate%5D%5Bto%5D='+to;
+  }
   var OUTC_URL='/ua/index.html?formId=1#/document/cash-order/outcoming';
 
   async function fetchOrders(from,to){
@@ -3600,6 +3609,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     +'#lk-cash-day-sum .cash{background:#eafaf1;border:1px solid #abebc6}'
     +'#lk-cash-day-sum .card{background:#eef4fd;border:1px solid #aed0f5}'
     +'#lk-cash-day-sum .out{background:#fdeeea;border:1px solid #f5b7a8}'
+    +'#lk-cash-day-sum .total{background:#f3ecfb;border:1px solid #d6c3ef;padding:7px 14px;margin-top:-2px}'
+    +'#lk-cash-day-sum .total .lbl{font-weight:600;color:#5b3d8a}'
+    +'#lk-cash-day-sum .total .val{font-size:16px;color:#5b3d8a}'
     +'#lk-cash-day-sum .lbl{font-size:13px;color:#444}'
     +'#lk-cash-day-sum .val{font-size:18px;font-weight:800}'
     +'#lk-cash-day-sum .cnt{font-size:11px;color:#888;font-weight:400}'
@@ -3768,6 +3780,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
         +(draftN?' · <b class="nochk">📝 чернеток: '+draftN+'</b>':'')
         +(noCheckN?' · <b class="nochk">⚠️ без чека: '+noCheckN+'</b>':'')
       +'</span></span><span class="val">'+fmt(pCard)+' ↗</span></a>'
+      +' <a class="row total" href="'+ordUrl2(span.from,span.to)+'" target="_blank" title="Готівка + Термінал разом за період"><span class="lbl">🧮 Готівка + Термінал <span class="cnt">'+(pCashN+pCardN)+' зам.</span></span><span class="val">'+fmt(pCash+pCard)+' ↗</span></a>'
       +(out.items.length?' <div class="row out"><span class="lbl">📤 Видатки <span class="cnt">'+out.items.length+' шт.</span></span><span class="val">−'+fmt(out.sum)+'</span></div>':'')
       +'</div>'
       +outHtml
