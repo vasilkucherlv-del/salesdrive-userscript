@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      1.84
+// @version      1.85
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -2640,11 +2640,25 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     if(doCopy(el.getAttribute('data-copy'))) flashCopied(el);
   }
 
-  // кількість складника з рядка (колонка «К-ть»); типово 1
+  // кількість складника з рядка; надійно — з Angular-моделі (item.amount),
+  // бо колонка «К-ть» у режимі перегляду не має .editing-hide і поруч є «Склад».
   function qtyOf(tr){
+    try{
+      var W=(typeof unsafeWindow!=='undefined'&&unsafeWindow)||window;
+      var sc=W.angular && W.angular.element(tr).scope();
+      if(sc && sc.item && sc.item.amount!=null){ var q=parseFloat(sc.item.amount); if(q>0) return q; }
+    }catch(e){}
     var c=tr.querySelector('.td-amount .editing-hide');
     var v=c && parseFloat((c.textContent||'').replace(',','.').replace(/\s+/g,''));
     return (v && v>0) ? v : 1;
+  }
+  // усі таблиці комплекту на сторінці (і режим редагування, і перегляду)
+  function kitTables(){
+    var out=[];
+    document.querySelectorAll('table.products-complect-table, div[ng-show*="isComplect"] table').forEach(function(tb){
+      if(out.indexOf(tb)<0 && tb.querySelector('a.link-product-field')) out.push(tb);
+    });
+    return out;
   }
   // ціна складника за типом; якщо тип не заданий (0/нема) — беремо роздрібну
   function tierValue(info, tierId){
@@ -2681,7 +2695,10 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   // підсумки в заголовку «Товари в комплекті»: роздрібна сума + суми за типами цін
   function updateTotals(){
     ensureTierNames();
-    document.querySelectorAll('table.products-complect-table').forEach(function(table){
+    kitTables().forEach(function(table){
+      // чипи опт/майстри — лише в режимі редагування картки товару;
+      // у режимі перегляду (без products-complect-table) — тільки роздрібна сума.
+      var showTiers=table.classList.contains('products-complect-table');
       var h=h3For(table); if(!h) return;
       var items=[];
       table.querySelectorAll('tbody tr').forEach(function(tr){
@@ -2705,7 +2722,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       badge.setAttribute('data-copy', String(Math.round(retail)));
       badge.textContent='Сума за роздрібом: '+fmtInt(retail)+(pend?' …':'');
       // типи цін — чипи під заголовком (клік по чипу копіює його суму)
-      if(TIER_NAMES){
+      if(TIER_NAMES && showTiers){
         if(!box){ box=document.createElement('div'); box.className='lkcp-tiers'; box.addEventListener('click', onCopyClick); h.insertAdjacentElement('afterend', box); }
         var ids=Object.keys(TIER_NAMES).sort(function(a,b){
           var ra=tierRank(TIER_NAMES[a]), rb=tierRank(TIER_NAMES[b]);
@@ -2717,15 +2734,17 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
           html+='<span class="lkcp-chip" data-copy="'+Math.round(s)+'" title="Натисніть, щоб скопіювати суму"><span class="l">'+esc(TIER_NAMES[id])+'</span>'+fmtInt(s)+(pend?' …':'')+'</span>';
         });
         box.innerHTML=html;
-      }
+      } else if(box){ box.remove(); }   // режим перегляду — без чипів опт/майстри
     });
   }
 
-  // тільки таблиця складників комплекту (щоб не чіпати рядки заявки)
+  // таблиці комплекту (режим редагування + режим перегляду), не чіпаючи рядки заявки
   function scan(){
-    document.querySelectorAll('table.products-complect-table a.link-product-field').forEach(function(a){
-      var cell=a.closest('.editing-hide')||a.parentElement;
-      if(cell) decorate(cell);
+    kitTables().forEach(function(table){
+      table.querySelectorAll('a.link-product-field').forEach(function(a){
+        var cell=a.closest('.editing-hide')||a.parentElement;
+        if(cell) decorate(cell);
+      });
     });
     updateTotals();
   }
