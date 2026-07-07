@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      1.90
+// @version      1.91
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -29,6 +29,7 @@
      • lkUpsellRedesign— компактний вигляд картки допродажу
      • lkStockPayWarn  — попередження: передоплата + малий залишок
      • lkCashRegister  — 💰 Каса самовивозу
+     • lkPickList      — 📋 зведений лист комплектації (сума товарів по заявках статусу)
      • lkQuickPickup   — ➕ нова заявка самовивозу + 📋 список усіх самовивозів
      • lkAutoOrgByPayment — організація: самовивіз→Кучер Василь, інакше→ФОП з платежу
      • lkCheckCashbox   — підстановка «каса самовивозу» у формі чека (оплата готівка/термінал)
@@ -3963,6 +3964,248 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 })();
 }catch(e){ try{ console.warn("[SD] модуль «lkCashRegister» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkCashRegister ▲▲▲ */
+
+
+/* ▼▼▼ МОДУЛЬ-START • lkPickList — 📋 Зведений лист комплектації (склад) ▼▼▼ */
+/* ===== По заявках у вибраних статусах (пакувальник фільтрує список за статусом,
+   напр. «на відправку» + «сплачено в інтернеті») збирає СУМАРНУ кількість кожного
+   товару. Набори розкладаються на складники через карту комплектів (спільний кеш
+   lknb_cache2). Плаваюча кнопка 📋 на сторінці списку заявок → панель + друк. ===== */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
+(function lkPickList(){
+  'use strict';
+  var API_KEY  = '9yC3JYj4MlYitQ8J3KUf-uy_qPDYkFzwoITQSUeiWEDMZntbQ4uj0NxNcHrqAg8VAB6wDmkdXJZ1LMFgnQbuivTSrzutQbVB66wN';
+  var ORDERS   = '/api/order/list/';
+  var APP_URL  = 'https://barcode-printer-production-2b32.up.railway.app';
+  var TOKEN    = 'nab_8Kx2pQ7mLr4tW9vZ';
+  var KIT_CACHE='lknb_cache2', KIT_TTL=6*60*60*1000; // спільний із lkNaboryInline
+  var NAME_KEY ='lkpick_names_v1';
+  var CACHE_MS =150000; // результат кешуємо 2.5 хв
+
+  function onListPage(){ return /#\/order\/index/.test(location.hash||''); }
+  function sleep(ms){ return new Promise(function(r){ setTimeout(r,ms); }); }
+  function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
+  function gGet(k){ try{ var s=GM_getValue(k,null); return s?((typeof s==='string')?JSON.parse(s):s):null; }catch(e){ return null; } }
+  function gSet(k,v){ try{ GM_setValue(k, JSON.stringify(v)); }catch(e){} }
+
+  // статуси — з URL-фільтра списку (filter[statusId][]=NN)
+  function selectedStatuses(){
+    var out=[], dec=decodeURIComponent(location.hash||''), re=/filter\[statusId\]\[\]=([^&]+)/g, m;
+    while((m=re.exec(dec))){ if(/^\d+$/.test(m[1])) out.push(m[1]); }
+    return out;
+  }
+
+  // карта комплектів (kitSku -> {name,id,comps:[{sku,qty}]})
+  var kits=null;
+  function fetchKits(){
+    var url=APP_URL.replace(/\/+$/,'')+'/api/kits?token='+encodeURIComponent(TOKEN);
+    return new Promise(function(res,rej){
+      var done=function(t){ try{ var d=JSON.parse(t); d.ok?res(d.kits||{}):rej(new Error('no')); }catch(e){ rej(e); } };
+      if(typeof GM_xmlhttpRequest!=='undefined'){ GM_xmlhttpRequest({method:'GET',url:url,
+        onload:function(r){ (r.status>=200&&r.status<300)?done(r.responseText):rej(new Error('HTTP '+r.status)); },
+        onerror:function(){ rej(new Error('net')); }}); }
+      else { fetch(url).then(function(r){return r.text();}).then(done).catch(rej); }
+    });
+  }
+  function loadKits(){
+    if(kits) return Promise.resolve(kits);
+    var c=gGet(KIT_CACHE);
+    if(c && c.kits && (Date.now()-(c.ts||0)<KIT_TTL)){ kits=c.kits; return Promise.resolve(kits); }
+    return fetchKits().then(function(k){ kits=k||{}; gSet(KIT_CACHE,{ts:Date.now(),kits:kits}); return kits; })
+      .catch(function(){ kits=(c&&c.kits)||{}; return kits; });
+  }
+
+  // назви SKU: харвест із рядків заявок + резолв відсутніх через products API (кеш)
+  var nameMap=gGet(NAME_KEY)||{};
+  function remember(sku,name){ if(sku && name && !nameMap[sku]) nameMap[sku]=name; }
+  var resolving={};
+  function resolveName(sku, cb){
+    if(nameMap[sku]){ return; }
+    if(resolving[sku]) return; resolving[sku]=1;
+    fetch('/products/data/?active=1&filter[sku]='+encodeURIComponent(sku)+'&formId=1',
+      {credentials:'include',headers:{'accept':'application/json, text/plain, */*','when':'product/index'}})
+      .then(function(r){ return r.ok?r.json():null; })
+      .then(function(j){ var rows=j&&j.response&&j.response.meta&&j.response.meta.option&&j.response.meta.option.option;
+        var row=null,c=String(sku).trim();
+        if(rows) for(var i=0;i<rows.length;i++){ if(String(rows[i].sku).trim()===c){ row=rows[i]; break; } }
+        if(!row && rows && rows.length) row=rows[0];
+        if(row){ nameMap[sku]=row.documentName||row.name||sku; gSet(NAME_KEY,nameMap); if(cb) cb(); }
+      }).catch(function(){});
+  }
+
+  // фетч заявок за статусами (пагінація + захист від rate-limit 400)
+  function fetchOrders(statusIds){
+    var qs=statusIds.map(function(s){ return 'filter%5BstatusId%5D%5B%5D='+s; }).join('&');
+    var page=1, all=[], guard=0;
+    function next(){
+      if(guard++>=40) return Promise.resolve(all);
+      var url=ORDERS+'?page='+page+'&limit=100'+(qs?'&'+qs:'');
+      return fetch(url,{headers:{'Form-Api-Key':API_KEY,'Accept':'application/json'}})
+        .then(function(r){
+          if(r.status===400){ return sleep(65000).then(next); }
+          return r.json().catch(function(){return {};}).then(function(j){
+            var arr=j.data||[]; all=all.concat(arr);
+            if(arr.length<100) return all;
+            page++; return sleep(400).then(next);
+          });
+        }).catch(function(){ return all; });
+    }
+    return next();
+  }
+
+  // агрегація: розклад наборів + сума кількостей за SKU
+  function aggregate(orders){
+    var agg={};
+    function add(sku,name,qty,oid){
+      sku=String(sku==null?'':sku).trim(); if(!sku||!(qty>0)) return;
+      remember(sku,name);
+      var e=agg[sku]||(agg[sku]={sku:sku,qty:0,ord:{}});
+      e.qty+=qty; e.ord[oid]=1;
+    }
+    orders.forEach(function(o){
+      (o.products||[]).forEach(function(p){
+        var sku=String(p.sku==null?'':p.sku).trim(); var amt=Number(p.amount)||0;
+        if(!sku||amt<=0) return;
+        var nm=p.documentName||p.text||''; remember(sku,nm);
+        var kit=kits && kits[sku];
+        if(kit && kit.comps && kit.comps.length){ kit.comps.forEach(function(c){ add(c.sku,'',amt*(Number(c.qty)||1),o.id); }); }
+        else { add(sku,nm,amt,o.id); }
+      });
+    });
+    gSet(NAME_KEY,nameMap);
+    return Object.keys(agg).map(function(sku){ var e=agg[sku]; return {sku:sku,name:nameMap[sku]||'',qty:e.qty,orders:Object.keys(e.ord).length}; });
+  }
+
+  /* ---------- UI ---------- */
+  function ensureStyles(){
+    if(document.getElementById('lk-pick-css')) return;
+    var s=document.createElement('style'); s.id='lk-pick-css';
+    s.textContent=''
+    +'#lk-pick-btn{position:fixed;left:18px;bottom:80px;z-index:99998;width:52px;height:52px;border-radius:50%;background:#00695c;color:#fff;border:none;font-size:23px;cursor:pointer;box-shadow:0 3px 10px rgba(0,0,0,.3)}'
+    +'#lk-pick-ov{position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.4);display:flex;align-items:flex-start;justify-content:center}'
+    +'#lk-pick-box{background:#fff;width:640px;max-width:96vw;max-height:92vh;margin-top:3vh;overflow:auto;border-radius:12px;box-shadow:0 12px 40px rgba(0,0,0,.35);font:13px/1.5 Arial,sans-serif;color:#222}'
+    +'#lk-pick-box .hd{position:sticky;top:0;background:#00695c;color:#fff;padding:12px 16px;display:flex;align-items:center;justify-content:space-between}'
+    +'#lk-pick-box .hd b{font-size:16px}'
+    +'#lk-pick-box .hd button{background:rgba(255,255,255,.2);border:none;color:#fff;border-radius:6px;cursor:pointer;font-size:14px;padding:4px 8px;margin-left:6px}'
+    +'#lk-pick-box .sub{padding:8px 16px;color:#555;background:#f4faf9;border-bottom:1px solid #d6ece8}'
+    +'#lk-pick-box .tools{padding:8px 16px;display:flex;gap:8px;flex-wrap:wrap;align-items:center}'
+    +'#lk-pick-box .tools button{border:1px solid #00695c;background:#fff;color:#00695c;border-radius:7px;padding:6px 12px;cursor:pointer;font-weight:700}'
+    +'#lk-pick-box .tools button:hover{background:#e6f4f1}'
+    +'#lk-pick-tbl{width:100%;border-collapse:collapse}'
+    +'#lk-pick-tbl th,#lk-pick-tbl td{border-bottom:1px solid #eee;padding:7px 16px;text-align:left;vertical-align:top}'
+    +'#lk-pick-tbl th{background:#f7f7f7;position:sticky;top:0;cursor:pointer;font-size:12px;color:#555}'
+    +'#lk-pick-tbl td.q{text-align:center;font-weight:800;font-size:15px;color:#00695c;white-space:nowrap}'
+    +'#lk-pick-tbl td.sku{font-family:ui-monospace,Menlo,Consolas,monospace;color:#333;white-space:nowrap}'
+    +'#lk-pick-tbl td.cnt{text-align:center;color:#999;font-size:12px}'
+    +'#lk-pick-msg{padding:20px 16px;color:#777;font-size:14px;line-height:1.6}'
+    +'#lk-pick-print{display:none}'
+    +'@media print{ body>*{display:none !important} #lk-pick-print{display:block !important;font:12px Arial} #lk-pick-print h2{font-size:16px} #lk-pick-print table{width:100%;border-collapse:collapse} #lk-pick-print th,#lk-pick-print td{border:1px solid #999;padding:4px 6px;text-align:left} #lk-pick-print td.q{text-align:center;font-weight:bold} }';
+    (document.head||document.documentElement).appendChild(s);
+    if(!document.getElementById('lk-pick-print')){ var pr=document.createElement('div'); pr.id='lk-pick-print'; document.body.appendChild(pr); }
+  }
+
+  var cache=null, busy=false, sortBy='qty';
+
+  function open(){
+    ensureStyles();
+    if(document.getElementById('lk-pick-ov')) return;
+    var ov=document.createElement('div'); ov.id='lk-pick-ov';
+    ov.innerHTML='<div id="lk-pick-box">'
+      +'<div class="hd"><b>📋 Лист комплектації</b><span><button class="rf" title="Оновити">🔄</button><button class="x" title="Закрити">✕</button></span></div>'
+      +'<div class="sub" id="lk-pick-sub">…</div>'
+      +'<div class="tools"><button class="pr">🖨 Друк</button><button class="cp">Копіювати</button><button class="so">Сортувати: к-сть</button></div>'
+      +'<div id="lk-pick-content"><div id="lk-pick-msg">Рахую…</div></div></div>';
+    document.body.appendChild(ov);
+    ov.addEventListener('click', function(e){ if(e.target===ov) ov.remove(); });
+    ov.querySelector('.x').onclick=function(){ ov.remove(); };
+    ov.querySelector('.rf').onclick=function(){ cache=null; run(true); };
+    ov.querySelector('.pr').onclick=doPrint;
+    ov.querySelector('.cp').onclick=doCopy;
+    ov.querySelector('.so').onclick=function(){ sortBy=(sortBy==='qty')?'name':'qty'; this.textContent='Сортувати: '+(sortBy==='qty'?'к-сть':'назва'); render(); };
+    run(false);
+  }
+
+  function run(force){
+    var box=document.getElementById('lk-pick-box'); if(!box) return;
+    var st=selectedStatuses();
+    var sub=document.getElementById('lk-pick-sub');
+    if(!st.length){ document.getElementById('lk-pick-content').innerHTML='<div id="lk-pick-msg">Спочатку відфільтруй список заявок за потрібним статусом (напр. «на відправку», «сплачено в інтернеті») — і знову відкрий лист. Тоді покажу сумарну кількість товарів для комплектації.</div>'; if(sub) sub.textContent='Статуси не вибрано'; return; }
+    var key=st.slice().sort().join(',');
+    if(cache && !force && cache.key===key && (Date.now()-cache.t)<CACHE_MS){ render(); return; }
+    if(busy) return; busy=true;
+    if(sub) sub.textContent='Статуси: '+st.join(', ')+' · рахую…';
+    document.getElementById('lk-pick-content').innerHTML='<div id="lk-pick-msg">Рахую… (тягну заявки й розкладаю набори)</div>';
+    loadKits().then(function(){ return fetchOrders(st); }).then(function(orders){
+      var rows=aggregate(orders);
+      cache={key:key, t:Date.now(), rows:rows, ordersCount:orders.length, statuses:st};
+      busy=false; render();
+    }).catch(function(){ busy=false; document.getElementById('lk-pick-content').innerHTML='<div id="lk-pick-msg">Не вдалося порахувати. Натисни 🔄.</div>'; });
+  }
+
+  function sortedRows(){
+    var rows=(cache&&cache.rows)||[];
+    return rows.slice().sort(function(a,b){
+      if(sortBy==='name'){ return (a.name||a.sku).localeCompare(b.name||b.sku,'uk'); }
+      return b.qty-a.qty || (a.name||a.sku).localeCompare(b.name||b.sku,'uk');
+    });
+  }
+  function render(){
+    if(!document.getElementById('lk-pick-box')) return;
+    var sub=document.getElementById('lk-pick-sub');
+    if(sub && cache) sub.textContent='Статуси: '+cache.statuses.join(', ')+' · заявок: '+cache.ordersCount+' · позицій: '+cache.rows.length;
+    var rows=sortedRows();
+    var missing=[];
+    var html='<table id="lk-pick-tbl"><thead><tr><th>Код</th><th>Назва</th><th style="text-align:center">Шт</th><th style="text-align:center">Заявок</th></tr></thead><tbody>';
+    rows.forEach(function(r){
+      if(!r.name){ missing.push(r.sku); }
+      html+='<tr><td class="sku">'+esc(r.sku)+'</td><td data-sku="'+esc(r.sku)+'">'+esc(r.name||'—')+'</td><td class="q">'+r.qty+'</td><td class="cnt">'+r.orders+'</td></tr>';
+    });
+    html+='</tbody></table>';
+    document.getElementById('lk-pick-content').innerHTML=html;
+    // дорезолвити відсутні назви (обмежено), потім оновити клітинки
+    missing.slice(0,40).forEach(function(sku){ resolveName(sku, function(){
+      var td=document.querySelector('#lk-pick-tbl td[data-sku="'+CSS.escape(sku)+'"]');
+      if(td && nameMap[sku]){ td.textContent=nameMap[sku]; }
+      var r=(cache.rows||[]).filter(function(x){return x.sku===sku;})[0]; if(r) r.name=nameMap[sku]||'';
+    }); });
+  }
+
+  function textDump(){
+    var rows=sortedRows();
+    var lines=['Код\tНазва\tШт\tЗаявок'];
+    rows.forEach(function(r){ lines.push(r.sku+'\t'+(r.name||'')+'\t'+r.qty+'\t'+r.orders); });
+    return lines.join('\n');
+  }
+  function doCopy(){
+    var t=textDump();
+    try{ if(typeof GM_setClipboard==='function'){ GM_setClipboard(t); } else { navigator.clipboard.writeText(t); } }catch(e){ try{ navigator.clipboard.writeText(t); }catch(e2){} }
+    var b=document.querySelector('#lk-pick-box .cp'); if(b){ var o=b.textContent; b.textContent='✓ Скопійовано'; setTimeout(function(){ b.textContent=o; },1200); }
+  }
+  function doPrint(){
+    var pr=document.getElementById('lk-pick-print'); if(!pr||!cache) return;
+    var rows=sortedRows();
+    var html='<h2>📋 Лист комплектації — статуси '+esc(cache.statuses.join(', '))+' (заявок: '+cache.ordersCount+')</h2>'
+      +'<table><thead><tr><th>Код</th><th>Назва</th><th>Шт</th><th>Заявок</th></tr></thead><tbody>';
+    rows.forEach(function(r){ html+='<tr><td>'+esc(r.sku)+'</td><td>'+esc(r.name||'')+'</td><td class="q">'+r.qty+'</td><td>'+r.orders+'</td></tr>'; });
+    html+='</tbody></table>';
+    pr.innerHTML=html;
+    window.print();
+  }
+
+  function addBtn(){
+    if(!onListPage()){ var b0=document.getElementById('lk-pick-btn'); if(b0) b0.remove(); var ov=document.getElementById('lk-pick-ov'); if(ov) ov.remove(); return; }
+    if(document.getElementById('lk-pick-btn')) return;
+    ensureStyles();
+    var b=document.createElement('button'); b.id='lk-pick-btn'; b.textContent='📋'; b.title='Зведений лист комплектації';
+    b.onclick=open;
+    document.body.appendChild(b);
+  }
+  window.addEventListener('lkdom', addBtn);
+  window.addEventListener('hashchange', function(){ setTimeout(addBtn,150); });
+  addBtn();
+})();
+}catch(e){ try{ console.warn("[SD] модуль «lkPickList» не запустився:", e); }catch(_){} }
+/* ▲▲▲ МОДУЛЬ-END • lkPickList ▲▲▲ */
 
 /* ▼▼▼ МОДУЛЬ-START • lkQuickPickup — ➕ Швидка кнопка: нова заявка із самовивозом ▼▼▼ */
 /* ===== ➕ Швидка кнопка: нова заявка із самовивозом ===== */
