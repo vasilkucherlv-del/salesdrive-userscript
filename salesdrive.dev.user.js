@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      1.89
+// @version      1.90
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -31,11 +31,9 @@
      • lkCashRegister  — 💰 Каса самовивозу
      • lkQuickPickup   — ➕ нова заявка самовивозу + 📋 список усіх самовивозів
      • lkAutoOrgByPayment — організація: самовивіз→Кучер Василь, інакше→ФОП з платежу
-     • lkPayLink        — 💳 кнопка «Оплата»: платіжний лінк НБУ з сумою й номером заявки
      • lkCheckCashbox   — підстановка «каса самовивозу» у формі чека (оплата готівка/термінал)
      • lkCopyNoGoods    — кнопка «🗐 без товарів» (копія заявки без товарних рядків)
      • lkSenderBySource — відправник СМС за джерелом замовлення (FIXLAND/Refort/lartek/Сайт/mobile_catalog_app/Bigl)
-     • lkPackerTtn      — 📦 лічильник роздрукованих ТТН для передачі кур'єру (список заявок)
    ╚══════════════════════════════════════════════════════════════════╝ */
 
 /* ▼▼▼ МОДУЛЬ-START • core — ЯДРО — шина подій, дані з Google-таблиць, стилі; містить content.js (підказки/ціни/рейтинг/ТТН) і Базу знань ▼▼▼ */
@@ -3965,211 +3963,6 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 })();
 }catch(e){ try{ console.warn("[SD] модуль «lkCashRegister» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkCashRegister ▲▲▲ */
-/* ▼▼▼ МОДУЛЬ-START • lkPayLink — 💳 Кнопка «Оплата»: платіжний лінк НБУ (BCB/002) з сумою й номером заявки ▼▼▼ */
-try{ // SD-ізоляція: помилка цього модуля не зупинить решту
-(function lkPayLink(){
-  'use strict';
-  // Angular живе на РЕАЛЬНОМУ вікні сторінки; у пісочниці Tampermonkey window —
-  // це обгортка (angular там undefined), тож беремо з unsafeWindow, як решта модулів.
-  var PAGE = (typeof unsafeWindow!=='undefined' && unsafeWindow) || window;
-  // Реквізити отримувача (ФОП). Формат перевірено сканером Privat24 — НЕ міняти теґ/версію/домен.
-  var RECIPIENT = 'ФОП Кучер Вікторія Михайлівна';
-  var IBAN      = 'UA893052990000026005031027180';
-  var CODE      = '3466102720';
-
-  function onOrderPage(){ return /\/order\/\w+\/\d+/.test(location.hash||''); }
-
-  // viewModel поточної відкритої заявки — через angular-scope кнопки коментаря
-  function scopeOrder(scope){
-    var seen=0;
-    while(scope && seen<400){
-      seen++;
-      var vm=scope.viewModel;
-      if(vm && vm.order && (vm.order.paymentAmount!=null || vm.order.totalSum!=null || vm.order.id!=null)) return vm.order;
-      if(scope.order && (scope.order.paymentAmount!=null || scope.order.id!=null)) return scope.order;
-      scope=scope.$parent;
-    }
-    return null;
-  }
-  function getOrder(){
-    if(!PAGE.angular) return null;
-    // 1) будь-який елемент, що згадує viewModel.order у розмітці
-    var hosts = document.querySelectorAll(
-      '[comments-to-order], [attr-field-name="paymentAmount"], [ng-click*="viewModel.addOption"], input[ng-model*="newName"], button[ng-click*="viewModel.createComment"], [ng-controller], .p-editable-precompile');
-    for(var i=0;i<hosts.length;i++){
-      try{
-        var o = scopeOrder(PAGE.angular.element(hosts[i]).scope());
-        if(o) return o;
-      }catch(e){}
-    }
-    // 2) фолбек — обхід усіх scope через корінь застосунку
-    try{
-      var root = PAGE.angular.element(document.querySelector('[ng-app], body')).injector();
-      var rs = PAGE.angular.element(document.querySelector('.ng-scope')).scope();
-      var o2 = scopeOrder(rs);
-      if(o2) return o2;
-    }catch(e){}
-    return null;
-  }
-
-  function amountOf(o){
-    var a = Number(o.paymentAmount);
-    if(!isFinite(a) || a<=0) a = Number(o.totalSum);
-    return (isFinite(a) && a>0) ? a : null;
-  }
-
-  function payLink(recipient, iban, code, amount, purpose){
-    iban = String(iban).replace(/\s+/g,'').toUpperCase();
-    var parts = ['BCB','002','1','UCT','', recipient, iban,
-                 'UAH'+amount.toFixed(2), String(code), '', '', purpose, ''];
-    var b64 = btoa(unescape(encodeURIComponent(parts.join('\n'))))
-                .replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
-    return 'https://bank.gov.ua/qr/'+b64;
-  }
-
-  function toast(msg, ok){
-    var t = document.createElement('div');
-    t.textContent = msg;
-    t.style.cssText = 'position:fixed;z-index:99999;left:50%;bottom:28px;transform:translateX(-50%);'
-      + 'padding:10px 18px;border-radius:9px;font-size:14px;font-weight:600;color:#fff;'
-      + 'background:'+(ok?'#2ecc71':'#e67e22')+';box-shadow:0 4px 14px rgba(0,0,0,.2)';
-    document.body.appendChild(t);
-    setTimeout(function(){ t.remove(); }, 2600);
-  }
-
-  function onClick(){
-    var o = getOrder();
-    if(!o){ toast('Заявку не знайдено — відкрий картку заявки', false); return; }
-    var amount = amountOf(o);
-    if(!amount){ toast('У заявці немає суми — заповни товари/суму', false); return; }
-    var num = (o.number!=null && String(o.number).trim()) ? o.number : o.id;
-    var link = payLink(RECIPIENT, IBAN, CODE, amount, 'Оплата замовлення №'+num);
-    try{ GM_setClipboard(link); }
-    catch(e){ try{ navigator.clipboard.writeText(link); }catch(e2){} }
-    toast('💳 Лінк на оплату скопійовано ('+amount.toFixed(2)+' грн)', true);
-  }
-
-  function addBtn(){
-    if(!onOrderPage()) return;
-    var anchor = document.querySelector('button[ng-click*="viewModel.createComment"]');
-    if(!anchor) return;
-    if(anchor.parentNode.querySelector('.lk-paylink-btn')) return;
-    var b = document.createElement('button');
-    b.type = 'button';
-    b.className = 'btn btn-communication-history lk-paylink-btn';
-    b.style.cssText = 'background:#16a085;border-color:#16a085;color:#fff';
-    b.textContent = '💳 Оплата';
-    b.addEventListener('click', onClick);
-    anchor.parentNode.insertBefore(b, anchor.nextSibling);
-  }
-
-  window.addEventListener('lkdom', addBtn); addBtn();
-})();
-}catch(e){ try{ console.warn("[SD] модуль «lkPayLink» не запустився:", e); }catch(_){} }
-/* ▲▲▲ МОДУЛЬ-END • lkPayLink ▲▲▲ */
-
-
-/* ▼▼▼ МОДУЛЬ-START • lkPackerTtn — 📦 Лічильник роздрукованих ТТН для передачі кур'єру ▼▼▼ */
-/* ===== Рахує заявки, де ТТН роздрукована (isPrinted=1), але ще не додана в
-   реєстр (addedToRegister=0) — тобто «готові до передачі кур'єру». Лічильник —
-   плаваюча пілюля на сторінці списку заявок (#/order/index). ===== */
-try{ // SD-ізоляція: помилка цього модуля не зупинить решту
-(function lkPackerTtn(){
-  'use strict';
-  var API_KEY='9yC3JYj4MlYitQ8J3KUf-uy_qPDYkFzwoITQSUeiWEDMZntbQ4uj0NxNcHrqAg8VAB6wDmkdXJZ1LMFgnQbuivTSrzutQbVB66wN';
-  var ORDERS='/api/order/list/';
-  var PAGES=4, LIMIT=100;      // ~400 свіжих заявок — покриває всі непередані
-  var CACHE_MS=120000;         // лічильник кешується 2 хв; 🔄 оновлює одразу
-
-  function onListPage(){ return /#\/order\/index/.test(location.hash||''); }
-  function two(x){ return (x<10?'0':'')+x; }
-
-  var css=''
-    +'#lk-ttn-pill{position:fixed;top:64px;right:18px;z-index:2147483000;'
-    +'  background:#1b5e20;color:#fff;border-radius:24px;padding:9px 15px;'
-    +'  font:700 14px/1.2 Arial,sans-serif;cursor:pointer;box-shadow:0 3px 12px rgba(0,0,0,.28);'
-    +'  display:flex;align-items:center;gap:9px;user-select:none}'
-    +'#lk-ttn-pill.wait{background:#8a8a8a}'
-    +'#lk-ttn-pill .n{font-size:19px;min-width:18px;text-align:center}'
-    +'#lk-ttn-pill .rf{background:rgba(255,255,255,.22);border:none;color:#fff;border-radius:50%;'
-    +'  width:23px;height:23px;cursor:pointer;font-size:12px;line-height:23px;padding:0}'
-    +'#lk-ttn-panel{position:fixed;top:104px;right:18px;z-index:2147483000;width:290px;max-height:60vh;'
-    +'  overflow:auto;background:#fff;border:1px solid #cfcfcf;border-radius:12px;'
-    +'  box-shadow:0 10px 34px rgba(0,0,0,.3);font:13px/1.55 Arial,sans-serif;color:#222;'
-    +'  padding:11px 13px;display:none}'
-    +'#lk-ttn-panel.show{display:block}'
-    +'#lk-ttn-panel .h{font-weight:700;margin-bottom:6px;color:#1b5e20}'
-    +'#lk-ttn-panel a{display:inline-block;margin:2px 5px 2px 0;color:#0a58ca;text-decoration:none}'
-    +'#lk-ttn-panel a:hover{text-decoration:underline}'
-    +'#lk-ttn-panel .ts{color:#999;font-size:11px;margin-top:9px}';
-  var st=document.createElement('style'); st.textContent=css; (document.head||document.documentElement).appendChild(st);
-
-  var cache=null, busy=false;  // cache = {ids:[], ts}
-
-  function fetchPage(page){
-    return fetch(ORDERS+'?page='+page+'&limit='+LIMIT, {headers:{'Form-Api-Key':API_KEY,'Accept':'application/json'}})
-      .then(function(r){ return r.ok?r.json():null; })
-      .then(function(j){ return (j&&j.data)||[]; })
-      .catch(function(){ return []; });
-  }
-  function isReady(o){
-    var d=(o.ord_delivery_data||[])[0]||{};
-    return !!(d.trackingNumber && String(d.isPrinted)==='1' && !Number(d.addedToRegister));
-  }
-  function collect(force){
-    if(busy) return;
-    if(cache && !force && (Date.now()-cache.ts)<CACHE_MS){ render(); return; }
-    busy=true; render('wait');
-    var ids=[], chain=Promise.resolve();
-    for(var p=1;p<=PAGES;p++){ (function(pg){
-      chain=chain.then(function(){ return fetchPage(pg).then(function(arr){
-        arr.forEach(function(o){ if(isReady(o)) ids.push(o.id); });
-        return new Promise(function(res){ setTimeout(res,250); }); // легка пауза між сторінками
-      }); });
-    })(p); }
-    chain.then(function(){ cache={ids:ids, ts:Date.now()}; busy=false; render(); });
-  }
-
-  function ensurePill(){
-    var el=document.getElementById('lk-ttn-pill');
-    if(!el){
-      el=document.createElement('div'); el.id='lk-ttn-pill';
-      el.innerHTML='<span>📦 До передачі:</span><span class="n">…</span><button class="rf" title="Оновити">🔄</button>';
-      el.addEventListener('click', function(e){
-        if(e.target.closest('.rf')){ e.stopPropagation(); collect(true); return; }
-        var p=document.getElementById('lk-ttn-panel'); if(p) p.classList.toggle('show');
-      });
-      document.body.appendChild(el);
-    }
-    return el;
-  }
-  function render(state){
-    if(!onListPage()){ removeUi(); return; }
-    var el=ensurePill(), n=el.querySelector('.n');
-    if(state==='wait'){ el.classList.add('wait'); n.textContent=(cache?cache.ids.length:'…'); return; }
-    el.classList.remove('wait');
-    var ids=(cache&&cache.ids)||[];
-    n.textContent=ids.length;
-    var panel=document.getElementById('lk-ttn-panel');
-    if(!panel){ panel=document.createElement('div'); panel.id='lk-ttn-panel'; document.body.appendChild(panel); }
-    var links=ids.map(function(id){ return '<a href="/ua/index.html?formId=1#/order/update/'+id+'" target="_blank" rel="noopener">№'+id+'</a>'; }).join(' ');
-    var w=cache?new Date(cache.ts):null;
-    panel.innerHTML='<div class="h">📦 Роздруковані ТТН, ще не передані ('+ids.length+')</div>'
-      +(ids.length?links:'<div style="color:#999">Немає</div>')
-      +'<div class="ts">оновлено '+(w?two(w.getHours())+':'+two(w.getMinutes())+':'+two(w.getSeconds()):'')+' · клік по пілюлі — показати/сховати</div>';
-  }
-  function removeUi(){ var a=document.getElementById('lk-ttn-pill'); if(a)a.remove(); var b=document.getElementById('lk-ttn-panel'); if(b)b.remove(); }
-
-  function tick(){
-    if(!onListPage()){ removeUi(); return; }
-    ensurePill(); render(); collect(false);
-  }
-  window.addEventListener('lkdom', function(){ setTimeout(tick, 200); });
-  window.addEventListener('hashchange', function(){ setTimeout(tick, 150); });
-  tick();
-})();
-}catch(e){ try{ console.warn("[SD] модуль «lkPackerTtn» не запустився:", e); }catch(_){} }
-/* ▲▲▲ МОДУЛЬ-END • lkPackerTtn ▲▲▲ */
 
 /* ▼▼▼ МОДУЛЬ-START • lkQuickPickup — ➕ Швидка кнопка: нова заявка із самовивозом ▼▼▼ */
 /* ===== ➕ Швидка кнопка: нова заявка із самовивозом ===== */
