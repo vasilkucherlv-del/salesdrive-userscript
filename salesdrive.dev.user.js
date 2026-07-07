@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      1.91
+// @version      1.92
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4073,7 +4073,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       });
     });
     gSet(NAME_KEY,nameMap);
-    return Object.keys(agg).map(function(sku){ var e=agg[sku]; return {sku:sku,name:nameMap[sku]||'',qty:e.qty,orders:Object.keys(e.ord).length}; });
+    return Object.keys(agg).map(function(sku){ var e=agg[sku]; var ids=Object.keys(e.ord).sort(function(a,b){ return a-b; }); return {sku:sku,name:nameMap[sku]||'',qty:e.qty,orders:ids.length,orderIds:ids}; });
   }
 
   /* ---------- UI ---------- */
@@ -4097,6 +4097,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     +'#lk-pick-tbl td.q{text-align:center;font-weight:800;font-size:15px;color:#00695c;white-space:nowrap}'
     +'#lk-pick-tbl td.sku{font-family:ui-monospace,Menlo,Consolas,monospace;color:#333;white-space:nowrap}'
     +'#lk-pick-tbl td.cnt{text-align:center;color:#999;font-size:12px}'
+    +'#lk-pick-tbl td.ord{font-size:12px;line-height:1.9}'
+    +'#lk-pick-tbl td.ord a{color:#0a58ca;text-decoration:none;margin-right:8px;white-space:nowrap}'
+    +'#lk-pick-tbl td.ord a:hover{text-decoration:underline}'
     +'#lk-pick-msg{padding:20px 16px;color:#777;font-size:14px;line-height:1.6}'
     +'#lk-pick-print{display:none}'
     +'@media print{ body>*{display:none !important} #lk-pick-print{display:block !important;font:12px Arial} #lk-pick-print h2{font-size:16px} #lk-pick-print table{width:100%;border-collapse:collapse} #lk-pick-print th,#lk-pick-print td{border:1px solid #999;padding:4px 6px;text-align:left} #lk-pick-print td.q{text-align:center;font-weight:bold} }';
@@ -4155,10 +4158,11 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     if(sub && cache) sub.textContent='Статуси: '+cache.statuses.join(', ')+' · заявок: '+cache.ordersCount+' · позицій: '+cache.rows.length;
     var rows=sortedRows();
     var missing=[];
-    var html='<table id="lk-pick-tbl"><thead><tr><th>Код</th><th>Назва</th><th style="text-align:center">Шт</th><th style="text-align:center">Заявок</th></tr></thead><tbody>';
+    var html='<table id="lk-pick-tbl"><thead><tr><th>Код</th><th>Назва</th><th style="text-align:center">Шт</th><th>Заявки</th></tr></thead><tbody>';
     rows.forEach(function(r){
       if(!r.name){ missing.push(r.sku); }
-      html+='<tr><td class="sku">'+esc(r.sku)+'</td><td data-sku="'+esc(r.sku)+'">'+esc(r.name||'—')+'</td><td class="q">'+r.qty+'</td><td class="cnt">'+r.orders+'</td></tr>';
+      var links=(r.orderIds||[]).map(function(id){ return '<a href="/ua/index.html?formId=1#/order/update/'+id+'" target="_blank" rel="noopener">№'+id+'</a>'; }).join(' ');
+      html+='<tr><td class="sku">'+esc(r.sku)+'</td><td data-sku="'+esc(r.sku)+'">'+esc(r.name||'—')+'</td><td class="q">'+r.qty+'</td><td class="ord">'+links+'</td></tr>';
     });
     html+='</tbody></table>';
     document.getElementById('lk-pick-content').innerHTML=html;
@@ -4172,8 +4176,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 
   function textDump(){
     var rows=sortedRows();
-    var lines=['Код\tНазва\tШт\tЗаявок'];
-    rows.forEach(function(r){ lines.push(r.sku+'\t'+(r.name||'')+'\t'+r.qty+'\t'+r.orders); });
+    var lines=['Код\tНазва\tШт\tЗаявки'];
+    rows.forEach(function(r){ lines.push(r.sku+'\t'+(r.name||'')+'\t'+r.qty+'\t'+(r.orderIds||[]).map(function(id){ return '№'+id; }).join(' ')); });
     return lines.join('\n');
   }
   function doCopy(){
@@ -4185,8 +4189,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     var pr=document.getElementById('lk-pick-print'); if(!pr||!cache) return;
     var rows=sortedRows();
     var html='<h2>📋 Лист комплектації — статуси '+esc(cache.statuses.join(', '))+' (заявок: '+cache.ordersCount+')</h2>'
-      +'<table><thead><tr><th>Код</th><th>Назва</th><th>Шт</th><th>Заявок</th></tr></thead><tbody>';
-    rows.forEach(function(r){ html+='<tr><td>'+esc(r.sku)+'</td><td>'+esc(r.name||'')+'</td><td class="q">'+r.qty+'</td><td>'+r.orders+'</td></tr>'; });
+      +'<table><thead><tr><th>Код</th><th>Назва</th><th>Шт</th><th>Заявки</th></tr></thead><tbody>';
+    rows.forEach(function(r){ html+='<tr><td>'+esc(r.sku)+'</td><td>'+esc(r.name||'')+'</td><td class="q">'+r.qty+'</td><td>'+(r.orderIds||[]).map(function(id){ return '№'+id; }).join(', ')+'</td></tr>'; });
     html+='</tbody></table>';
     pr.innerHTML=html;
     window.print();
