@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      1.88
+// @version      1.89
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -35,6 +35,7 @@
      • lkCheckCashbox   — підстановка «каса самовивозу» у формі чека (оплата готівка/термінал)
      • lkCopyNoGoods    — кнопка «🗐 без товарів» (копія заявки без товарних рядків)
      • lkSenderBySource — відправник СМС за джерелом замовлення (FIXLAND/Refort/lartek/Сайт/mobile_catalog_app/Bigl)
+     • lkPackerTtn      — 📦 лічильник роздрукованих ТТН для передачі кур'єру (список заявок)
    ╚══════════════════════════════════════════════════════════════════╝ */
 
 /* ▼▼▼ МОДУЛЬ-START • core — ЯДРО — шина подій, дані з Google-таблиць, стилі; містить content.js (підказки/ціни/рейтинг/ТТН) і Базу знань ▼▼▼ */
@@ -4066,6 +4067,109 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 })();
 }catch(e){ try{ console.warn("[SD] модуль «lkPayLink» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkPayLink ▲▲▲ */
+
+
+/* ▼▼▼ МОДУЛЬ-START • lkPackerTtn — 📦 Лічильник роздрукованих ТТН для передачі кур'єру ▼▼▼ */
+/* ===== Рахує заявки, де ТТН роздрукована (isPrinted=1), але ще не додана в
+   реєстр (addedToRegister=0) — тобто «готові до передачі кур'єру». Лічильник —
+   плаваюча пілюля на сторінці списку заявок (#/order/index). ===== */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
+(function lkPackerTtn(){
+  'use strict';
+  var API_KEY='9yC3JYj4MlYitQ8J3KUf-uy_qPDYkFzwoITQSUeiWEDMZntbQ4uj0NxNcHrqAg8VAB6wDmkdXJZ1LMFgnQbuivTSrzutQbVB66wN';
+  var ORDERS='/api/order/list/';
+  var PAGES=4, LIMIT=100;      // ~400 свіжих заявок — покриває всі непередані
+  var CACHE_MS=120000;         // лічильник кешується 2 хв; 🔄 оновлює одразу
+
+  function onListPage(){ return /#\/order\/index/.test(location.hash||''); }
+  function two(x){ return (x<10?'0':'')+x; }
+
+  var css=''
+    +'#lk-ttn-pill{position:fixed;top:64px;right:18px;z-index:2147483000;'
+    +'  background:#1b5e20;color:#fff;border-radius:24px;padding:9px 15px;'
+    +'  font:700 14px/1.2 Arial,sans-serif;cursor:pointer;box-shadow:0 3px 12px rgba(0,0,0,.28);'
+    +'  display:flex;align-items:center;gap:9px;user-select:none}'
+    +'#lk-ttn-pill.wait{background:#8a8a8a}'
+    +'#lk-ttn-pill .n{font-size:19px;min-width:18px;text-align:center}'
+    +'#lk-ttn-pill .rf{background:rgba(255,255,255,.22);border:none;color:#fff;border-radius:50%;'
+    +'  width:23px;height:23px;cursor:pointer;font-size:12px;line-height:23px;padding:0}'
+    +'#lk-ttn-panel{position:fixed;top:104px;right:18px;z-index:2147483000;width:290px;max-height:60vh;'
+    +'  overflow:auto;background:#fff;border:1px solid #cfcfcf;border-radius:12px;'
+    +'  box-shadow:0 10px 34px rgba(0,0,0,.3);font:13px/1.55 Arial,sans-serif;color:#222;'
+    +'  padding:11px 13px;display:none}'
+    +'#lk-ttn-panel.show{display:block}'
+    +'#lk-ttn-panel .h{font-weight:700;margin-bottom:6px;color:#1b5e20}'
+    +'#lk-ttn-panel a{display:inline-block;margin:2px 5px 2px 0;color:#0a58ca;text-decoration:none}'
+    +'#lk-ttn-panel a:hover{text-decoration:underline}'
+    +'#lk-ttn-panel .ts{color:#999;font-size:11px;margin-top:9px}';
+  var st=document.createElement('style'); st.textContent=css; (document.head||document.documentElement).appendChild(st);
+
+  var cache=null, busy=false;  // cache = {ids:[], ts}
+
+  function fetchPage(page){
+    return fetch(ORDERS+'?page='+page+'&limit='+LIMIT, {headers:{'Form-Api-Key':API_KEY,'Accept':'application/json'}})
+      .then(function(r){ return r.ok?r.json():null; })
+      .then(function(j){ return (j&&j.data)||[]; })
+      .catch(function(){ return []; });
+  }
+  function isReady(o){
+    var d=(o.ord_delivery_data||[])[0]||{};
+    return !!(d.trackingNumber && String(d.isPrinted)==='1' && !Number(d.addedToRegister));
+  }
+  function collect(force){
+    if(busy) return;
+    if(cache && !force && (Date.now()-cache.ts)<CACHE_MS){ render(); return; }
+    busy=true; render('wait');
+    var ids=[], chain=Promise.resolve();
+    for(var p=1;p<=PAGES;p++){ (function(pg){
+      chain=chain.then(function(){ return fetchPage(pg).then(function(arr){
+        arr.forEach(function(o){ if(isReady(o)) ids.push(o.id); });
+        return new Promise(function(res){ setTimeout(res,250); }); // легка пауза між сторінками
+      }); });
+    })(p); }
+    chain.then(function(){ cache={ids:ids, ts:Date.now()}; busy=false; render(); });
+  }
+
+  function ensurePill(){
+    var el=document.getElementById('lk-ttn-pill');
+    if(!el){
+      el=document.createElement('div'); el.id='lk-ttn-pill';
+      el.innerHTML='<span>📦 До передачі:</span><span class="n">…</span><button class="rf" title="Оновити">🔄</button>';
+      el.addEventListener('click', function(e){
+        if(e.target.closest('.rf')){ e.stopPropagation(); collect(true); return; }
+        var p=document.getElementById('lk-ttn-panel'); if(p) p.classList.toggle('show');
+      });
+      document.body.appendChild(el);
+    }
+    return el;
+  }
+  function render(state){
+    if(!onListPage()){ removeUi(); return; }
+    var el=ensurePill(), n=el.querySelector('.n');
+    if(state==='wait'){ el.classList.add('wait'); n.textContent=(cache?cache.ids.length:'…'); return; }
+    el.classList.remove('wait');
+    var ids=(cache&&cache.ids)||[];
+    n.textContent=ids.length;
+    var panel=document.getElementById('lk-ttn-panel');
+    if(!panel){ panel=document.createElement('div'); panel.id='lk-ttn-panel'; document.body.appendChild(panel); }
+    var links=ids.map(function(id){ return '<a href="/ua/index.html?formId=1#/order/update/'+id+'" target="_blank" rel="noopener">№'+id+'</a>'; }).join(' ');
+    var w=cache?new Date(cache.ts):null;
+    panel.innerHTML='<div class="h">📦 Роздруковані ТТН, ще не передані ('+ids.length+')</div>'
+      +(ids.length?links:'<div style="color:#999">Немає</div>')
+      +'<div class="ts">оновлено '+(w?two(w.getHours())+':'+two(w.getMinutes())+':'+two(w.getSeconds()):'')+' · клік по пілюлі — показати/сховати</div>';
+  }
+  function removeUi(){ var a=document.getElementById('lk-ttn-pill'); if(a)a.remove(); var b=document.getElementById('lk-ttn-panel'); if(b)b.remove(); }
+
+  function tick(){
+    if(!onListPage()){ removeUi(); return; }
+    ensurePill(); render(); collect(false);
+  }
+  window.addEventListener('lkdom', function(){ setTimeout(tick, 200); });
+  window.addEventListener('hashchange', function(){ setTimeout(tick, 150); });
+  tick();
+})();
+}catch(e){ try{ console.warn("[SD] модуль «lkPackerTtn» не запустився:", e); }catch(_){} }
+/* ▲▲▲ МОДУЛЬ-END • lkPackerTtn ▲▲▲ */
 
 /* ▼▼▼ МОДУЛЬ-START • lkQuickPickup — ➕ Швидка кнопка: нова заявка із самовивозом ▼▼▼ */
 /* ===== ➕ Швидка кнопка: нова заявка із самовивозом ===== */
