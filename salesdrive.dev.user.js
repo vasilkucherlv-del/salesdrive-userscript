@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      1.93
+// @version      1.94
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4238,12 +4238,13 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     while((m=re.exec(dec))){ if(/^\d+$/.test(m[1])) out.push(m[1]); }
     return out;
   }
-  function fetchOrders(statusIds){
-    var qs=statusIds.map(function(s){ return 'filter%5BstatusId%5D%5B%5D='+s; }).join('&');
-    var page=1, all=[], guard=0;
+  // Скан свіжих заявок (без залежності від фільтра статусу — надійніше).
+  // cap*100 останніх заявок з запасом покриває всі непроцесовані.
+  function fetchOrders(maxPages){
+    var cap=maxPages||6, page=1, all=[], guard=0;
     function next(){
-      if(guard++>=40) return Promise.resolve(all);
-      var url=ORDERS+'?page='+page+'&limit=100'+(qs?'&'+qs:'');
+      if(guard++>=cap) return Promise.resolve(all);
+      var url=ORDERS+'?page='+page+'&limit=100';
       return fetch(url,{headers:{'Form-Api-Key':API_KEY,'Accept':'application/json'}})
         .then(function(r){
           if(r.status===400){ return sleep(65000).then(next); }
@@ -4327,17 +4328,14 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 
   function run(force){
     var box=document.getElementById('lk-ukp-box'); if(!box) return;
-    var st=selectedStatuses();
     var sub=document.getElementById('lk-ukp-sub');
-    if(!st.length){ document.getElementById('lk-ukp-content').innerHTML='<div id="lk-ukp-msg">Спочатку відфільтруй список заявок за потрібним статусом — і знову відкрий вікно. Тоді покажу заявки з Пром-оплатою та Укрпоштою.</div>'; if(sub) sub.textContent='Статуси не вибрано'; return; }
-    var key=st.slice().sort().join(',');
-    if(cache && !force && cache.key===key && (Date.now()-cache.t)<CACHE_MS){ render(); return; }
+    if(cache && !force && (Date.now()-cache.t)<CACHE_MS){ render(); return; }
     if(busy) return; busy=true;
-    if(sub) sub.textContent='Статуси: '+st.join(', ')+' · шукаю…';
+    if(sub) sub.textContent='Шукаю серед свіжих заявок…';
     document.getElementById('lk-ukp-content').innerHTML='<div id="lk-ukp-msg">Тягну заявки…</div>';
-    fetchOrders(st).then(function(orders){
-      var rows=orders.filter(isTarget).map(mapRow).sort(function(a,b){ return a.id-b.id; });
-      cache={key:key, t:Date.now(), rows:rows, statuses:st, scanned:orders.length};
+    fetchOrders(6).then(function(orders){   // ~600 свіжих, незалежно від фільтра статусу
+      var rows=orders.filter(isTarget).map(mapRow).sort(function(a,b){ return b.id-a.id; });
+      cache={t:Date.now(), rows:rows, scanned:orders.length};
       busy=false; render();
     }).catch(function(){ busy=false; document.getElementById('lk-ukp-content').innerHTML='<div id="lk-ukp-msg">Не вдалося. Натисни 🔄.</div>'; });
   }
@@ -4345,9 +4343,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   function render(){
     if(!document.getElementById('lk-ukp-box')) return;
     var sub=document.getElementById('lk-ukp-sub');
-    if(sub && cache) sub.textContent='Статуси: '+cache.statuses.join(', ')+' · пром+укрпошта: '+cache.rows.length+' (переглянуто '+cache.scanned+')';
+    if(sub && cache) sub.textContent='Пром-оплата + Укрпошта: '+cache.rows.length+' заявок (переглянуто '+cache.scanned+' свіжих)';
     var rows=(cache&&cache.rows)||[];
-    if(!rows.length){ document.getElementById('lk-ukp-content').innerHTML='<div id="lk-ukp-msg">Серед цих статусів немає заявок «Пром-оплата + Укрпошта».</div>'; return; }
+    if(!rows.length){ document.getElementById('lk-ukp-content').innerHTML='<div id="lk-ukp-msg">Серед свіжих заявок немає «Пром-оплата + Укрпошта».</div>'; return; }
     var html='<table id="lk-ukp-tbl"><thead><tr><th>№</th><th>Відправник</th><th>Отримувач</th><th>Телефон</th><th>Індекс</th><th>Місто / Адреса</th><th>ТТН</th></tr></thead><tbody>';
     rows.forEach(function(r){
       html+='<tr>'
@@ -4378,7 +4376,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   function doPrint(){
     var pr=document.getElementById('lk-ukp-print'); if(!pr||!cache) return;
     var rows=cache.rows||[];
-    var html='<h2>📮 Пром-оплата + Укрпошта — статуси '+esc(cache.statuses.join(', '))+' (заявок: '+rows.length+')</h2>'
+    var html='<h2>📮 Пром-оплата + Укрпошта (заявок: '+rows.length+')</h2>'
       +'<table><thead><tr><th>№</th><th>Відправник</th><th>Отримувач</th><th>Телефон</th><th>Індекс</th><th>Місто / Адреса</th><th>ТТН</th></tr></thead><tbody>';
     rows.forEach(function(r){ html+='<tr><td>№'+r.id+'</td><td>'+esc(r.org)+'</td><td>'+esc(r.name||'')+'</td><td>'+esc(r.phone||'')+'</td><td>'+esc(r.index||'')+'</td><td>'+esc([r.city,r.addr].filter(Boolean).join(' '))+'</td><td>'+esc(r.ttn||'')+'</td></tr>'; });
     html+='</tbody></table>';
