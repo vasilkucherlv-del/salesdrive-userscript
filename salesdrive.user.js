@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.92
+// @version      1.96
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -30,6 +30,7 @@
      • lkStockPayWarn  — попередження: передоплата + малий залишок
      • lkCashRegister  — 💰 Каса самовивозу
      • lkPickList      — 📋 зведений лист комплектації (сума товарів по заявках статусу)
+     • lkUkrPromList   — 📮 лист «Пром-оплата + Укрпошта» (відправник/отримувач/індекс/ТТН, друк)
      • lkQuickPickup   — ➕ нова заявка самовивозу + 📋 список усіх самовивозів
      • lkAutoOrgByPayment — організація: самовивіз→Кучер Василь, інакше→ФОП з платежу
      • lkCheckCashbox   — підстановка «каса самовивозу» у формі чека (оплата готівка/термінал)
@@ -4210,6 +4211,189 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 })();
 }catch(e){ try{ console.warn("[SD] модуль «lkPickList» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkPickList ▲▲▲ */
+
+
+/* ▼▼▼ МОДУЛЬ-START • lkUkrPromList — 📮 Лист «Пром-оплата + Укрпошта» ▼▼▼ */
+/* ===== У статусі «Спаковано» (statusId=15 — ті, що віддаються курʼєру) показує
+   заявки з Пром-оплатою (payment_method=20) і доставкою Укрпошта (shipping_method=30):
+   відправник-ФОП, отримувач (ПІБ+тел), індекс+адреса, ТТН. Щоб пакувальник не
+   переписував їх вручну. Кнопка 📮 на списку заявок → вікно + друк + копія. ===== */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
+(function lkUkrPromList(){
+  'use strict';
+  var API_KEY  = '9yC3JYj4MlYitQ8J3KUf-uy_qPDYkFzwoITQSUeiWEDMZntbQ4uj0NxNcHrqAg8VAB6wDmkdXJZ1LMFgnQbuivTSrzutQbVB66wN';
+  var ORDERS   = '/api/order/list/';
+  var PROM_PM  = 20;   // спосіб оплати «Пром-оплата» (підтверджено на #305175)
+  var UKR_SM   = 30;   // доставка Укрпошта
+  var PACKED_STATUS = 15; // статус «Спаковано» (ті, що віддаються курʼєру) — підтверджено на #305175
+  var CACHE_MS = 150000;
+  // organizationId → назва ФОП (фолбек «ФОП #id»). org 1 = відправник пром+укрпошти.
+  var ORG_NAMES = { 1:'ФОП Кучер Василь Богданович' };
+
+  function onListPage(){ return /#\/order\/index/.test(location.hash||''); }
+  function sleep(ms){ return new Promise(function(r){ setTimeout(r,ms); }); }
+  function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
+
+  // Заявки у статусі «Спаковано» (серверний фільтр за статусом — бере лише ті,
+  // що зараз віддаються курʼєру; далі клієнтом лишаємо пром+укрпошта).
+  function fetchOrders(){
+    var page=1, all=[], guard=0;
+    function next(){
+      if(guard++>=40) return Promise.resolve(all);
+      var url=ORDERS+'?page='+page+'&limit=100&filter%5BstatusId%5D%5B%5D='+PACKED_STATUS;
+      return fetch(url,{headers:{'Form-Api-Key':API_KEY,'Accept':'application/json'}})
+        .then(function(r){
+          if(r.status===400){ return sleep(65000).then(next); }
+          return r.json().catch(function(){return {};}).then(function(j){
+            var arr=j.data||[]; all=all.concat(arr);
+            if(arr.length<100) return all;
+            page++; return sleep(400).then(next);
+          });
+        }).catch(function(){ return all; });
+    }
+    return next();
+  }
+
+  function orgName(id){ return ORG_NAMES[id] || ('ФОП #'+(id==null?'?':id)); }
+  function phoneOf(c){ var p=c&&c.phone; if(Array.isArray(p)) return p[0]||''; return p||''; }
+  function fullName(c){ if(!c) return ''; return [c.lName,c.fName,c.mName].filter(Boolean).join(' ').trim(); }
+  function addrOf(d){
+    if(!d) return '';
+    if(d.address) return d.address; // відділення, напр. «відділення № 64660»
+    return [d.streetName, d.house?('буд.'+d.house):'', d.flat?('кв.'+d.flat):''].filter(Boolean).join(' ');
+  }
+  function isTarget(o){
+    if(Number(o.payment_method)!==PROM_PM) return false;
+    var d=(o.ord_delivery_data||[])[0]||{};
+    return Number(o.shipping_method)===UKR_SM || d.provider==='ukrposhta';
+  }
+  function mapRow(o){
+    var d=(o.ord_delivery_data||[])[0]||{}, c=(o.contacts||[])[0]||{};
+    return { id:o.id, org:orgName(o.organizationId), name:fullName(c), phone:phoneOf(c),
+      index:d.branchNumber||'', city:[d.cityName,d.areaName].filter(Boolean).join(', '),
+      addr:addrOf(d), ttn:d.trackingNumber||'' };
+  }
+
+  var cache=null, busy=false;
+
+  function ensureStyles(){
+    if(document.getElementById('lk-ukp-css')) return;
+    var s=document.createElement('style'); s.id='lk-ukp-css';
+    s.textContent=''
+    +'#lk-ukp-btn{position:fixed;left:18px;bottom:142px;z-index:99998;width:52px;height:52px;border-radius:50%;background:#c0392b;color:#fff;border:none;font-size:22px;cursor:pointer;box-shadow:0 3px 10px rgba(0,0,0,.3)}'
+    +'#lk-ukp-ov{position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.4);display:flex;align-items:flex-start;justify-content:center}'
+    +'#lk-ukp-box{background:#fff;width:920px;max-width:97vw;max-height:92vh;margin-top:3vh;overflow:auto;border-radius:12px;box-shadow:0 12px 40px rgba(0,0,0,.35);font:13px/1.5 Arial,sans-serif;color:#222}'
+    +'#lk-ukp-box .hd{position:sticky;top:0;background:#c0392b;color:#fff;padding:12px 16px;display:flex;align-items:center;justify-content:space-between}'
+    +'#lk-ukp-box .hd b{font-size:16px}'
+    +'#lk-ukp-box .hd button{background:rgba(255,255,255,.2);border:none;color:#fff;border-radius:6px;cursor:pointer;font-size:14px;padding:4px 8px;margin-left:6px}'
+    +'#lk-ukp-box .sub{padding:8px 16px;color:#555;background:#fdf0ee;border-bottom:1px solid #f2cfc9}'
+    +'#lk-ukp-box .tools{padding:8px 16px;display:flex;gap:8px;flex-wrap:wrap}'
+    +'#lk-ukp-box .tools button{border:1px solid #c0392b;background:#fff;color:#c0392b;border-radius:7px;padding:6px 12px;cursor:pointer;font-weight:700}'
+    +'#lk-ukp-box .tools button:hover{background:#fbeae7}'
+    +'#lk-ukp-tbl{width:100%;border-collapse:collapse}'
+    +'#lk-ukp-tbl th,#lk-ukp-tbl td{border-bottom:1px solid #eee;padding:7px 12px;text-align:left;vertical-align:top;font-size:12.5px}'
+    +'#lk-ukp-tbl th{background:#f7f7f7;position:sticky;top:0;font-size:12px;color:#555}'
+    +'#lk-ukp-tbl td.no a{color:#0a58ca;text-decoration:none;font-weight:700}'
+    +'#lk-ukp-tbl td.idx{font-family:ui-monospace,Menlo,Consolas,monospace;font-weight:700;white-space:nowrap}'
+    +'#lk-ukp-tbl td.ttn{font-family:ui-monospace,Menlo,Consolas,monospace;white-space:nowrap}'
+    +'#lk-ukp-tbl td.ttn.no-ttn{color:#c0392b;font-weight:700}'
+    +'#lk-ukp-msg{padding:20px 16px;color:#777;font-size:14px;line-height:1.6}'
+    +'#lk-ukp-print{display:none}'
+    +'@media print{ body>*{display:none !important} #lk-ukp-print{display:block !important;font:12px Arial} #lk-ukp-print h2{font-size:15px} #lk-ukp-print table{width:100%;border-collapse:collapse} #lk-ukp-print th,#lk-ukp-print td{border:1px solid #999;padding:4px 6px;text-align:left;font-size:11px} }';
+    (document.head||document.documentElement).appendChild(s);
+    if(!document.getElementById('lk-ukp-print')){ var pr=document.createElement('div'); pr.id='lk-ukp-print'; document.body.appendChild(pr); }
+  }
+
+  function open(){
+    ensureStyles();
+    if(document.getElementById('lk-ukp-ov')) return;
+    var ov=document.createElement('div'); ov.id='lk-ukp-ov';
+    ov.innerHTML='<div id="lk-ukp-box">'
+      +'<div class="hd"><b>📮 Пром-оплата + Укрпошта</b><span><button class="rf" title="Оновити">🔄</button><button class="x" title="Закрити">✕</button></span></div>'
+      +'<div class="sub" id="lk-ukp-sub">…</div>'
+      +'<div class="tools"><button class="pr">🖨 Друк</button><button class="cp">Копіювати</button></div>'
+      +'<div id="lk-ukp-content"><div id="lk-ukp-msg">Шукаю…</div></div></div>';
+    document.body.appendChild(ov);
+    ov.addEventListener('click', function(e){ if(e.target===ov) ov.remove(); });
+    ov.querySelector('.x').onclick=function(){ ov.remove(); };
+    ov.querySelector('.rf').onclick=function(){ cache=null; run(true); };
+    ov.querySelector('.pr').onclick=doPrint;
+    ov.querySelector('.cp').onclick=doCopy;
+    run(false);
+  }
+
+  function run(force){
+    var box=document.getElementById('lk-ukp-box'); if(!box) return;
+    var sub=document.getElementById('lk-ukp-sub');
+    if(cache && !force && (Date.now()-cache.t)<CACHE_MS){ render(); return; }
+    if(busy) return; busy=true;
+    if(sub) sub.textContent='Шукаю у статусі «Спаковано»…';
+    document.getElementById('lk-ukp-content').innerHTML='<div id="lk-ukp-msg">Тягну заявки…</div>';
+    fetchOrders().then(function(orders){   // лише статус «Спаковано»
+      var rows=orders.filter(isTarget).map(mapRow).sort(function(a,b){ return b.id-a.id; });
+      cache={t:Date.now(), rows:rows, scanned:orders.length};
+      busy=false; render();
+    }).catch(function(){ busy=false; document.getElementById('lk-ukp-content').innerHTML='<div id="lk-ukp-msg">Не вдалося. Натисни 🔄.</div>'; });
+  }
+
+  function render(){
+    if(!document.getElementById('lk-ukp-box')) return;
+    var sub=document.getElementById('lk-ukp-sub');
+    if(sub && cache) sub.textContent='Спаковано · Пром-оплата + Укрпошта: '+cache.rows.length+' заявок (у статусі: '+cache.scanned+')';
+    var rows=(cache&&cache.rows)||[];
+    if(!rows.length){ document.getElementById('lk-ukp-content').innerHTML='<div id="lk-ukp-msg">У статусі «Спаковано» немає заявок «Пром-оплата + Укрпошта».</div>'; return; }
+    var html='<table id="lk-ukp-tbl"><thead><tr><th>№</th><th>Відправник</th><th>Отримувач</th><th>Телефон</th><th>Індекс</th><th>Місто / Адреса</th><th>ТТН</th></tr></thead><tbody>';
+    rows.forEach(function(r){
+      html+='<tr>'
+        +'<td class="no"><a href="/ua/index.html?formId=1#/order/update/'+r.id+'" target="_blank" rel="noopener">№'+r.id+'</a></td>'
+        +'<td>'+esc(r.org)+'</td>'
+        +'<td>'+esc(r.name||'—')+'</td>'
+        +'<td>'+esc(r.phone||'—')+'</td>'
+        +'<td class="idx">'+esc(r.index||'—')+'</td>'
+        +'<td>'+esc([r.city, r.addr].filter(Boolean).join(' · ')||'—')+'</td>'
+        +'<td class="ttn'+(r.ttn?'':' no-ttn')+'">'+esc(r.ttn||'нема ТТН')+'</td>'
+      +'</tr>';
+    });
+    html+='</tbody></table>';
+    document.getElementById('lk-ukp-content').innerHTML=html;
+  }
+
+  function textDump(){
+    var rows=(cache&&cache.rows)||[];
+    var lines=['№\tВідправник\tОтримувач\tТелефон\tІндекс\tМісто/Адреса\tТТН'];
+    rows.forEach(function(r){ lines.push('№'+r.id+'\t'+r.org+'\t'+(r.name||'')+'\t'+(r.phone||'')+'\t'+(r.index||'')+'\t'+[r.city,r.addr].filter(Boolean).join(' ')+'\t'+(r.ttn||'')); });
+    return lines.join('\n');
+  }
+  function doCopy(){
+    var t=textDump();
+    try{ if(typeof GM_setClipboard==='function'){ GM_setClipboard(t); } else { navigator.clipboard.writeText(t); } }catch(e){ try{ navigator.clipboard.writeText(t); }catch(e2){} }
+    var b=document.querySelector('#lk-ukp-box .cp'); if(b){ var o=b.textContent; b.textContent='✓ Скопійовано'; setTimeout(function(){ b.textContent=o; },1200); }
+  }
+  function doPrint(){
+    var pr=document.getElementById('lk-ukp-print'); if(!pr||!cache) return;
+    var rows=cache.rows||[];
+    var html='<h2>📮 Пром-оплата + Укрпошта (заявок: '+rows.length+')</h2>'
+      +'<table><thead><tr><th>№</th><th>Відправник</th><th>Отримувач</th><th>Телефон</th><th>Індекс</th><th>Місто / Адреса</th><th>ТТН</th></tr></thead><tbody>';
+    rows.forEach(function(r){ html+='<tr><td>№'+r.id+'</td><td>'+esc(r.org)+'</td><td>'+esc(r.name||'')+'</td><td>'+esc(r.phone||'')+'</td><td>'+esc(r.index||'')+'</td><td>'+esc([r.city,r.addr].filter(Boolean).join(' '))+'</td><td>'+esc(r.ttn||'')+'</td></tr>'; });
+    html+='</tbody></table>';
+    pr.innerHTML=html;
+    window.print();
+  }
+
+  function addBtn(){
+    if(!onListPage()){ var b0=document.getElementById('lk-ukp-btn'); if(b0) b0.remove(); var ov=document.getElementById('lk-ukp-ov'); if(ov) ov.remove(); return; }
+    if(document.getElementById('lk-ukp-btn')) return;
+    ensureStyles();
+    var b=document.createElement('button'); b.id='lk-ukp-btn'; b.textContent='📮'; b.title='Пром-оплата + Укрпошта (лист відправлень)';
+    b.onclick=open;
+    document.body.appendChild(b);
+  }
+  window.addEventListener('lkdom', addBtn);
+  window.addEventListener('hashchange', function(){ setTimeout(addBtn,150); });
+  addBtn();
+})();
+}catch(e){ try{ console.warn("[SD] модуль «lkUkrPromList» не запустився:", e); }catch(_){} }
+/* ▲▲▲ МОДУЛЬ-END • lkUkrPromList ▲▲▲ */
 
 /* ▼▼▼ МОДУЛЬ-START • lkQuickPickup — ➕ Швидка кнопка: нова заявка із самовивозом ▼▼▼ */
 /* ===== ➕ Швидка кнопка: нова заявка із самовивозом ===== */
