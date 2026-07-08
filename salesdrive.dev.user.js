@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      1.95
+// @version      1.96
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4214,10 +4214,10 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 
 
 /* ▼▼▼ МОДУЛЬ-START • lkUkrPromList — 📮 Лист «Пром-оплата + Укрпошта» ▼▼▼ */
-/* ===== Серед заявок вибраних статусів (фільтр списку) показує ті, що мають
-   Пром-оплату (payment_method=20) і доставку Укрпошта (shipping_method=30):
-   відправник-ФОП, отримувач (ПІБ+тел), індекс+адреса, ТТН. Кнопка 📮 на списку
-   заявок → вікно + друк + копія. ===== */
+/* ===== У статусі «Спаковано» (statusId=15 — ті, що віддаються курʼєру) показує
+   заявки з Пром-оплатою (payment_method=20) і доставкою Укрпошта (shipping_method=30):
+   відправник-ФОП, отримувач (ПІБ+тел), індекс+адреса, ТТН. Щоб пакувальник не
+   переписував їх вручну. Кнопка 📮 на списку заявок → вікно + друк + копія. ===== */
 try{ // SD-ізоляція: помилка цього модуля не зупинить решту
 (function lkUkrPromList(){
   'use strict';
@@ -4225,6 +4225,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   var ORDERS   = '/api/order/list/';
   var PROM_PM  = 20;   // спосіб оплати «Пром-оплата» (підтверджено на #305175)
   var UKR_SM   = 30;   // доставка Укрпошта
+  var PACKED_STATUS = 15; // статус «Спаковано» (ті, що віддаються курʼєру) — підтверджено на #305175
   var CACHE_MS = 150000;
   // organizationId → назва ФОП (фолбек «ФОП #id»). org 1 = відправник пром+укрпошти.
   var ORG_NAMES = { 1:'ФОП Кучер Василь Богданович' };
@@ -4233,18 +4234,13 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   function sleep(ms){ return new Promise(function(r){ setTimeout(r,ms); }); }
   function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
 
-  function selectedStatuses(){
-    var out=[], dec=decodeURIComponent(location.hash||''), re=/filter\[statusId\]\[\]=([^&]+)/g, m;
-    while((m=re.exec(dec))){ if(/^\d+$/.test(m[1])) out.push(m[1]); }
-    return out;
-  }
-  // Скан свіжих заявок (без залежності від фільтра статусу — надійніше).
-  // cap*100 останніх заявок з запасом покриває всі непроцесовані.
-  function fetchOrders(maxPages){
-    var cap=maxPages||6, page=1, all=[], guard=0;
+  // Заявки у статусі «Спаковано» (серверний фільтр за статусом — бере лише ті,
+  // що зараз віддаються курʼєру; далі клієнтом лишаємо пром+укрпошта).
+  function fetchOrders(){
+    var page=1, all=[], guard=0;
     function next(){
-      if(guard++>=cap) return Promise.resolve(all);
-      var url=ORDERS+'?page='+page+'&limit=100';
+      if(guard++>=40) return Promise.resolve(all);
+      var url=ORDERS+'?page='+page+'&limit=100&filter%5BstatusId%5D%5B%5D='+PACKED_STATUS;
       return fetch(url,{headers:{'Form-Api-Key':API_KEY,'Accept':'application/json'}})
         .then(function(r){
           if(r.status===400){ return sleep(65000).then(next); }
@@ -4331,9 +4327,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     var sub=document.getElementById('lk-ukp-sub');
     if(cache && !force && (Date.now()-cache.t)<CACHE_MS){ render(); return; }
     if(busy) return; busy=true;
-    if(sub) sub.textContent='Шукаю серед свіжих заявок…';
+    if(sub) sub.textContent='Шукаю у статусі «Спаковано»…';
     document.getElementById('lk-ukp-content').innerHTML='<div id="lk-ukp-msg">Тягну заявки…</div>';
-    fetchOrders(6).then(function(orders){   // ~600 свіжих, незалежно від фільтра статусу
+    fetchOrders().then(function(orders){   // лише статус «Спаковано»
       var rows=orders.filter(isTarget).map(mapRow).sort(function(a,b){ return b.id-a.id; });
       cache={t:Date.now(), rows:rows, scanned:orders.length};
       busy=false; render();
@@ -4343,9 +4339,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   function render(){
     if(!document.getElementById('lk-ukp-box')) return;
     var sub=document.getElementById('lk-ukp-sub');
-    if(sub && cache) sub.textContent='Пром-оплата + Укрпошта: '+cache.rows.length+' заявок (переглянуто '+cache.scanned+' свіжих)';
+    if(sub && cache) sub.textContent='Спаковано · Пром-оплата + Укрпошта: '+cache.rows.length+' заявок (у статусі: '+cache.scanned+')';
     var rows=(cache&&cache.rows)||[];
-    if(!rows.length){ document.getElementById('lk-ukp-content').innerHTML='<div id="lk-ukp-msg">Серед свіжих заявок немає «Пром-оплата + Укрпошта».</div>'; return; }
+    if(!rows.length){ document.getElementById('lk-ukp-content').innerHTML='<div id="lk-ukp-msg">У статусі «Спаковано» немає заявок «Пром-оплата + Укрпошта».</div>'; return; }
     var html='<table id="lk-ukp-tbl"><thead><tr><th>№</th><th>Відправник</th><th>Отримувач</th><th>Телефон</th><th>Індекс</th><th>Місто / Адреса</th><th>ТТН</th></tr></thead><tbody>';
     rows.forEach(function(r){
       html+='<tr>'
