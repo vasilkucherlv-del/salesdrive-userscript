@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      1.94
+// @version      1.95
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4226,8 +4226,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   var PROM_PM  = 20;   // спосіб оплати «Пром-оплата» (підтверджено на #305175)
   var UKR_SM   = 30;   // доставка Укрпошта
   var CACHE_MS = 150000;
-  // organizationId → назва ФОП (значення уточнюються; фолбек «ФОП #id»)
-  var ORG_NAMES = {};
+  // organizationId → назва ФОП (фолбек «ФОП #id»). org 1 = відправник пром+укрпошти.
+  var ORG_NAMES = { 1:'ФОП Кучер Василь Богданович' };
 
   function onListPage(){ return /#\/order\/index/.test(location.hash||''); }
   function sleep(ms){ return new Promise(function(r){ setTimeout(r,ms); }); }
