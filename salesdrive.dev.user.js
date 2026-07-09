@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      1.98
+// @version      1.99
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -34,6 +34,7 @@
      • lkQuickPickup   — ➕ нова заявка самовивозу + 📋 список усіх самовивозів
      • lkAutoOrgByPayment — організація: самовивіз→Кучер Василь, інакше→ФОП з платежу
      • lkCheckCashbox   — підстановка «каса самовивозу» у формі чека (оплата готівка/термінал)
+     • lkCheckButton    — 🧾 кнопка «Чек»: відкрити форму чека самовивозу + підставити спосіб оплати (готівка/термінал)
      • lkCopyNoGoods    — кнопка «🗐 без товарів» (копія заявки без товарних рядків)
      • lkSenderBySource — відправник СМС за джерелом замовлення (FIXLAND/Refort/lartek/Сайт/mobile_catalog_app/Bigl)
    ╚══════════════════════════════════════════════════════════════════╝ */
@@ -4885,6 +4886,195 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 })();
 }catch(e){ try{ console.warn("[SD] модуль «lkCheckCashbox» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkCheckCashbox ▲▲▲ */
+
+
+/* ▼▼▼ МОДУЛЬ-START • lkCheckButton — 🧾 кнопка «Чек»: відкрити форму чека самовивозу + підставити спосіб оплати ▼▼▼ */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
+(function lkCheckButton(){
+  'use strict';
+  // DEBUG=true → логи [SD-Чек-кнопка] у консоль (для розвідки селекторів меню/полів).
+  // Перед переносом у СТАБІЛЬНУ версію поставити false.
+  var DEBUG=true;
+  function dbg(){ if(!DEBUG) return; try{ console.log.apply(console,['[SD-Чек-кнопка]'].concat([].slice.call(arguments))); }catch(e){} }
+
+  var REALWIN=(typeof unsafeWindow!=='undefined'&&unsafeWindow)?unsafeWindow:window;
+  function clickIt(el){
+    if(!el) return;
+    // mouseenter/mousedown/mouseup/click з view:REALWIN — щоб select2/Angular прийняли синтетичний клік
+    ['mouseenter','mousedown','mouseup','click'].forEach(function(t){
+      var ev; try{ ev=new MouseEvent(t,{bubbles:true,cancelable:true,view:REALWIN}); }
+      catch(e){ ev=new MouseEvent(t,{bubbles:true,cancelable:true}); }
+      el.dispatchEvent(ev);
+    });
+  }
+  function norm(s){ return String(s==null?'':s).replace(/\s+/g,' ').trim(); }
+
+  // текст готового (домальованого) поля заявки; null якщо сире/довге (ще будується)
+  function readyFieldText(attr){
+    var f=document.querySelector('[attr-field-name="'+attr+'"]');
+    if(!f) return null;
+    var t=norm(f.textContent);
+    return t.length>40 ? null : t;
+  }
+  function fieldEmpty(f){
+    if(!f) return true;
+    var t=norm(f.textContent);
+    return (!t || t==='---' || /ph-is-empty/.test(f.innerHTML||''));
+  }
+  function optsVisible(){ return document.querySelectorAll('li.select2-results__option').length>0; }
+  function findOpt(re){
+    var lis=document.querySelectorAll('li.select2-results__option');
+    for(var i=0;i<lis.length;i++){ if(re.test(lis[i].textContent||'')) return lis[i]; }
+    return null;
+  }
+  // відкрити select2-поле й обрати перший пункт за регексом — ЛИШЕ якщо поле порожнє
+  function pickInField(attr, re){
+    var f=document.querySelector('[attr-field-name="'+attr+'"]');
+    if(!f){ dbg('поле',attr,'не знайдено'); return; }
+    if(!fieldEmpty(f)){ dbg('поле',attr,'вже заповнене — не чіпаю'); return; }
+    clickIt(f);
+    var tries=0;
+    var iv=setInterval(function(){
+      tries++;
+      if(optsVisible()){
+        clearInterval(iv);
+        var s=0;
+        var iv2=setInterval(function(){
+          s++;
+          var opt=findOpt(re);
+          if(opt){ clearInterval(iv2); clickIt(opt.querySelector('span')||opt); dbg('обрано у полі',attr); }
+          else if(s>30){ clearInterval(iv2); dbg('пункт у полі',attr,'не знайдено'); }
+        },90);
+        return;
+      }
+      if(tries===1||tries%5===0) clickIt(f);
+      if(tries>30){ clearInterval(iv); dbg('попап поля',attr,'не відкрився'); }
+    },110);
+  }
+
+  // знайти клікабельний пункт «Чек» (точний текст) — НЕ плутати з «без чека»/«чернетка»/«чеки».
+  // Пріоритет: пункти випадного меню (.dropdown-menu / [ng-click]); далі — будь-який a/button/span.
+  function findCheckItem(){
+    var groups=[
+      document.querySelectorAll('.dropdown-menu a, .dropdown-menu li, .dropdown-menu button, [ng-click]'),
+      document.querySelectorAll('a, button, span, li')
+    ];
+    for(var g=0; g<groups.length; g++){
+      var cands=groups[g];
+      for(var i=0;i<cands.length;i++){
+        var el=cands[i];
+        if(el.id==='lk-check-btn') continue;      // не наша власна кнопка
+        if(/^\s*чек\s*$/i.test(norm(el.textContent))) return el;
+      }
+    }
+    return null;
+  }
+  function actionMenuTriggers(){
+    return document.querySelectorAll('.dropdown-toggle,[data-toggle="dropdown"],[ng-click*="dropdown"],[ng-click*="menu"]');
+  }
+  // дочекатися появи форми чека (поле documentPaymentTypeId), тоді cb()
+  function waitForm(cb){
+    var n=0;
+    var iv=setInterval(function(){
+      n++;
+      if(document.querySelector('[attr-field-name="documentPaymentTypeId"]')){ clearInterval(iv); dbg('форма чека зʼявилась'); if(cb) cb(); return; }
+      if(n>60){ clearInterval(iv); dbg('форма чека не зʼявилась за ~5с'); }
+    },90);
+  }
+  // відкрити форму чека: 1) прямий клік по готовому пункту «Чек»; 2) через меню дій
+  function openCheckForm(cb){
+    var item=findCheckItem();
+    if(item){ dbg('клік по готовому пункту «Чек»', item.tagName+'.'+item.className); clickIt(item); waitForm(cb); return; }
+    var trigs=actionMenuTriggers();
+    dbg('пункт «Чек» не в DOM; тригерів меню дій:', trigs.length);
+    var ti=0;
+    (function tryNext(){
+      if(ti>=trigs.length){ dbg('меню з пунктом «Чек» не знайдено — форму відкрийте вручну'); waitForm(cb); return; }
+      var trg=trigs[ti++];
+      clickIt(trg);
+      var n=0;
+      var iv=setInterval(function(){
+        n++;
+        var it=findCheckItem();
+        if(it){ clearInterval(iv); dbg('знайшов «Чек» у меню', trg.tagName+'.'+trg.className); clickIt(it); waitForm(cb); return; }
+        if(n>8){ clearInterval(iv); tryNext(); }
+      },80);
+    })();
+  }
+
+  // РОЗВІДКА: у DEBUG вивести всі елементи з «чек» та поля форми чека — щоб зафіналити селектори
+  function debugDump(tag){
+    if(!DEBUG) return;
+    try{
+      var items=[];
+      document.querySelectorAll('a,li,button,span,div[ng-click]').forEach(function(el){
+        var t=norm(el.textContent);
+        if(t && t.length<40 && /чек/i.test(t)) items.push((el.tagName||'')+'.'+(el.className||'')+' ["'+t+'"]');
+      });
+      dbg(tag+' — елементи з «чек»:', items.slice(0,40));
+      var flds=[];
+      document.querySelectorAll('.invoice-form-containers [attr-field-name]').forEach(function(f){
+        flds.push(f.getAttribute('attr-field-name')+'="'+norm(f.textContent).slice(0,30)+'"');
+      });
+      if(flds.length) dbg(tag+' — поля форми чека:', flds);
+    }catch(e){}
+  }
+
+  // головна дія кнопки: відкрити форму чека і підставити спосіб оплати за заявкою
+  function openAndFill(){
+    // зафіксувати оплату ЗАЯВКИ до відкриття форми (у формі буде своє поле)
+    var pay=readyFieldText('payment_method')||'';
+    var wantCash=/готівк/i.test(pay);
+    var wantCard=/термінал/i.test(pay);
+    dbg('оплата заявки:', pay, '| готівка:', wantCash, 'термінал:', wantCard);
+    debugDump('до кліку');
+    openCheckForm(function(){
+      debugDump('форма відкрита');
+      // спосіб оплати в чеку — за заявкою (лише якщо порожнє). Касу поставить lkCheckCashbox.
+      if(wantCash)      pickInField('documentPaymentTypeId', /готівк/i);
+      else if(wantCard) pickInField('documentPaymentTypeId', /термінал|картк/i);
+      // касира лишаємо менеджеру («обирати щоразу»); submit НЕ тиснемо
+    });
+  }
+
+  // показувати кнопку лише на картці заявки, коли доставка самовивіз і оплата готівка/термінал
+  function gateOK(){
+    if(!/\/order\/update/.test(location.hash||'')) return false;
+    var ship=readyFieldText('shipping_method');
+    var pay=readyFieldText('payment_method');
+    if(ship===null||pay===null) return false;      // поля ще будуються
+    return /самови/i.test(ship) && /готівк|термінал/i.test(pay);
+  }
+  function ensureBtn(){
+    var anchor=document.querySelector('span.btn-check');
+    if(!anchor||!anchor.parentNode) return null;
+    var b=document.getElementById('lk-check-btn');
+    if(!b){
+      b=document.createElement('span');
+      b.id='lk-check-btn';
+      b.className='btn btn-default cursor-pointer';
+      b.title='Відкрити форму чека і підставити спосіб оплати + касу. Касира оберіть самі; «Створити чек» тисніть вручну.';
+      b.style.marginLeft='6px';
+      b.style.display='none';
+      b.textContent='🧾 Чек';
+      b.onclick=openAndFill;
+      // праворуч від кнопок самовивозу (якщо є), інакше — біля anchor
+      var prev=document.getElementById('lk-all-orders-btn')||document.getElementById('lk-pickup-list-btn')||document.getElementById('lk-pickup-btn')||anchor;
+      prev.parentNode.insertBefore(b, prev.nextSibling);
+    }
+    return b;
+  }
+  function tick(){
+    var b=ensureBtn();
+    if(!b) return;
+    b.style.display = gateOK() ? 'inline-block' : 'none';
+  }
+  window.addEventListener('lkdom', tick);
+  window.addEventListener('hashchange', tick);
+  tick();
+})();
+}catch(e){ try{ console.warn("[SD] модуль «lkCheckButton» не запустився:", e); }catch(_){} }
+/* ▲▲▲ МОДУЛЬ-END • lkCheckButton ▲▲▲ */
 
 
 /* ▼▼▼ МОДУЛЬ-START • lkSenderBySource — відправник у формі СМС за джерелом замовлення ▼▼▼ */
