@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.0
+// @version      2.01
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4952,25 +4952,18 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     },110);
   }
 
-  // знайти клікабельний пункт «Чек» (точний текст) — НЕ плутати з «без чека»/«чернетка»/«чеки».
-  // Пріоритет: пункти випадного меню (.dropdown-menu / [ng-click]); далі — будь-який a/button/span.
-  function findCheckItem(){
-    var groups=[
-      document.querySelectorAll('.dropdown-menu a, .dropdown-menu li, .dropdown-menu button, [ng-click]'),
-      document.querySelectorAll('a, button, span, li')
-    ];
-    for(var g=0; g<groups.length; g++){
-      var cands=groups[g];
-      for(var i=0;i<cands.length;i++){
-        var el=cands[i];
-        if(el.id==='lk-check-btn') continue;      // не наша власна кнопка
-        if(/^\s*чек\s*$/i.test(norm(el.textContent))) return el;
-      }
+  // Створення чека в SalesDrive — окрема сторінка #/document/check/create/order/<id>
+  // (той самий шаблон, що «Прибутковий касовий ордер» → #/document/cash-order/create/order/<id>;
+  // перевірено на живій CRM). Якщо в меню «+ Документ» є готовий лінк на створення чека —
+  // беремо його href (найточніше), інакше будуємо URL самі.
+  function checkCreateHash(orderId){
+    var a=document.querySelector('a[href*="document/check/create"]');
+    if(a){
+      var h=a.getAttribute('href')||'';
+      var i=h.indexOf('#');
+      if(i>=0){ dbg('лінк створення чека з меню:', h); return h.slice(i); }
     }
-    return null;
-  }
-  function actionMenuTriggers(){
-    return document.querySelectorAll('.dropdown-toggle,[data-toggle="dropdown"],[ng-click*="dropdown"],[ng-click*="menu"]');
+    return '#/document/check/create/order/'+orderId;
   }
   // дочекатися появи форми чека (поле documentPaymentTypeId), тоді cb()
   function waitForm(cb){
@@ -4978,62 +4971,40 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     var iv=setInterval(function(){
       n++;
       if(document.querySelector('[attr-field-name="documentPaymentTypeId"]')){ clearInterval(iv); dbg('форма чека зʼявилась'); if(cb) cb(); return; }
-      if(n>60){ clearInterval(iv); dbg('форма чека не зʼявилась за ~5с'); }
+      if(n>100){ clearInterval(iv); dbg('форма чека не зʼявилась за ~9с'); }
     },90);
   }
-  // відкрити форму чека: 1) прямий клік по готовому пункту «Чек»; 2) через меню дій
-  function openCheckForm(cb){
-    var item=findCheckItem();
-    if(item){ dbg('клік по готовому пункту «Чек»', item.tagName+'.'+item.className); clickIt(item); waitForm(cb); return; }
-    var trigs=actionMenuTriggers();
-    dbg('пункт «Чек» не в DOM; тригерів меню дій:', trigs.length);
-    var ti=0;
-    (function tryNext(){
-      if(ti>=trigs.length){ dbg('меню з пунктом «Чек» не знайдено — форму відкрийте вручну'); waitForm(cb); return; }
-      var trg=trigs[ti++];
-      clickIt(trg);
-      var n=0;
-      var iv=setInterval(function(){
-        n++;
-        var it=findCheckItem();
-        if(it){ clearInterval(iv); dbg('знайшов «Чек» у меню', trg.tagName+'.'+trg.className); clickIt(it); waitForm(cb); return; }
-        if(n>8){ clearInterval(iv); tryNext(); }
-      },80);
-    })();
-  }
 
-  // РОЗВІДКА: у DEBUG вивести всі елементи з «чек» та поля форми чека — щоб зафіналити селектори
-  function debugDump(tag){
-    if(!DEBUG) return;
-    try{
-      var items=[];
-      document.querySelectorAll('a,li,button,span,div[ng-click]').forEach(function(el){
-        var t=norm(el.textContent);
-        if(t && t.length<40 && /чек/i.test(t)) items.push((el.tagName||'')+'.'+(el.className||'')+' ["'+t+'"]');
-      });
-      dbg(tag+' — елементи з «чек»:', items.slice(0,40));
-      var flds=[];
-      document.querySelectorAll('.invoice-form-containers [attr-field-name]').forEach(function(f){
-        flds.push(f.getAttribute('attr-field-name')+'="'+norm(f.textContent).slice(0,30)+'"');
-      });
-      if(flds.length) dbg(tag+' — поля форми чека:', flds);
-    }catch(e){}
-  }
-
-  // головна дія кнопки: відкрити форму чека і підставити спосіб оплати за заявкою
+  // головна дія кнопки: відкрити сторінку створення чека і підставити спосіб оплати за заявкою
   function openAndFill(){
-    // зафіксувати оплату ЗАЯВКИ до відкриття форми (у формі буде своє поле)
+    var m=(location.hash||'').match(/\/order\/update\/(\d+)/);
+    var orderId=m?m[1]:null;
+    if(!orderId){ dbg('не бачу id заявки в URL'); return; }
+    // зафіксувати оплату ЗАЯВКИ до переходу (на сторінці чека цього поля вже не буде)
     var pay=readyFieldText('payment_method')||'';
     var wantCash=/готівк/i.test(pay);
     var wantCard=/термінал/i.test(pay);
-    dbg('оплата заявки:', pay, '| готівка:', wantCash, 'термінал:', wantCard);
-    debugDump('до кліку');
-    openCheckForm(function(){
-      debugDump('форма відкрита');
+    dbg('заявка', orderId, '| оплата:', pay, '| готівка:', wantCash, 'термінал:', wantCard);
+    var target=checkCreateHash(orderId);
+    dbg('відкриваю', target);
+    location.hash=target;
+    waitForm(function(){
       // спосіб оплати в чеку — за заявкою (лише якщо порожнє). Касу поставить lkCheckCashbox.
       if(wantCash)      pickInField('documentPaymentTypeId', /готівк/i);
       else if(wantCard) pickInField('documentPaymentTypeId', /термінал|картк/i);
       // касира лишаємо менеджеру («обирати щоразу»); submit НЕ тиснемо
+      if(DEBUG){
+        // розвідка: перелік полів форми чека (щоб знайти поле касира)
+        setTimeout(function(){
+          try{
+            var flds=[];
+            document.querySelectorAll('[attr-field-name]').forEach(function(f){
+              if(f.offsetWidth||f.offsetHeight) flds.push(f.getAttribute('attr-field-name')+'="'+norm(f.textContent).slice(0,30)+'"');
+            });
+            dbg('поля форми чека:', flds.join(' | '));
+          }catch(e){}
+        }, 2500);
+      }
     });
   }
 
