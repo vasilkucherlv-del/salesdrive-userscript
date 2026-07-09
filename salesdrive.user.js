@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.96
+// @version      1.98
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4129,6 +4129,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     run(false);
   }
 
+  // «не роздруковано» = ТТН ще не роздрукована (isPrinted!=1); заявки без ТТН теж рахуємо
+  function notPrinted(o){ var d=(o.ord_delivery_data||[])[0]||{}; return Number(d.isPrinted)!==1; }
+
   function run(force){
     var box=document.getElementById('lk-pick-box'); if(!box) return;
     var st=selectedStatuses();
@@ -4140,8 +4143,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     if(sub) sub.textContent='Статуси: '+st.join(', ')+' · рахую…';
     document.getElementById('lk-pick-content').innerHTML='<div id="lk-pick-msg">Рахую… (тягну заявки й розкладаю набори)</div>';
     loadKits().then(function(){ return fetchOrders(st); }).then(function(orders){
-      var rows=aggregate(orders);
-      cache={key:key, t:Date.now(), rows:rows, ordersCount:orders.length, statuses:st};
+      var pending=orders.filter(notPrinted);   // лише заявки, де ТТН ще НЕ роздруковано (ще треба зібрати)
+      var rows=aggregate(pending);
+      cache={key:key, t:Date.now(), rows:rows, ordersCount:pending.length, statuses:st};
       busy=false; render();
     }).catch(function(){ busy=false; document.getElementById('lk-pick-content').innerHTML='<div id="lk-pick-msg">Не вдалося порахувати. Натисни 🔄.</div>'; });
   }
@@ -4156,8 +4160,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   function render(){
     if(!document.getElementById('lk-pick-box')) return;
     var sub=document.getElementById('lk-pick-sub');
-    if(sub && cache) sub.textContent='Статуси: '+cache.statuses.join(', ')+' · заявок: '+cache.ordersCount+' · позицій: '+cache.rows.length;
+    if(sub && cache) sub.textContent='Статуси: '+cache.statuses.join(', ')+' · заявок (не роздрук.): '+cache.ordersCount+' · позицій: '+cache.rows.length;
     var rows=sortedRows();
+    if(!rows.length){ document.getElementById('lk-pick-content').innerHTML='<div id="lk-pick-msg">Немає заявок до комплектації (усі в цих статусах уже роздруковані).</div>'; return; }
     var missing=[];
     var html='<table id="lk-pick-tbl"><thead><tr><th>Код</th><th>Назва</th><th style="text-align:center">Шт</th><th>Заявки</th></tr></thead><tbody>';
     rows.forEach(function(r){
@@ -4236,20 +4241,22 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 
   // Заявки у статусі «Спаковано» (серверний фільтр за статусом — бере лише ті,
   // що зараз віддаються курʼєру; далі клієнтом лишаємо пром+укрпошта).
+  // Ліміт API (HTTP 400) НЕ чекаємо по 65с — одразу віддаємо {limited:true},
+  // щоб не морозити вікно; показуємо збережений кеш і підказку оновити.
   function fetchOrders(){
     var page=1, all=[], guard=0;
     function next(){
-      if(guard++>=40) return Promise.resolve(all);
+      if(guard++>=40) return Promise.resolve({orders:all, limited:false});
       var url=ORDERS+'?page='+page+'&limit=100&filter%5BstatusId%5D%5B%5D='+PACKED_STATUS;
       return fetch(url,{headers:{'Form-Api-Key':API_KEY,'Accept':'application/json'}})
         .then(function(r){
-          if(r.status===400){ return sleep(65000).then(next); }
+          if(r.status===400){ return {orders:all, limited:true}; }
           return r.json().catch(function(){return {};}).then(function(j){
             var arr=j.data||[]; all=all.concat(arr);
-            if(arr.length<100) return all;
-            page++; return sleep(400).then(next);
+            if(arr.length<100) return {orders:all, limited:false};
+            page++; return sleep(250).then(next);
           });
-        }).catch(function(){ return all; });
+        }).catch(function(){ return {orders:all, limited:false}; });
     }
     return next();
   }
@@ -4274,7 +4281,11 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       addr:addrOf(d), ttn:d.trackingNumber||'' };
   }
 
-  var cache=null, busy=false;
+  // постійний кеш (SWR): миттєве відкриття + фонове оновлення, менше запитів до API
+  var PKEY='lkukp_cache_v1', TTL=5*60*1000;
+  function gGet(k){ try{ var s=GM_getValue(k,null); return s?((typeof s==='string')?JSON.parse(s):s):null; }catch(e){ return null; } }
+  function gSet(k,v){ try{ GM_setValue(k, JSON.stringify(v)); }catch(e){} }
+  var cache=gGet(PKEY)||null, busy=false;
 
   function ensureStyles(){
     if(document.getElementById('lk-ukp-css')) return;
@@ -4325,15 +4336,23 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   function run(force){
     var box=document.getElementById('lk-ukp-box'); if(!box) return;
     var sub=document.getElementById('lk-ukp-sub');
-    if(cache && !force && (Date.now()-cache.t)<CACHE_MS){ render(); return; }
+    var have=cache && cache.rows;
+    if(have) render();                                  // збережене — миттєво
+    if(have && !force && (Date.now()-cache.t)<TTL){ return; } // свіже (<5хв) — API не смикаємо
     if(busy) return; busy=true;
-    if(sub) sub.textContent='Шукаю у статусі «Спаковано»…';
-    document.getElementById('lk-ukp-content').innerHTML='<div id="lk-ukp-msg">Тягну заявки…</div>';
-    fetchOrders().then(function(orders){   // лише статус «Спаковано»
-      var rows=orders.filter(isTarget).map(mapRow).sort(function(a,b){ return b.id-a.id; });
-      cache={t:Date.now(), rows:rows, scanned:orders.length};
-      busy=false; render();
-    }).catch(function(){ busy=false; document.getElementById('lk-ukp-content').innerHTML='<div id="lk-ukp-msg">Не вдалося. Натисни 🔄.</div>'; });
+    if(sub) sub.textContent = have ? 'Оновлюю…' : 'Шукаю у статусі «Спаковано»…';
+    if(!have) document.getElementById('lk-ukp-content').innerHTML='<div id="lk-ukp-msg">Тягну заявки…</div>';
+    fetchOrders().then(function(res){
+      busy=false;
+      if(res.limited){                                  // ліміт API — не оновлюємо частковим, лишаємо кеш
+        if(sub) sub.textContent='⚠️ Сервер обмежує запити (ліміт).'+(have?' Показано збережене.':'')+' Спробуй 🔄 за хвилину.';
+        if(!have) document.getElementById('lk-ukp-content').innerHTML='<div id="lk-ukp-msg">Сервер тимчасово обмежує запити. Зачекай хвилину й натисни 🔄.</div>';
+        return;
+      }
+      var rows=(res.orders||[]).filter(isTarget).map(mapRow).sort(function(a,b){ return b.id-a.id; });
+      cache={t:Date.now(), rows:rows, scanned:(res.orders||[]).length}; gSet(PKEY,cache);
+      render();
+    }).catch(function(){ busy=false; if(!have) document.getElementById('lk-ukp-content').innerHTML='<div id="lk-ukp-msg">Не вдалося. Натисни 🔄.</div>'; });
   }
 
   function render(){
