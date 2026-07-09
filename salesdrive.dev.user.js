@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      1.97
+// @version      1.98
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4129,6 +4129,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     run(false);
   }
 
+  // «не роздруковано» = ТТН ще не роздрукована (isPrinted!=1); заявки без ТТН теж рахуємо
+  function notPrinted(o){ var d=(o.ord_delivery_data||[])[0]||{}; return Number(d.isPrinted)!==1; }
+
   function run(force){
     var box=document.getElementById('lk-pick-box'); if(!box) return;
     var st=selectedStatuses();
@@ -4140,8 +4143,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     if(sub) sub.textContent='Статуси: '+st.join(', ')+' · рахую…';
     document.getElementById('lk-pick-content').innerHTML='<div id="lk-pick-msg">Рахую… (тягну заявки й розкладаю набори)</div>';
     loadKits().then(function(){ return fetchOrders(st); }).then(function(orders){
-      var rows=aggregate(orders);
-      cache={key:key, t:Date.now(), rows:rows, ordersCount:orders.length, statuses:st};
+      var pending=orders.filter(notPrinted);   // лише заявки, де ТТН ще НЕ роздруковано (ще треба зібрати)
+      var rows=aggregate(pending);
+      cache={key:key, t:Date.now(), rows:rows, ordersCount:pending.length, statuses:st};
       busy=false; render();
     }).catch(function(){ busy=false; document.getElementById('lk-pick-content').innerHTML='<div id="lk-pick-msg">Не вдалося порахувати. Натисни 🔄.</div>'; });
   }
@@ -4156,8 +4160,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   function render(){
     if(!document.getElementById('lk-pick-box')) return;
     var sub=document.getElementById('lk-pick-sub');
-    if(sub && cache) sub.textContent='Статуси: '+cache.statuses.join(', ')+' · заявок: '+cache.ordersCount+' · позицій: '+cache.rows.length;
+    if(sub && cache) sub.textContent='Статуси: '+cache.statuses.join(', ')+' · заявок (не роздрук.): '+cache.ordersCount+' · позицій: '+cache.rows.length;
     var rows=sortedRows();
+    if(!rows.length){ document.getElementById('lk-pick-content').innerHTML='<div id="lk-pick-msg">Немає заявок до комплектації (усі в цих статусах уже роздруковані).</div>'; return; }
     var missing=[];
     var html='<table id="lk-pick-tbl"><thead><tr><th>Код</th><th>Назва</th><th style="text-align:center">Шт</th><th>Заявки</th></tr></thead><tbody>';
     rows.forEach(function(r){
