@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      1.99
+// @version      1.991
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -5046,20 +5046,21 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     return /самови/i.test(ship) && /готівк|термінал/i.test(pay);
   }
   function ensureBtn(){
-    var anchor=document.querySelector('span.btn-check');
+    // якір — тулбар КАРТКИ заявки: рідна кнопка копіювання (біля неї стоїть «🗐 без товарів»)
+    var anchor=document.querySelector('button[ng-click="viewModel.copyOrder($event)"]');
     if(!anchor||!anchor.parentNode) return null;
     var b=document.getElementById('lk-check-btn');
     if(!b){
-      b=document.createElement('span');
-      b.id='lk-check-btn';
-      b.className='btn btn-default cursor-pointer';
+      b=document.createElement('button');
+      b.id='lk-check-btn'; b.type='button';
+      b.className='btn btn-default';
       b.title='Відкрити форму чека і підставити спосіб оплати + касу. Касира оберіть самі; «Створити чек» тисніть вручну.';
-      b.style.marginLeft='6px';
+      b.style.marginLeft='4px';
       b.style.display='none';
       b.textContent='🧾 Чек';
-      b.onclick=openAndFill;
-      // праворуч від кнопок самовивозу (якщо є), інакше — біля anchor
-      var prev=document.getElementById('lk-all-orders-btn')||document.getElementById('lk-pickup-list-btn')||document.getElementById('lk-pickup-btn')||anchor;
+      b.addEventListener('click', function(e){ e.preventDefault(); openAndFill(); });
+      // праворуч від «🗐 без товарів», якщо вона вже є, інакше — одразу за кнопкою копіювання
+      var prev=document.getElementById('lk-copy-ng')||anchor;
       prev.parentNode.insertBefore(b, prev.nextSibling);
     }
     return b;
