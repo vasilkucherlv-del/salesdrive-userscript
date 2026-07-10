@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.02
+// @version      2.03
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4910,23 +4910,23 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   function norm(s){ return String(s==null?'':s).replace(/\s+/g,' ').trim(); }
 
   // ── КАСИРИ ──────────────────────────────────────────────────────────────
-  // По кнопці на кожного касира. Імена мають збігатися з текстом у списку
-  // «касир» форми чека SalesDrive (звірка за словами, id не потрібен).
-  // ⚠️ ЗВІРИТИ/ВИПРАВИТИ під реальні підписи касирів у CRM.
+  // По кнопці на кожного касира. На самовивіз — лише 2 касири (один ФОП: Кучер Василь).
+  // Поле касира у формі чека = select2 attr-field-name="cashierId"; опції мають id
+  // «…number:<num>» — тож найнадійніше ставимо касира за num (як каса number:3),
+  // із запасним збігом за іменем.
+  var CASHIER_ATTR = 'cashierId';
   var CASHIERS = [
-    { name:'Кучер Вікторія', label:'Вікторія' },
-    { name:'Кучер Василь',   label:'Василь' },
-    { name:'Лойко Михайло',  label:'Михайло' }
+    { name:'Кисунька Вікторія', label:'Вікторія', num:15 },
+    { name:'yura_dmitrishun',   label:'Юра',      num:10 }
   ];
-  // Якщо дізнаємось точну назву поля касира — вписати сюди (напр. 'cashierId').
-  // Порожнє → шукаємо поле за підписом «касир».
-  var CASHIER_ATTR = '';
 
-  // збіг опції зі списку з іменем касира: усі слова імені мають бути в тексті опції
+  // matcher опції касира: спершу за id опції (…number:<num>), далі за словами імені
   function nameMatcher(cashier){
     var base=(cashier.match||cashier.name||'').toLowerCase();
     var words=base.split(/\s+/).filter(function(w){ return w.length>1; });
-    return function(text){
+    var suf=cashier.num!=null?('number:'+cashier.num):null;
+    return function(text, li){
+      if(suf && li && (li.id||'').slice(-suf.length)===suf) return true;
       if(!words.length) return false;
       var t=norm(text).toLowerCase();
       return words.every(function(w){ return t.indexOf(w)>=0; });
@@ -4948,7 +4948,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   function optsVisible(){ return document.querySelectorAll('li.select2-results__option').length>0; }
   function findOptBy(matchFn){
     var lis=document.querySelectorAll('li.select2-results__option');
-    for(var i=0;i<lis.length;i++){ if(matchFn(lis[i].textContent||'')) return lis[i]; }
+    for(var i=0;i<lis.length;i++){ if(matchFn(lis[i].textContent||'', lis[i])) return lis[i]; }
     return null;
   }
   // відкрити select2-поле (елемент) й клікнути перший пункт за matchFn
@@ -4993,17 +4993,18 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     }
     return null;
   }
-  // підставити касира: підтримуємо і select2 (як каса), і звичайний <select>
+  // підставити касира: ЗАВЖДИ перезаписуємо (у формі стоїть касир за замовчуванням,
+  // а кнопка = явний вибір). Підтримуємо і select2 (як каса), і звичайний <select>.
   function setCashier(cashier){
     var f=cashierField();
     if(!f){ dbg('поле касира не знайдено — оберіть касира вручну'); return; }
     var match=nameMatcher(cashier);
     // звичайний <select>?
     var sel=(f.tagName==='SELECT')?f:(f.querySelector?f.querySelector('select'):null);
-    if(sel && (sel.offsetWidth||sel.offsetHeight||sel.options.length)){
-      if(sel.selectedIndex>0 && norm(sel.options[sel.selectedIndex].textContent)){ dbg('касир уже обраний — не чіпаю'); return; }
+    if(sel && sel.options && sel.options.length){
       for(var i=0;i<sel.options.length;i++){
-        if(match(sel.options[i].textContent)){
+        if(match(sel.options[i].textContent, sel.options[i])){
+          if(sel.selectedIndex===i){ dbg('касир уже цей — ок:', cashier.label||cashier.name); return; }
           sel.value=sel.options[i].value; sel.selectedIndex=i;
           ['input','change'].forEach(function(t){ try{ sel.dispatchEvent(new Event(t,{bubbles:true})); }catch(e){} });
           try{ if(REALWIN.angular) REALWIN.angular.element(sel).triggerHandler('change'); }catch(e){}
@@ -5012,8 +5013,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       }
       dbg('касир не знайдений у списку (select):', cashier.name); return;
     }
-    // інакше select2
-    if(!fieldEmpty(f)){ dbg('касир уже обраний (select2) — не чіпаю'); return; }
+    // інакше select2 — відкрити й клікнути потрібний пункт (перезапис поточного)
     openAndPick(f, match, 'касир:'+(cashier.label||cashier.name));
   }
   // DEBUG: перелік видимих полів форми чека (щоб знайти поле касира)
