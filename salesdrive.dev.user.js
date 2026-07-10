@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.05
+// @version      2.06
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -34,7 +34,7 @@
      • lkQuickPickup   — ➕ нова заявка самовивозу + 📋 список усіх самовивозів
      • lkAutoOrgByPayment — організація: самовивіз→Кучер Василь, інакше→ФОП з платежу
      • lkCheckCashbox   — підстановка «каса самовивозу» у формі чека (оплата готівка/термінал)
-     • lkCheckButton    — 🧾 кнопки «Чек · <касир>»: форма чека самовивозу + спосіб оплати + касир (по кнопці на касира)
+     • lkCheckButton    — 🧾 кнопки «Чек · <касир>»: форма чека + оплата + каса + касир, тоді авто-«Зберегти»
      • lkCopyNoGoods    — кнопка «🗐 без товарів» (копія заявки без товарних рядків)
      • lkSenderBySource — відправник СМС за джерелом замовлення (FIXLAND/Refort/lartek/Сайт/mobile_catalog_app/Bigl)
    ╚══════════════════════════════════════════════════════════════════╝ */
@@ -4919,6 +4919,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     { name:'Кисунька Вікторія', label:'Вікторія', num:15 },
     { name:'yura_dmitrishun',   label:'Юра',      num:10 }
   ];
+  // Після заповнення полів САМІ тиснемо «Зберегти» (створюємо/фіскалізуємо чек).
+  // true = авто-збереження (за рішенням користувача); false = лишити збереження менеджеру.
+  var AUTO_SAVE = true;
 
   // matcher опції касира: спершу за id опції (…number:<num>), далі за словами імені
   function nameMatcher(cashier){
@@ -5058,14 +5061,21 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       if(n>150){ clearInterval(iv); dbg('форма чека не зʼявилась'); }
     },50);
   }
-  // виконати кроки послідовно: кожен наступний стартує щойно попередній завершив (done)
-  function runSeq(steps){
+  // виконати кроки послідовно: кожен наступний стартує щойно попередній завершив (done);
+  // onDone() — після останнього кроку (усі опції вже клікнуті)
+  function runSeq(steps, onDone){
     var i=0;
     (function nextStep(){
-      if(i>=steps.length) return;
+      if(i>=steps.length){ if(onDone) onDone(); return; }
       var step=steps[i++];
       try{ step(function(){ setTimeout(nextStep, 60); }); }catch(e){ dbg('крок впав:', e&&e.message); setTimeout(nextStep, 60); }
     })();
+  }
+  // кнопка збереження документа (чека) — «Зберегти», перша видима
+  function saveBtn(){
+    var bs=document.querySelectorAll('button[ng-click="saveItem();"]');
+    for(var i=0;i<bs.length;i++){ if(bs[i].offsetWidth||bs[i].offsetHeight) return bs[i]; }
+    return bs[0]||null;
   }
 
   // головна дія кнопки: відкрити сторінку створення чека, підставити спосіб оплати + касира
@@ -5091,8 +5101,19 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       if(payRe) steps.push(function(next){ pickInField('documentPaymentTypeId', payRe, next); });
       steps.push(function(next){ pickInFieldNum('cashRegisterId', 3, next); }); // каса самовивозу
       if(cashier) steps.push(function(next){ setCashier(cashier, next); });
-      runSeq(steps);
-      if(DEBUG) setTimeout(dumpFields, 2500);
+      runSeq(steps, function(){
+        if(DEBUG) dumpFields();
+        // авто-збереження: лише якщо ще на сторінці чека і кнопка є; пауза — щоб Angular
+        // зафіксував останній select2-вибір перед збереженням
+        if(!AUTO_SAVE) return;
+        setTimeout(function(){
+          if(!/document\/check/.test(location.hash||'')){ dbg('не на сторінці чека — не зберігаю'); return; }
+          var sb=saveBtn();
+          if(!sb){ dbg('кнопку «Зберегти» не знайдено'); return; }
+          dbg('тисну «Зберегти»');
+          clickIt(sb);
+        }, 320);
+      });
     });
   }
 
