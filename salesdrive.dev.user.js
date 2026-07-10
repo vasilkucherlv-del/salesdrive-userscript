@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.03
+// @version      2.04
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4951,34 +4951,31 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     for(var i=0;i<lis.length;i++){ if(matchFn(lis[i].textContent||'', lis[i])) return lis[i]; }
     return null;
   }
-  // відкрити select2-поле (елемент) й клікнути перший пункт за matchFn
-  function openAndPick(fieldEl, matchFn, tag){
-    tag=tag||'поле';
+  // відкрити select2-поле (елемент) й клікнути пункт за matchFn; done() — коли завершено.
+  // Стійко до «крадіжки» попапа іншим полем: якщо список зник до вибору — перевідкриваємо.
+  function openAndPick(fieldEl, matchFn, tag, done){
+    tag=tag||'поле'; done=done||function(){};
     clickIt(fieldEl);
-    var tries=0;
+    var s=0, finished=false;
+    function fin(){ if(finished) return; finished=true; try{ clearInterval(iv); }catch(e){} done(); }
     var iv=setInterval(function(){
-      tries++;
+      s++;
       if(optsVisible()){
-        clearInterval(iv);
-        var s=0;
-        var iv2=setInterval(function(){
-          s++;
-          var opt=findOptBy(matchFn);
-          if(opt){ clearInterval(iv2); clickIt(opt.querySelector('span')||opt); dbg('обрано:', tag); }
-          else if(s>30){ clearInterval(iv2); dbg('пункт не знайдено:', tag); }
-        },90);
-        return;
+        var opt=findOptBy(matchFn);
+        if(opt){ clickIt(opt.querySelector('span')||opt); dbg('обрано:', tag); fin(); return; }
+      } else if(s%4===0){
+        clickIt(fieldEl); // список закрився/не відкрився — (пере)відкрити
       }
-      if(tries===1||tries%5===0) clickIt(fieldEl);
-      if(tries>30){ clearInterval(iv); dbg('попап не відкрився:', tag); }
+      if(s>45){ dbg('пункт не встановлено:', tag); fin(); }
     },110);
   }
   // select2-поле за attr-field-name, обрати за регексом — ЛИШЕ якщо порожнє
-  function pickInField(attr, re){
+  function pickInField(attr, re, done){
+    done=done||function(){};
     var f=document.querySelector('[attr-field-name="'+attr+'"]');
-    if(!f){ dbg('поле',attr,'не знайдено'); return; }
-    if(!fieldEmpty(f)){ dbg('поле',attr,'вже заповнене — не чіпаю'); return; }
-    openAndPick(f, function(t){ return re.test(t); }, attr);
+    if(!f){ dbg('поле',attr,'не знайдено'); done(); return; }
+    if(!fieldEmpty(f)){ dbg('поле',attr,'вже заповнене — не чіпаю'); done(); return; }
+    openAndPick(f, function(t){ return re.test(t); }, attr, done);
   }
 
   // знайти поле касира у формі чека: за CASHIER_ATTR або за підписом «касир»
@@ -4999,8 +4996,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     var f=cashierField();
     if(!f){ dbg('поле касира не знайдено — оберіть касира вручну'); return; }
     var match=nameMatcher(cashier);
-    // звичайний <select>?
-    var sel=(f.tagName==='SELECT')?f:(f.querySelector?f.querySelector('select'):null);
+    // ЛИШЕ якщо поле — справжній нативний <select> (не select2-віджет SalesDrive).
+    // Поле cashierId у CRM — select2 (як каса), тож піде гілка openAndPick нижче.
+    var sel=(f.tagName==='SELECT')?f:null;
     if(sel && sel.options && sel.options.length){
       for(var i=0;i<sel.options.length;i++){
         if(match(sel.options[i].textContent, sel.options[i])){
@@ -5065,12 +5063,17 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     dbg('відкриваю', target);
     location.hash=target;
     waitForm(function(){
-      // спосіб оплати в чеку — за заявкою (лише якщо порожнє). Касу поставить lkCheckCashbox.
-      if(wantCash)      pickInField('documentPaymentTypeId', /готівк/i);
-      else if(wantCard) pickInField('documentPaymentTypeId', /термінал|картк/i);
-      // касир — за обраною кнопкою (трохи згодом, коли форма домалюється). submit НЕ тиснемо.
-      if(cashier) setTimeout(function(){ setCashier(cashier); }, 500);
-      if(DEBUG) setTimeout(dumpFields, 2500);
+      // Послідовно, щоб не було гонки select2-попапів:
+      // 1) спосіб оплати за заявкою (лише якщо порожнє) → вмикає автопідстановку каси в lkCheckCashbox;
+      // 2) пауза, щоб каса встигла проставитись; 3) касир (перезапис). submit НЕ тиснемо.
+      var payRe = wantCash?/готівк/i : (wantCard?/термінал|картк/i : null);
+      function afterPay(){
+        if(!cashier) return;
+        setTimeout(function(){ setCashier(cashier); }, 900); // дати lkCheckCashbox поставити касу
+      }
+      if(payRe) pickInField('documentPaymentTypeId', payRe, afterPay);
+      else afterPay();
+      if(DEBUG) setTimeout(dumpFields, 3200);
     });
   }
 
