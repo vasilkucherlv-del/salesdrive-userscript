@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.06
+// @version      2.07
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4894,7 +4894,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   'use strict';
   // DEBUG=true → логи [SD-Чек-кнопка] у консоль (для розвідки селекторів меню/полів).
   // Перед переносом у СТАБІЛЬНУ версію поставити false.
-  var DEBUG=true;
+  var DEBUG=false;
   function dbg(){ if(!DEBUG) return; try{ console.log.apply(console,['[SD-Чек-кнопка]'].concat([].slice.call(arguments))); }catch(e){} }
 
   var REALWIN=(typeof unsafeWindow!=='undefined'&&unsafeWindow)?unsafeWindow:window;
@@ -5240,6 +5240,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 
 
 /* ▼▼▼ МОДУЛЬ-START • lkCopyNoGoods — кнопка «Копіювати заявку БЕЗ товарів» ▼▼▼ */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
 (function lkCopyNoGoods(){
   'use strict';
   var FLAG = 'lk_copy_nogoods'; // sessionStorage: {src, ts, srcRows}
@@ -5358,4 +5359,5 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   log('модуль активний (v1.74)');
   tick();
 })();
+}catch(e){ try{ console.warn("[SD] модуль «lkCopyNoGoods» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkCopyNoGoods ▲▲▲ */
