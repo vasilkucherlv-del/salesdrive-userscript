@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.04
+// @version      2.05
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4963,11 +4963,11 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       if(optsVisible()){
         var opt=findOptBy(matchFn);
         if(opt){ clickIt(opt.querySelector('span')||opt); dbg('обрано:', tag); fin(); return; }
-      } else if(s%4===0){
+      } else if(s%2===0){
         clickIt(fieldEl); // список закрився/не відкрився — (пере)відкрити
       }
-      if(s>45){ dbg('пункт не встановлено:', tag); fin(); }
-    },110);
+      if(s>70){ dbg('пункт не встановлено:', tag); fin(); }
+    },55);
   }
   // select2-поле за attr-field-name, обрати за регексом — ЛИШЕ якщо порожнє
   function pickInField(attr, re, done){
@@ -4976,6 +4976,15 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     if(!f){ dbg('поле',attr,'не знайдено'); done(); return; }
     if(!fieldEmpty(f)){ dbg('поле',attr,'вже заповнене — не чіпаю'); done(); return; }
     openAndPick(f, function(t){ return re.test(t); }, attr, done);
+  }
+  // select2-поле, обрати опцію за id «…number:<num>» — ЛИШЕ якщо порожнє (напр. каса number:3)
+  function pickInFieldNum(attr, num, done){
+    done=done||function(){};
+    var f=document.querySelector('[attr-field-name="'+attr+'"]');
+    if(!f){ dbg('поле',attr,'не знайдено'); done(); return; }
+    if(!fieldEmpty(f)){ dbg('поле',attr,'вже заповнене — не чіпаю'); done(); return; }
+    var suf='number:'+num;
+    openAndPick(f, function(t, li){ return !!(li && (li.id||'').slice(-suf.length)===suf); }, attr+'#'+num, done);
   }
 
   // знайти поле касира у формі чека: за CASHIER_ATTR або за підписом «касир»
@@ -4992,9 +5001,10 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   }
   // підставити касира: ЗАВЖДИ перезаписуємо (у формі стоїть касир за замовчуванням,
   // а кнопка = явний вибір). Підтримуємо і select2 (як каса), і звичайний <select>.
-  function setCashier(cashier){
+  function setCashier(cashier, done){
+    done=done||function(){};
     var f=cashierField();
-    if(!f){ dbg('поле касира не знайдено — оберіть касира вручну'); return; }
+    if(!f){ dbg('поле касира не знайдено — оберіть касира вручну'); done(); return; }
     var match=nameMatcher(cashier);
     // ЛИШЕ якщо поле — справжній нативний <select> (не select2-віджет SalesDrive).
     // Поле cashierId у CRM — select2 (як каса), тож піде гілка openAndPick нижче.
@@ -5002,17 +5012,17 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     if(sel && sel.options && sel.options.length){
       for(var i=0;i<sel.options.length;i++){
         if(match(sel.options[i].textContent, sel.options[i])){
-          if(sel.selectedIndex===i){ dbg('касир уже цей — ок:', cashier.label||cashier.name); return; }
+          if(sel.selectedIndex===i){ dbg('касир уже цей — ок:', cashier.label||cashier.name); done(); return; }
           sel.value=sel.options[i].value; sel.selectedIndex=i;
           ['input','change'].forEach(function(t){ try{ sel.dispatchEvent(new Event(t,{bubbles:true})); }catch(e){} });
           try{ if(REALWIN.angular) REALWIN.angular.element(sel).triggerHandler('change'); }catch(e){}
-          dbg('касир (select) обрано:', cashier.label||cashier.name); return;
+          dbg('касир (select) обрано:', cashier.label||cashier.name); done(); return;
         }
       }
-      dbg('касир не знайдений у списку (select):', cashier.name); return;
+      dbg('касир не знайдений у списку (select):', cashier.name); done(); return;
     }
     // інакше select2 — відкрити й клікнути потрібний пункт (перезапис поточного)
-    openAndPick(f, match, 'касир:'+(cashier.label||cashier.name));
+    openAndPick(f, match, 'касир:'+(cashier.label||cashier.name), done);
   }
   // DEBUG: перелік видимих полів форми чека (щоб знайти поле касира)
   function dumpFields(){
@@ -5045,8 +5055,17 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     var iv=setInterval(function(){
       n++;
       if(document.querySelector('[attr-field-name="documentPaymentTypeId"]')){ clearInterval(iv); dbg('форма чека зʼявилась'); if(cb) cb(); return; }
-      if(n>100){ clearInterval(iv); dbg('форма чека не зʼявилась за ~9с'); }
-    },90);
+      if(n>150){ clearInterval(iv); dbg('форма чека не зʼявилась'); }
+    },50);
+  }
+  // виконати кроки послідовно: кожен наступний стартує щойно попередній завершив (done)
+  function runSeq(steps){
+    var i=0;
+    (function nextStep(){
+      if(i>=steps.length) return;
+      var step=steps[i++];
+      try{ step(function(){ setTimeout(nextStep, 60); }); }catch(e){ dbg('крок впав:', e&&e.message); setTimeout(nextStep, 60); }
+    })();
   }
 
   // головна дія кнопки: відкрити сторінку створення чека, підставити спосіб оплати + касира
@@ -5063,17 +5082,17 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     dbg('відкриваю', target);
     location.hash=target;
     waitForm(function(){
-      // Послідовно, щоб не було гонки select2-попапів:
-      // 1) спосіб оплати за заявкою (лише якщо порожнє) → вмикає автопідстановку каси в lkCheckCashbox;
-      // 2) пауза, щоб каса встигла проставитись; 3) касир (перезапис). submit НЕ тиснемо.
+      // Швидкий послідовний ланцюжок (без фіксованих пауз, без гонки select2-попапів):
+      // 1) спосіб оплати за заявкою; 2) каса самовивозу (number:3) — ставимо САМІ, щоб не чекати
+      //    інший модуль; 3) касир (перезапис). Кожен крок стартує щойно попередній клікнув опцію.
+      // submit НЕ тиснемо.
       var payRe = wantCash?/готівк/i : (wantCard?/термінал|картк/i : null);
-      function afterPay(){
-        if(!cashier) return;
-        setTimeout(function(){ setCashier(cashier); }, 900); // дати lkCheckCashbox поставити касу
-      }
-      if(payRe) pickInField('documentPaymentTypeId', payRe, afterPay);
-      else afterPay();
-      if(DEBUG) setTimeout(dumpFields, 3200);
+      var steps=[];
+      if(payRe) steps.push(function(next){ pickInField('documentPaymentTypeId', payRe, next); });
+      steps.push(function(next){ pickInFieldNum('cashRegisterId', 3, next); }); // каса самовивозу
+      if(cashier) steps.push(function(next){ setCashier(cashier, next); });
+      runSeq(steps);
+      if(DEBUG) setTimeout(dumpFields, 2500);
     });
   }
 
