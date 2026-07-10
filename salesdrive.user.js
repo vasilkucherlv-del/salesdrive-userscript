@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      1.98
+// @version      2.07
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -34,6 +34,7 @@
      • lkQuickPickup   — ➕ нова заявка самовивозу + 📋 список усіх самовивозів
      • lkAutoOrgByPayment — організація: самовивіз→Кучер Василь, інакше→ФОП з платежу
      • lkCheckCashbox   — підстановка «каса самовивозу» у формі чека (оплата готівка/термінал)
+     • lkCheckButton    — 🧾 кнопки «Чек · <касир>»: форма чека + оплата + каса + касир, тоді авто-«Зберегти»
      • lkCopyNoGoods    — кнопка «🗐 без товарів» (копія заявки без товарних рядків)
      • lkSenderBySource — відправник СМС за джерелом замовлення (FIXLAND/Refort/lartek/Сайт/mobile_catalog_app/Bigl)
    ╚══════════════════════════════════════════════════════════════════╝ */
@@ -4887,6 +4888,280 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 /* ▲▲▲ МОДУЛЬ-END • lkCheckCashbox ▲▲▲ */
 
 
+/* ▼▼▼ МОДУЛЬ-START • lkCheckButton — 🧾 кнопка «Чек»: відкрити форму чека самовивозу + підставити спосіб оплати ▼▼▼ */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
+(function lkCheckButton(){
+  'use strict';
+  // DEBUG=true → логи [SD-Чек-кнопка] у консоль (для розвідки селекторів меню/полів).
+  // Перед переносом у СТАБІЛЬНУ версію поставити false.
+  var DEBUG=false;
+  function dbg(){ if(!DEBUG) return; try{ console.log.apply(console,['[SD-Чек-кнопка]'].concat([].slice.call(arguments))); }catch(e){} }
+
+  var REALWIN=(typeof unsafeWindow!=='undefined'&&unsafeWindow)?unsafeWindow:window;
+  function clickIt(el){
+    if(!el) return;
+    // mouseenter/mousedown/mouseup/click з view:REALWIN — щоб select2/Angular прийняли синтетичний клік
+    ['mouseenter','mousedown','mouseup','click'].forEach(function(t){
+      var ev; try{ ev=new MouseEvent(t,{bubbles:true,cancelable:true,view:REALWIN}); }
+      catch(e){ ev=new MouseEvent(t,{bubbles:true,cancelable:true}); }
+      el.dispatchEvent(ev);
+    });
+  }
+  function norm(s){ return String(s==null?'':s).replace(/\s+/g,' ').trim(); }
+
+  // ── КАСИРИ ──────────────────────────────────────────────────────────────
+  // По кнопці на кожного касира. На самовивіз — лише 2 касири (один ФОП: Кучер Василь).
+  // Поле касира у формі чека = select2 attr-field-name="cashierId"; опції мають id
+  // «…number:<num>» — тож найнадійніше ставимо касира за num (як каса number:3),
+  // із запасним збігом за іменем.
+  var CASHIER_ATTR = 'cashierId';
+  var CASHIERS = [
+    { name:'Кисунька Вікторія', label:'Вікторія', num:15 },
+    { name:'yura_dmitrishun',   label:'Юра',      num:10 }
+  ];
+  // Після заповнення полів САМІ тиснемо «Зберегти» (створюємо/фіскалізуємо чек).
+  // true = авто-збереження (за рішенням користувача); false = лишити збереження менеджеру.
+  var AUTO_SAVE = true;
+
+  // matcher опції касира: спершу за id опції (…number:<num>), далі за словами імені
+  function nameMatcher(cashier){
+    var base=(cashier.match||cashier.name||'').toLowerCase();
+    var words=base.split(/\s+/).filter(function(w){ return w.length>1; });
+    var suf=cashier.num!=null?('number:'+cashier.num):null;
+    return function(text, li){
+      if(suf && li && (li.id||'').slice(-suf.length)===suf) return true;
+      if(!words.length) return false;
+      var t=norm(text).toLowerCase();
+      return words.every(function(w){ return t.indexOf(w)>=0; });
+    };
+  }
+
+  // текст готового (домальованого) поля заявки; null якщо сире/довге (ще будується)
+  function readyFieldText(attr){
+    var f=document.querySelector('[attr-field-name="'+attr+'"]');
+    if(!f) return null;
+    var t=norm(f.textContent);
+    return t.length>40 ? null : t;
+  }
+  function fieldEmpty(f){
+    if(!f) return true;
+    var t=norm(f.textContent);
+    return (!t || t==='---' || /ph-is-empty/.test(f.innerHTML||''));
+  }
+  function optsVisible(){ return document.querySelectorAll('li.select2-results__option').length>0; }
+  function findOptBy(matchFn){
+    var lis=document.querySelectorAll('li.select2-results__option');
+    for(var i=0;i<lis.length;i++){ if(matchFn(lis[i].textContent||'', lis[i])) return lis[i]; }
+    return null;
+  }
+  // відкрити select2-поле (елемент) й клікнути пункт за matchFn; done() — коли завершено.
+  // Стійко до «крадіжки» попапа іншим полем: якщо список зник до вибору — перевідкриваємо.
+  function openAndPick(fieldEl, matchFn, tag, done){
+    tag=tag||'поле'; done=done||function(){};
+    clickIt(fieldEl);
+    var s=0, finished=false;
+    function fin(){ if(finished) return; finished=true; try{ clearInterval(iv); }catch(e){} done(); }
+    var iv=setInterval(function(){
+      s++;
+      if(optsVisible()){
+        var opt=findOptBy(matchFn);
+        if(opt){ clickIt(opt.querySelector('span')||opt); dbg('обрано:', tag); fin(); return; }
+      } else if(s%2===0){
+        clickIt(fieldEl); // список закрився/не відкрився — (пере)відкрити
+      }
+      if(s>70){ dbg('пункт не встановлено:', tag); fin(); }
+    },55);
+  }
+  // select2-поле за attr-field-name, обрати за регексом — ЛИШЕ якщо порожнє
+  function pickInField(attr, re, done){
+    done=done||function(){};
+    var f=document.querySelector('[attr-field-name="'+attr+'"]');
+    if(!f){ dbg('поле',attr,'не знайдено'); done(); return; }
+    if(!fieldEmpty(f)){ dbg('поле',attr,'вже заповнене — не чіпаю'); done(); return; }
+    openAndPick(f, function(t){ return re.test(t); }, attr, done);
+  }
+  // select2-поле, обрати опцію за id «…number:<num>» — ЛИШЕ якщо порожнє (напр. каса number:3)
+  function pickInFieldNum(attr, num, done){
+    done=done||function(){};
+    var f=document.querySelector('[attr-field-name="'+attr+'"]');
+    if(!f){ dbg('поле',attr,'не знайдено'); done(); return; }
+    if(!fieldEmpty(f)){ dbg('поле',attr,'вже заповнене — не чіпаю'); done(); return; }
+    var suf='number:'+num;
+    openAndPick(f, function(t, li){ return !!(li && (li.id||'').slice(-suf.length)===suf); }, attr+'#'+num, done);
+  }
+
+  // знайти поле касира у формі чека: за CASHIER_ATTR або за підписом «касир»
+  function cashierField(){
+    if(CASHIER_ATTR){ var f=document.querySelector('[attr-field-name="'+CASHIER_ATTR+'"]'); if(f) return f; }
+    var labels=document.querySelectorAll('label,.control-label,.text-right');
+    for(var i=0;i<labels.length;i++){
+      if(/касир/i.test(labels[i].textContent||'')){
+        var g=(labels[i].closest&&labels[i].closest('.form-group'))||labels[i].parentNode;
+        if(g){ var el=g.querySelector('[attr-field-name]')||g.querySelector('.stylized-select')||g.querySelector('select'); if(el) return el; }
+      }
+    }
+    return null;
+  }
+  // підставити касира: ЗАВЖДИ перезаписуємо (у формі стоїть касир за замовчуванням,
+  // а кнопка = явний вибір). Підтримуємо і select2 (як каса), і звичайний <select>.
+  function setCashier(cashier, done){
+    done=done||function(){};
+    var f=cashierField();
+    if(!f){ dbg('поле касира не знайдено — оберіть касира вручну'); done(); return; }
+    var match=nameMatcher(cashier);
+    // ЛИШЕ якщо поле — справжній нативний <select> (не select2-віджет SalesDrive).
+    // Поле cashierId у CRM — select2 (як каса), тож піде гілка openAndPick нижче.
+    var sel=(f.tagName==='SELECT')?f:null;
+    if(sel && sel.options && sel.options.length){
+      for(var i=0;i<sel.options.length;i++){
+        if(match(sel.options[i].textContent, sel.options[i])){
+          if(sel.selectedIndex===i){ dbg('касир уже цей — ок:', cashier.label||cashier.name); done(); return; }
+          sel.value=sel.options[i].value; sel.selectedIndex=i;
+          ['input','change'].forEach(function(t){ try{ sel.dispatchEvent(new Event(t,{bubbles:true})); }catch(e){} });
+          try{ if(REALWIN.angular) REALWIN.angular.element(sel).triggerHandler('change'); }catch(e){}
+          dbg('касир (select) обрано:', cashier.label||cashier.name); done(); return;
+        }
+      }
+      dbg('касир не знайдений у списку (select):', cashier.name); done(); return;
+    }
+    // інакше select2 — відкрити й клікнути потрібний пункт (перезапис поточного)
+    openAndPick(f, match, 'касир:'+(cashier.label||cashier.name), done);
+  }
+  // DEBUG: перелік видимих полів форми чека (щоб знайти поле касира)
+  function dumpFields(){
+    if(!DEBUG) return;
+    try{
+      var flds=[];
+      document.querySelectorAll('[attr-field-name]').forEach(function(f){
+        if(f.offsetWidth||f.offsetHeight) flds.push(f.getAttribute('attr-field-name')+'="'+norm(f.textContent).slice(0,30)+'"');
+      });
+      dbg('поля форми чека:', flds.join(' | '));
+    }catch(e){}
+  }
+
+  // Створення чека в SalesDrive — окрема сторінка #/document/check/create/order/<id>
+  // (той самий шаблон, що «Прибутковий касовий ордер» → #/document/cash-order/create/order/<id>;
+  // перевірено на живій CRM). Якщо в меню «+ Документ» є готовий лінк на створення чека —
+  // беремо його href (найточніше), інакше будуємо URL самі.
+  function checkCreateHash(orderId){
+    var a=document.querySelector('a[href*="document/check/create"]');
+    if(a){
+      var h=a.getAttribute('href')||'';
+      var i=h.indexOf('#');
+      if(i>=0){ dbg('лінк створення чека з меню:', h); return h.slice(i); }
+    }
+    return '#/document/check/create/order/'+orderId;
+  }
+  // дочекатися появи форми чека (поле documentPaymentTypeId), тоді cb()
+  function waitForm(cb){
+    var n=0;
+    var iv=setInterval(function(){
+      n++;
+      if(document.querySelector('[attr-field-name="documentPaymentTypeId"]')){ clearInterval(iv); dbg('форма чека зʼявилась'); if(cb) cb(); return; }
+      if(n>150){ clearInterval(iv); dbg('форма чека не зʼявилась'); }
+    },50);
+  }
+  // виконати кроки послідовно: кожен наступний стартує щойно попередній завершив (done);
+  // onDone() — після останнього кроку (усі опції вже клікнуті)
+  function runSeq(steps, onDone){
+    var i=0;
+    (function nextStep(){
+      if(i>=steps.length){ if(onDone) onDone(); return; }
+      var step=steps[i++];
+      try{ step(function(){ setTimeout(nextStep, 60); }); }catch(e){ dbg('крок впав:', e&&e.message); setTimeout(nextStep, 60); }
+    })();
+  }
+  // кнопка збереження документа (чека) — «Зберегти», перша видима
+  function saveBtn(){
+    var bs=document.querySelectorAll('button[ng-click="saveItem();"]');
+    for(var i=0;i<bs.length;i++){ if(bs[i].offsetWidth||bs[i].offsetHeight) return bs[i]; }
+    return bs[0]||null;
+  }
+
+  // головна дія кнопки: відкрити сторінку створення чека, підставити спосіб оплати + касира
+  function openAndFill(cashier){
+    var m=(location.hash||'').match(/\/order\/update\/(\d+)/);
+    var orderId=m?m[1]:null;
+    if(!orderId){ dbg('не бачу id заявки в URL'); return; }
+    // зафіксувати оплату ЗАЯВКИ до переходу (на сторінці чека цього поля вже не буде)
+    var pay=readyFieldText('payment_method')||'';
+    var wantCash=/готівк/i.test(pay);
+    var wantCard=/термінал/i.test(pay);
+    dbg('заявка', orderId, '| касир:', cashier&&(cashier.label||cashier.name), '| оплата:', pay);
+    var target=checkCreateHash(orderId);
+    dbg('відкриваю', target);
+    location.hash=target;
+    waitForm(function(){
+      // Швидкий послідовний ланцюжок (без фіксованих пауз, без гонки select2-попапів):
+      // 1) спосіб оплати за заявкою; 2) каса самовивозу (number:3) — ставимо САМІ, щоб не чекати
+      //    інший модуль; 3) касир (перезапис). Кожен крок стартує щойно попередній клікнув опцію.
+      // submit НЕ тиснемо.
+      var payRe = wantCash?/готівк/i : (wantCard?/термінал|картк/i : null);
+      var steps=[];
+      if(payRe) steps.push(function(next){ pickInField('documentPaymentTypeId', payRe, next); });
+      steps.push(function(next){ pickInFieldNum('cashRegisterId', 3, next); }); // каса самовивозу
+      if(cashier) steps.push(function(next){ setCashier(cashier, next); });
+      runSeq(steps, function(){
+        if(DEBUG) dumpFields();
+        // авто-збереження: лише якщо ще на сторінці чека і кнопка є; пауза — щоб Angular
+        // зафіксував останній select2-вибір перед збереженням
+        if(!AUTO_SAVE) return;
+        setTimeout(function(){
+          if(!/document\/check/.test(location.hash||'')){ dbg('не на сторінці чека — не зберігаю'); return; }
+          var sb=saveBtn();
+          if(!sb){ dbg('кнопку «Зберегти» не знайдено'); return; }
+          dbg('тисну «Зберегти»');
+          clickIt(sb);
+        }, 320);
+      });
+    });
+  }
+
+  // показувати кнопку лише на картці заявки, коли доставка самовивіз і оплата готівка/термінал
+  function gateOK(){
+    if(!/\/order\/update/.test(location.hash||'')) return false;
+    var ship=readyFieldText('shipping_method');
+    var pay=readyFieldText('payment_method');
+    if(ship===null||pay===null) return false;      // поля ще будуються
+    return /самови/i.test(ship) && /готівк|термінал/i.test(pay);
+  }
+  function ensureBtns(){
+    // якір — тулбар КАРТКИ заявки: рідна кнопка копіювання (біля неї стоїть «🗐 без товарів»)
+    var anchor=document.querySelector('button[ng-click="viewModel.copyOrder($event)"]');
+    if(!anchor||!anchor.parentNode) return false;
+    // вставляти праворуч від «🗐 без товарів» (або від останньої вже доданої нашої кнопки)
+    var prev=document.getElementById('lk-copy-ng')||anchor;
+    for(var k=CASHIERS.length-1;k>=0;k--){ var last=document.getElementById('lk-check-btn-'+k); if(last){ prev=last; break; } }
+    CASHIERS.forEach(function(cashier, idx){
+      var id='lk-check-btn-'+idx;
+      if(document.getElementById(id)) return;
+      var b=document.createElement('button');
+      b.id=id; b.type='button'; b.className='btn btn-default';
+      b.title='Створити чек для цієї заявки, касир: '+(cashier.name||'')+'. Спосіб оплати й касу підставимо; «Створити чек» тисніть вручну.';
+      b.style.marginLeft='4px'; b.style.display='none';
+      b.textContent='🧾 Чек · '+(cashier.label||cashier.name||('#'+idx));
+      b.addEventListener('click', (function(c){ return function(e){ e.preventDefault(); openAndFill(c); }; })(cashier));
+      prev.parentNode.insertBefore(b, prev.nextSibling);
+      prev=b;
+    });
+    return true;
+  }
+  function tick(){
+    if(!ensureBtns()) return;
+    var show=gateOK();
+    CASHIERS.forEach(function(_, idx){
+      var b=document.getElementById('lk-check-btn-'+idx);
+      if(b) b.style.display = show ? 'inline-block' : 'none';
+    });
+  }
+  window.addEventListener('lkdom', tick);
+  window.addEventListener('hashchange', tick);
+  tick();
+})();
+}catch(e){ try{ console.warn("[SD] модуль «lkCheckButton» не запустився:", e); }catch(_){} }
+/* ▲▲▲ МОДУЛЬ-END • lkCheckButton ▲▲▲ */
+
+
 /* ▼▼▼ МОДУЛЬ-START • lkSenderBySource — відправник у формі СМС за джерелом замовлення ▼▼▼ */
 try{ // SD-ізоляція: помилка цього модуля не зупинить решту
 (function lkSenderBySource(){
@@ -4965,6 +5240,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 
 
 /* ▼▼▼ МОДУЛЬ-START • lkCopyNoGoods — кнопка «Копіювати заявку БЕЗ товарів» ▼▼▼ */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
 (function lkCopyNoGoods(){
   'use strict';
   var FLAG = 'lk_copy_nogoods'; // sessionStorage: {src, ts, srcRows}
@@ -5083,4 +5359,5 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   log('модуль активний (v1.74)');
   tick();
 })();
+}catch(e){ try{ console.warn("[SD] модуль «lkCopyNoGoods» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkCopyNoGoods ▲▲▲ */
