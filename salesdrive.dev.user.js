@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.07
+// @version      2.08
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4854,6 +4854,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   var busy=false;
   function trySet(){
     if(busy) return;
+    // якщо касу зараз ставить кнопка «🧾 Чек» — не втручаємось (без гонки за поле cashRegisterId)
+    if(REALWIN.__lkChkBusy && (Date.now()-REALWIN.__lkChkBusy)<15000){ dbg('кнопка чека керує — пропускаю'); return; }
     var f=cashField(); if(!f) return;            // форми чека немає
     if(!payCashOrCard()){ dbg('оплата не готівка/термінал — пропускаю'); return; }
     if(!isEmpty(f)) return;                       // вже щось обрано — не чіпаємо
@@ -4954,23 +4956,30 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     for(var i=0;i<lis.length;i++){ if(matchFn(lis[i].textContent||'', lis[i])) return lis[i]; }
     return null;
   }
-  // відкрити select2-поле (елемент) й клікнути пункт за matchFn; done() — коли завершено.
-  // Стійко до «крадіжки» попапа іншим полем: якщо список зник до вибору — перевідкриваємо.
+  // Відкрити select2-поле й клікнути пункт за matchFn; done() — коли ЗАКРИВСЯ попап.
+  // Спокійно (130 мс), без блимання: реклік лише якщо список зник надовго; після вибору
+  // чекаємо закриття списку, щоб наступне поле відкривалось у чистому стані.
   function openAndPick(fieldEl, matchFn, tag, done){
     tag=tag||'поле'; done=done||function(){};
-    clickIt(fieldEl);
-    var s=0, finished=false;
+    var s=0, picked=false, finished=false;
     function fin(){ if(finished) return; finished=true; try{ clearInterval(iv); }catch(e){} done(); }
+    clickIt(fieldEl); // відкрити один раз
     var iv=setInterval(function(){
       s++;
-      if(optsVisible()){
-        var opt=findOptBy(matchFn);
-        if(opt){ clickIt(opt.querySelector('span')||opt); dbg('обрано:', tag); fin(); return; }
-      } else if(s%2===0){
-        clickIt(fieldEl); // список закрився/не відкрився — (пере)відкрити
+      if(!picked){
+        if(optsVisible()){
+          var opt=findOptBy(matchFn);
+          if(opt){ clickIt(opt.querySelector('span')||opt); picked=true; dbg('обрано:', tag); return; }
+          // список видимий, але потрібного пункту ще нема — просто чекаємо (НЕ реклікаємо)
+        } else if(s%6===0){
+          clickIt(fieldEl); // список зник надовго — обережно перевідкрити
+        }
+        if(s>60){ dbg('пункт не встановлено:', tag); fin(); }
+      } else {
+        // вибір зроблено — чекаємо, поки select2 закриє попап, тоді done()
+        if(!optsVisible() || s>90){ fin(); }
       }
-      if(s>70){ dbg('пункт не встановлено:', tag); fin(); }
-    },55);
+    },130);
   }
   // select2-поле за attr-field-name, обрати за регексом — ЛИШЕ якщо порожнє
   function pickInField(attr, re, done){
@@ -5068,7 +5077,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     (function nextStep(){
       if(i>=steps.length){ if(onDone) onDone(); return; }
       var step=steps[i++];
-      try{ step(function(){ setTimeout(nextStep, 60); }); }catch(e){ dbg('крок впав:', e&&e.message); setTimeout(nextStep, 60); }
+      try{ step(function(){ setTimeout(nextStep, 250); }); }catch(e){ dbg('крок впав:', e&&e.message); setTimeout(nextStep, 250); }
     })();
   }
   // кнопка збереження документа (чека) — «Зберегти», перша видима
@@ -5091,11 +5100,12 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     var target=checkCreateHash(orderId);
     dbg('відкриваю', target);
     location.hash=target;
+    // поки кнопка чека керує формою — lkCheckCashbox не чіпає касу (без гонки за поле)
+    REALWIN.__lkChkBusy = Date.now();
     waitForm(function(){
-      // Швидкий послідовний ланцюжок (без фіксованих пауз, без гонки select2-попапів):
-      // 1) спосіб оплати за заявкою; 2) каса самовивозу (number:3) — ставимо САМІ, щоб не чекати
-      //    інший модуль; 3) касир (перезапис). Кожен крок стартує щойно попередній клікнув опцію.
-      // submit НЕ тиснемо.
+      // Послідовний ланцюжок, кожен крок чекає закриття свого попапа перед наступним:
+      // 1) спосіб оплати за заявкою; 2) каса самовивозу (number:3) — ставимо САМІ;
+      // 3) касир (перезапис). Потім — авто-«Зберегти».
       var payRe = wantCash?/готівк/i : (wantCard?/термінал|картк/i : null);
       var steps=[];
       if(payRe) steps.push(function(next){ pickInField('documentPaymentTypeId', payRe, next); });
@@ -5103,16 +5113,16 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       if(cashier) steps.push(function(next){ setCashier(cashier, next); });
       runSeq(steps, function(){
         if(DEBUG) dumpFields();
-        // авто-збереження: лише якщо ще на сторінці чека і кнопка є; пауза — щоб Angular
-        // зафіксував останній select2-вибір перед збереженням
-        if(!AUTO_SAVE) return;
+        if(!AUTO_SAVE){ REALWIN.__lkChkBusy=0; return; }
+        // пауза — щоб Angular зафіксував останній select2-вибір перед збереженням
         setTimeout(function(){
+          REALWIN.__lkChkBusy=0;
           if(!/document\/check/.test(location.hash||'')){ dbg('не на сторінці чека — не зберігаю'); return; }
           var sb=saveBtn();
           if(!sb){ dbg('кнопку «Зберегти» не знайдено'); return; }
           dbg('тисну «Зберегти»');
           clickIt(sb);
-        }, 320);
+        }, 500);
       });
     });
   }
