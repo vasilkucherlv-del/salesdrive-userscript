@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.08
+// @version      2.09
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4957,11 +4957,13 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     return null;
   }
   // Відкрити select2-поле й клікнути пункт за matchFn; done() — коли ЗАКРИВСЯ попап.
-  // Спокійно (130 мс), без блимання: реклік лише якщо список зник надовго; після вибору
-  // чекаємо закриття списку, щоб наступне поле відкривалось у чистому стані.
+  // За вимірами: список готовий ~170 мс, закривається ~25 мс. Тому опитуємо ЧАСТО (30 мс),
+  // але поле клікаємо ЛИШЕ раз (клік по відкритому select2 його закриває → блимання).
+  // Реоупен лише один раз, якщо за ~1 с списку так і не з'явилось.
+  var TICK=30, T_FIND=90 /*~2.7с*/, T_CLOSE=30 /*~0.9с*/, T_REOPEN=33 /*~1с*/;
   function openAndPick(fieldEl, matchFn, tag, done){
     tag=tag||'поле'; done=done||function(){};
-    var s=0, picked=false, finished=false;
+    var s=0, picked=false, finished=false, reopened=false;
     function fin(){ if(finished) return; finished=true; try{ clearInterval(iv); }catch(e){} done(); }
     clickIt(fieldEl); // відкрити один раз
     var iv=setInterval(function(){
@@ -4969,17 +4971,17 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       if(!picked){
         if(optsVisible()){
           var opt=findOptBy(matchFn);
-          if(opt){ clickIt(opt.querySelector('span')||opt); picked=true; dbg('обрано:', tag); return; }
-          // список видимий, але потрібного пункту ще нема — просто чекаємо (НЕ реклікаємо)
-        } else if(s%6===0){
-          clickIt(fieldEl); // список зник надовго — обережно перевідкрити
+          if(opt){ clickIt(opt.querySelector('span')||opt); picked=true; s=0; dbg('обрано:', tag); return; }
+          // список видимий, але потрібного пункту ще нема — чекаємо (НЕ реклікаємо)
+        } else if(!reopened && s>=T_REOPEN){
+          reopened=true; s=0; clickIt(fieldEl); // список так і не з'явився — один обережний реоупен
         }
-        if(s>60){ dbg('пункт не встановлено:', tag); fin(); }
+        if(s>T_FIND){ dbg('пункт не встановлено:', tag); fin(); }
       } else {
         // вибір зроблено — чекаємо, поки select2 закриє попап, тоді done()
-        if(!optsVisible() || s>90){ fin(); }
+        if(!optsVisible() || s>T_CLOSE){ fin(); }
       }
-    },130);
+    },TICK);
   }
   // select2-поле за attr-field-name, обрати за регексом — ЛИШЕ якщо порожнє
   function pickInField(attr, re, done){
@@ -5077,7 +5079,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     (function nextStep(){
       if(i>=steps.length){ if(onDone) onDone(); return; }
       var step=steps[i++];
-      try{ step(function(){ setTimeout(nextStep, 250); }); }catch(e){ dbg('крок впав:', e&&e.message); setTimeout(nextStep, 250); }
+      try{ step(function(){ setTimeout(nextStep, 90); }); }catch(e){ dbg('крок впав:', e&&e.message); setTimeout(nextStep, 90); }
     })();
   }
   // кнопка збереження документа (чека) — «Зберегти», перша видима
@@ -5122,7 +5124,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
           if(!sb){ dbg('кнопку «Зберегти» не знайдено'); return; }
           dbg('тисну «Зберегти»');
           clickIt(sb);
-        }, 500);
+        }, 250);
       });
     });
   }
