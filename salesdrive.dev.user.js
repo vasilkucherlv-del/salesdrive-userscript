@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.11
+// @version      2.12
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -2817,8 +2817,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     + '  text-transform:uppercase;letter-spacing:.3px;font-size:11px;background:#e3f4f2}'
     + '.lkan-exp .r{display:grid;grid-template-columns:1fr auto auto;align-items:stretch}'
     + '.lkan-exp .r+.r{border-top:1px solid rgba(0,137,123,.45)}'
-    + '.lkan-exp .r .nm{color:#0f2b29;font-weight:600;min-width:0;padding:6px 9px;'
+    + '.lkan-exp .r .nm{color:#0f2b29;font-weight:600;min-width:0;padding:6px 9px;cursor:pointer;'
     + '  display:flex;flex-direction:column;justify-content:center;gap:2px;word-break:break-word}'
+    + '.lkan-exp .r .nm:hover .nmt{text-decoration:underline;color:#00695c}'
     + '.lkan-exp .r .nm .code{color:#00787a;font:600 10.5px/1.2 ui-monospace,Menlo,Consolas,monospace;'
     + '  opacity:.85;white-space:nowrap}'
     // колонка «наявність + ціна за джерелом заявки» (як у допродаж-банері)
@@ -2869,6 +2870,14 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     } catch (e) {}
     btn.classList.add('done');
     btn.textContent = '✓ Додано';
+  }
+
+  // відкрити картку товару в SalesDrive за кодом (той самий міст, що в комплектів)
+  function openProduct(sku) {
+    try {
+      document.documentElement.setAttribute('data-sd-open-sku', String(sku));
+      PAGE.dispatchEvent(new Event('sdOpenProduct'));
+    } catch (e) {}
   }
 
   // формат грошей (окремий IIFE — pwMoney банера недоступний)
@@ -2980,13 +2989,19 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 
       var nm = document.createElement('span');
       nm.className = 'nm';
+      nm.title = 'Відкрити картку товару';
       var nmT = document.createElement('span');
+      nmT.className = 'nmt';
       nmT.textContent = it.c || ('код ' + it.sku);
       nm.appendChild(nmT);
       var code = document.createElement('span');
       code.className = 'code';
       code.textContent = 'код ' + it.sku;
       nm.appendChild(code);
+      nm.addEventListener('click', function (e) {
+        e.preventDefault(); e.stopPropagation();
+        openProduct(it.sku);
+      });
       r.appendChild(nm);
 
       // колонка наявності + ціни (заповнюється лениво при відкритті)
