@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.10
+// @version      2.11
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -2818,10 +2818,18 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     + '.lkan-exp .r{display:grid;grid-template-columns:1fr auto auto;align-items:stretch}'
     + '.lkan-exp .r+.r{border-top:1px solid rgba(0,137,123,.45)}'
     + '.lkan-exp .r .nm{color:#0f2b29;font-weight:600;min-width:0;padding:6px 9px;'
-    + '  display:flex;align-items:center;word-break:break-word}'
-    + '.lkan-exp .r .code{color:#00695c;font:700 11px/1.2 ui-monospace,Menlo,Consolas,monospace;'
-    + '  padding:6px 9px;border-left:1px solid rgba(0,137,123,.45);display:flex;align-items:center;'
-    + '  white-space:nowrap}'
+    + '  display:flex;flex-direction:column;justify-content:center;gap:2px;word-break:break-word}'
+    + '.lkan-exp .r .nm .code{color:#00787a;font:600 10.5px/1.2 ui-monospace,Menlo,Consolas,monospace;'
+    + '  opacity:.85;white-space:nowrap}'
+    // колонка «наявність + ціна за джерелом заявки» (як у допродаж-банері)
+    + '.lkan-exp .r .info{display:flex;flex-direction:column;justify-content:center;align-items:flex-end;'
+    + '  gap:3px;padding:6px 9px;border-left:1px solid rgba(0,137,123,.45);white-space:nowrap;text-align:right}'
+    + '.lkan-exp .r .info .stk{font:600 10.5px/1.1 sans-serif;padding:2px 6px;border-radius:999px;'
+    + '  background:#eef4f3;color:#5a726f}'
+    + '.lkan-exp .r .info .stk.yes{background:#E6F4EA;color:#1B5E20}'
+    + '.lkan-exp .r .info .stk.no{background:#FDECEA;color:#B71C1C}'
+    + '.lkan-exp .r .info .pr{font:800 13px/1.1 sans-serif;color:#14418f}'
+    + '.lkan-exp .r .info .pr.dim{color:#9aa6a4;font-weight:600}'
     + '.lkan-exp .r .s{grid-column:1 / -1;color:#3a5e5a;font-style:italic;font-size:11.5px;'
     + '  padding:5px 9px;border-top:1px dashed rgba(0,137,123,.35)}'
     + '.lkan-add{border:none;border-left:1px solid rgba(0,137,123,.45);border-radius:0;'
@@ -2863,6 +2871,90 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     btn.textContent = '✓ Додано';
   }
 
+  // формат грошей (окремий IIFE — pwMoney банера недоступний)
+  function money(n) {
+    n = Math.round(Number(n) * 100) / 100;
+    if (!isFinite(n)) return '';
+    var s = (n % 1 === 0) ? String(n) : n.toFixed(2);
+    return s.replace('.', ',') + ' ₴';
+  }
+  function fmtQty(n) {
+    n = Number(n);
+    return (Math.abs(n - Math.round(n)) < 1e-9) ? String(Math.round(n)) : String(n);
+  }
+
+  // застосувати залишок+ціну до рядка аналога (slot: {stk, pr})
+  function applyOne(slot, r) {
+    if (!slot) return;
+    var stk = slot.stk;
+    stk.classList.remove('yes', 'no');
+    if (!r || r.found === false) { stk.classList.add('no'); stk.textContent = '⚠ нема в каталозі'; }
+    else if (r.qty == null) { stk.textContent = 'залишок —'; }
+    else if (Number(r.qty) > 0) { stk.classList.add('yes'); stk.textContent = '✓ ' + fmtQty(r.qty) + ' шт'; }
+    else { stk.classList.add('no'); stk.textContent = '✗ немає'; }
+
+    var pr = slot.pr;
+    if (r && r.found !== false && r.price && r.price.value != null) {
+      pr.classList.remove('dim');
+      pr.textContent = money(r.price.value);   // ціна за джерелом заявки (як при додаванні)
+    } else {
+      pr.classList.add('dim');
+      pr.textContent = '—';
+    }
+  }
+
+  // переставити рядки за наявністю (та сама логіка груп, що reorderByStock банера):
+  // 0 — в наявності (за кількістю вниз), 1 — залишок невідомий, 2 — немає / нема в каталозі.
+  function reorder(exp, rowsByCode, results) {
+    var info = {};
+    (results || []).forEach(function (r) { if (r && r.code != null) info[String(r.code)] = r; });
+    var entries = Object.keys(rowsByCode).map(function (code) {
+      var r = info[code] || {}, group, qty = 0;
+      if (r.found !== false && r.qty != null && Number(r.qty) > 0) { group = 0; qty = Number(r.qty); }
+      else if (r.found !== false && r.qty == null && info[code]) { group = 1; }
+      else { group = 2; }
+      return { row: rowsByCode[code].row, group: group, qty: qty };
+    });
+    entries.sort(function (a, b) {
+      if (a.group !== b.group) return a.group - b.group;
+      return b.qty - a.qty;
+    });
+    // .h лишається першим (його не чіпаємо); appendChild лише пересуває рядки .r після шапки
+    entries.forEach(function (e) { if (e.row && e.row.parentNode === exp) exp.appendChild(e.row); });
+  }
+
+  // лінивий запит залишків+ціни через ТОЙ САМИЙ міст, що й допродаж-банер
+  // (data-sd-stock-codes/token → подія sdUpsellStock → data-sd-stock-result/sdUpsellStockResult).
+  function requestStock(exp, rowsByCode) {
+    var codes = Object.keys(rowsByCode);
+    if (!codes.length) return;
+    var token = String(Date.now()) + '_' + Math.random().toString(36).slice(2);
+    var tm = null, done = false;
+    function finish() { if (done) return; done = true; PAGE.removeEventListener('sdUpsellStockResult', onRes); clearTimeout(tm); }
+    function onRes() {
+      var raw = document.documentElement.getAttribute('data-sd-stock-result');
+      if (!raw) return;
+      var data; try { data = JSON.parse(raw); } catch (e) { return; }
+      if (!data || data.token !== token) return;   // чужа відповідь (напр., банера) — ігноруємо
+      finish();
+      (data.results || []).forEach(function (r) { applyOne(rowsByCode[String(r.code)], r); });
+      reorder(exp, rowsByCode, data.results);
+    }
+    PAGE.addEventListener('sdUpsellStockResult', onRes);
+    document.documentElement.setAttribute('data-sd-stock-codes', JSON.stringify(codes));
+    document.documentElement.setAttribute('data-sd-stock-token', token);
+    document.documentElement.removeAttribute('data-sd-stock-result');
+    PAGE.dispatchEvent(new Event('sdUpsellStock'));
+    tm = setTimeout(function () {
+      finish();
+      codes.forEach(function (c) {
+        var slot = rowsByCode[c];
+        if (slot && slot.pr.textContent === '…') { slot.pr.classList.add('dim'); slot.pr.textContent = '—'; }
+        if (slot && slot.stk.textContent === '…') { slot.stk.textContent = 'залишок —'; }
+      });
+    }, 6000);
+  }
+
   function inject(cell, list) {
     var skuSpan = [].slice.call(cell.querySelectorAll('span')).reverse()
       .find(function (sp) { return /^\([\w\-]+\)$/.test(sp.textContent.trim()); });
@@ -2881,19 +2973,34 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     head.textContent = 'Аналог / заміна:';
     exp.appendChild(head);
 
+    var rowsByCode = {};   // код аналога -> {row, stk, pr} для залишків/ціни/сортування
     list.forEach(function (it) {
       var r = document.createElement('div');
       r.className = 'r';
 
       var nm = document.createElement('span');
       nm.className = 'nm';
-      nm.textContent = it.c || ('код ' + it.sku);
-      r.appendChild(nm);
-
+      var nmT = document.createElement('span');
+      nmT.textContent = it.c || ('код ' + it.sku);
+      nm.appendChild(nmT);
       var code = document.createElement('span');
       code.className = 'code';
       code.textContent = 'код ' + it.sku;
-      r.appendChild(code);
+      nm.appendChild(code);
+      r.appendChild(nm);
+
+      // колонка наявності + ціни (заповнюється лениво при відкритті)
+      var info = document.createElement('span');
+      info.className = 'info';
+      var stk = document.createElement('span');
+      stk.className = 'stk';
+      stk.textContent = '…';
+      var pr = document.createElement('span');
+      pr.className = 'pr dim';
+      pr.textContent = '…';
+      info.appendChild(stk);
+      info.appendChild(pr);
+      r.appendChild(info);
 
       var add = document.createElement('button');
       add.className = 'lkan-add';
@@ -2912,12 +3019,16 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
         r.appendChild(s);
       }
       exp.appendChild(r);
+      rowsByCode[String(it.sku)] = { row: r, stk: stk, pr: pr };
     });
 
+    var stockLoaded = false;
     plus.addEventListener('click', function (e) {
       e.preventDefault(); e.stopPropagation();
       var open = exp.style.display !== 'none';
       exp.style.display = open ? 'none' : 'block';
+      // при першому розкритті — підтягнути залишок+ціну й відсортувати за наявністю
+      if (!open && !stockLoaded) { stockLoaded = true; requestStock(exp, rowsByCode); }
     });
 
     // ставимо одразу ПРАВОРУЧ від помаранчевого «+» комплектів (якщо є), інакше — після коду
