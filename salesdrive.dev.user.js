@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.15
+// @version      2.16
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -31,6 +31,7 @@
      • lkCashRegister  — 💰 Каса самовивозу
      • lkPickList      — 📋 зведений лист комплектації (сума товарів по заявках статусу)
      • lkUkrPromList   — 📮 лист «Пром-оплата + Укрпошта» (відправник/отримувач/індекс/ТТН, друк)
+     • lkSideMenu      — пункти скрипта (💰Каса/📋Склад/📮Укрпошта) у лівому штатному меню
      • lkQuickPickup   — ➕ нова заявка самовивозу + 📋 список усіх самовивозів
      • lkAutoOrgByPayment — організація: самовивіз→Кучер Василь, інакше→ФОП з платежу
      • lkCheckCashbox   — підстановка «каса самовивозу» у формі чека (оплата готівка/термінал)
@@ -4570,6 +4571,88 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 })();
 }catch(e){ try{ console.warn("[SD] модуль «lkUkrPromList» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkUkrPromList ▲▲▲ */
+
+/* ▼▼▼ МОДУЛЬ-START • lkSideMenu — кнопки скрипта (Каса/Склад/Укрпошта) у лівому штатному меню ▼▼▼ */
+/* ===== Пункти скрипта в лівому меню СРМ (під «Установки») замість плаваючих кружечків ===== */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
+(function lkSideMenu(){
+  'use strict';
+
+  // наші пункти: клік просто «натискає» відповідну плаваючу кнопку її модуля.
+  // Пункт видно лише коли кнопка існує (📋 і 📮 живуть тільки на сторінці списку заявок).
+  var ITEMS = [
+    { id:'lk-side-cash', btn:'lk-cash-btn', ico:'💰', lab:'Каса',      title:'Каса самовивозу' },
+    { id:'lk-side-pick', btn:'lk-pick-btn', ico:'📋', lab:'Склад',     title:'Зведений лист комплектації' },
+    { id:'lk-side-ukp',  btn:'lk-ukp-btn',  ico:'📮', lab:'Укрпошта',  title:'Пром-оплата + Укрпошта (лист відправлень)' }
+  ];
+
+  var css = ''
+    +'.lk-side-item{display:block;cursor:pointer;text-align:center;padding:9px 2px 10px;user-select:none;list-style:none}'
+    +'.lk-side-item:hover{background:rgba(255,255,255,.09)}'
+    +'.lk-side-item .ico{display:block;font-size:20px;line-height:1.2}'
+    +'.lk-side-item .lab{display:block;font-size:10.5px;line-height:1.25;color:#cfd8dc;margin-top:2px}'
+    +'.lk-side-item:hover .lab{color:#fff}'
+    // коли пункти вбудовано в меню — плаваючі кружечки не потрібні
+    +'html.lk-side-on #lk-cash-btn,html.lk-side-on #lk-pick-btn,html.lk-side-on #lk-ukp-btn{display:none!important}';
+  var st=document.createElement('style'); st.textContent=css;
+  (document.head||document.documentElement).appendChild(st);
+
+  // знайти контейнер лівого меню за штатним пунктом «Установки» (фолбек — «Звіти»):
+  // беремо елемент з таким текстом, що реально стоїть біля лівого краю і вузький (це сайдбар,
+  // а не слово в контенті сторінки), і повертаємо його пункт меню (li або батька).
+  function findMenuEntry(){
+    var labels=['Установки','Звіти'];
+    for(var L=0; L<labels.length; L++){
+      var r;
+      try{
+        r=document.evaluate('//*[normalize-space(text())="'+labels[L]+'"]',
+          document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+      }catch(e){ return null; }
+      for(var i=0;i<r.snapshotLength;i++){
+        var el=r.snapshotItem(i);
+        if(el.closest('.lk-side-item')) continue;
+        var entry=el.closest('li')||el.parentElement;
+        if(!entry||!entry.parentElement) continue;
+        var b=entry.getBoundingClientRect();
+        if(b.width>0 && b.width<170 && b.left<120) return entry;
+      }
+    }
+    return null;
+  }
+
+  function makeItem(it, refTag){
+    var el=document.createElement(refTag||'li');
+    el.id=it.id; el.className='lk-side-item'; el.title=it.title;
+    var i=document.createElement('span'); i.className='ico'; i.textContent=it.ico;
+    var l=document.createElement('span'); l.className='lab'; l.textContent=it.lab;
+    el.appendChild(i); el.appendChild(l);
+    el.addEventListener('click', function(e){
+      e.preventDefault(); e.stopPropagation();
+      var b=document.getElementById(it.btn); if(b) b.click();
+    });
+    return el;
+  }
+
+  function sync(){
+    var entry=findMenuEntry();
+    if(!entry){ document.documentElement.classList.remove('lk-side-on'); return; }
+    var box=entry.parentElement;
+    ITEMS.forEach(function(it){
+      var el=document.getElementById(it.id);
+      if(!el){ el=makeItem(it, entry.tagName); box.appendChild(el); }
+      else if(el.parentElement!==box) box.appendChild(el);   // меню перемалювалось — повертаємо
+      el.style.display = document.getElementById(it.btn) ? '' : 'none';
+    });
+    document.documentElement.classList.add('lk-side-on');
+  }
+
+  var t=null;
+  function syncSoon(){ clearTimeout(t); t=setTimeout(sync,300); }
+  sync();
+  window.addEventListener('lkdom', syncSoon);
+})();
+}catch(e){ try{ console.warn("[SD] модуль «lkSideMenu» не запустився:", e); }catch(_){} }
+/* ▲▲▲ МОДУЛЬ-END • lkSideMenu ▲▲▲ */
 
 /* ▼▼▼ МОДУЛЬ-START • lkQuickPickup — ➕ Швидка кнопка: нова заявка із самовивозом ▼▼▼ */
 /* ===== ➕ Швидка кнопка: нова заявка із самовивозом ===== */
