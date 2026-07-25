@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.09
+// @version      2.10
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -1715,6 +1715,11 @@ function __sdPageMain() {
     var code = document.documentElement.getAttribute("data-sd-upsell-code");
     if (!code) return setResult(false, "no-code");
 
+    // режим додавання: 'regular' → звичайний товар (аналог), інакше → допродаж (банер).
+    // Атрибут знімаємо ОДРАЗУ, щоб він не «протік» на наступний виклик.
+    var asRegular = document.documentElement.getAttribute("data-sd-upsell-mode") === "regular";
+    document.documentElement.removeAttribute("data-sd-upsell-mode");
+
     var got = getVMcached();
     if (!got || !got.vm) return setResult(false, "no-viewModel");
 
@@ -1785,9 +1790,9 @@ function __sdPageMain() {
                 // просто фіксуємо його як допродаж, БЕЗ повторного додавання (захист від задвоєння)
                 if (vm.addAttribute && ourPid && pidOf(vm.addAttribute) === ourPid) {
                   var b0 = (vm.items || []).length;
-                  vm.addOption(true);
+                  vm.addOption(!asRegular);
                   var a0 = (vm.items || []).length;
-                  if (a0 > b0) { vm.items[a0 - 1].preSale = 1; fixRozPrice(vm.items[a0 - 1]); added = true; return; }
+                  if (a0 > b0) { vm.items[a0 - 1].preSale = asRegular ? 0 : 1; fixRozPrice(vm.items[a0 - 1]); added = true; return; }
                   try { vm.addAttribute = {}; } catch (e) {} // не зафіксувати "хвіст" нижче
                 }
                 // якщо лежить ІНШИЙ товар (якір із пошуку) — зафіксувати його нормально
@@ -1796,9 +1801,9 @@ function __sdPageMain() {
                 var before = (vm.items || []).length;
                 vm.addItemChangeAutoComplete(item, item, label);
                 if (!vm.addAttribute || !vm.addAttribute.productId) vm.addAttribute = item;
-                vm.addOption(true);
+                vm.addOption(!asRegular);
                 var after = (vm.items || []).length;
-                if (after > before) { vm.items[after - 1].preSale = 1; fixRozPrice(vm.items[after - 1]); added = true; }
+                if (after > before) { vm.items[after - 1].preSale = asRegular ? 0 : 1; fixRozPrice(vm.items[after - 1]); added = true; }
               });
             } catch (e) {}
             return added;
@@ -2805,17 +2810,23 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     + '  margin-left:8px;padding:0 7px;border-radius:9px;background:#00897B;color:#fff;'
     + '  font:700 11px/1 sans-serif;cursor:pointer;vertical-align:middle;user-select:none;white-space:nowrap}'
     + '.lkan-plus:hover{background:#00695C}'
-    + '.lkan-exp{margin:5px 0 3px;padding:8px 11px;border-left:3px solid #00897B;background:#f2fbfa;'
-    + '  border-radius:6px;font:12px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;color:#0f3d39}'
-    + '.lkan-exp .h{color:#00695c;font-weight:700;margin-bottom:5px;text-transform:uppercase;'
-    + '  letter-spacing:.3px;font-size:11px}'
-    + '.lkan-exp .r{padding:4px 0;display:flex;flex-wrap:wrap;align-items:center;gap:8px}'
-    + '.lkan-exp .r+.r{border-top:1px dashed rgba(0,137,123,.25)}'
-    + '.lkan-exp .r .nm{color:#0f2b29;font-weight:600;flex:1 1 180px;min-width:0}'
-    + '.lkan-exp .r .code{color:#00695c;font:700 11px/1 ui-monospace,Menlo,Consolas,monospace}'
-    + '.lkan-exp .r .s{flex-basis:100%;color:#3a5e5a;font-style:italic;font-size:11.5px}'
-    + '.lkan-add{border:none;border-radius:6px;background:#00897B;color:#fff;font:700 11px/1 sans-serif;'
-    + '  padding:6px 10px;cursor:pointer;white-space:nowrap}'
+    // список аналогів — таблиця-сітка з суцільною рамкою й лініями (назва | код | кнопка)
+    + '.lkan-exp{margin:5px 0 3px;background:#f2fbfa;border:1px solid #00897B;border-radius:6px;'
+    + '  overflow:hidden;font:12px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;color:#0f3d39}'
+    + '.lkan-exp .h{color:#00695c;font-weight:700;padding:6px 9px;border-bottom:1px solid #00897B;'
+    + '  text-transform:uppercase;letter-spacing:.3px;font-size:11px;background:#e3f4f2}'
+    + '.lkan-exp .r{display:grid;grid-template-columns:1fr auto auto;align-items:stretch}'
+    + '.lkan-exp .r+.r{border-top:1px solid rgba(0,137,123,.45)}'
+    + '.lkan-exp .r .nm{color:#0f2b29;font-weight:600;min-width:0;padding:6px 9px;'
+    + '  display:flex;align-items:center;word-break:break-word}'
+    + '.lkan-exp .r .code{color:#00695c;font:700 11px/1.2 ui-monospace,Menlo,Consolas,monospace;'
+    + '  padding:6px 9px;border-left:1px solid rgba(0,137,123,.45);display:flex;align-items:center;'
+    + '  white-space:nowrap}'
+    + '.lkan-exp .r .s{grid-column:1 / -1;color:#3a5e5a;font-style:italic;font-size:11.5px;'
+    + '  padding:5px 9px;border-top:1px dashed rgba(0,137,123,.35)}'
+    + '.lkan-add{border:none;border-left:1px solid rgba(0,137,123,.45);border-radius:0;'
+    + '  background:#00897B;color:#fff;font:700 11px/1 sans-serif;padding:0 12px;cursor:pointer;'
+    + '  white-space:nowrap}'
     + '.lkan-add:hover{background:#00695c}'
     + '.lkan-add.done{background:#9e9e9e;cursor:default}';
   var st = document.createElement('style'); st.textContent = css;
@@ -2843,6 +2854,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     if (!code || btn.classList.contains('done')) return;
     try {
       document.documentElement.setAttribute('data-sd-upsell-code', String(code));
+      // аналог додаємо як ЗВИЧАЙНИЙ товар, а не допродаж (банер цей атрибут не ставить)
+      document.documentElement.setAttribute('data-sd-upsell-mode', 'regular');
       document.documentElement.removeAttribute('data-sd-upsell-result');
       PAGE.dispatchEvent(new Event('sdUpsellAdd'));
     } catch (e) {}
