@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.14
+// @version      2.15
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -1810,10 +1810,9 @@ function __sdPageMain() {
           }
 
           // після успішного додавання — прибрати порожній рядок-редактор, який лишається
-          // від «розігріву» (фокус + autocomplete). Тільки для аналога (asRegular),
-          // щоб не чіпати робочий потік банера.
+          // від «розігріву» (фокус + autocomplete). Для ВСІХ шляхів додавання:
+          // і аналог, і жовтий банер допродажу (обидва йдуть через цей обробник).
           function cleanupAddRow() {
-            if (!asRegular) return;
             setTimeout(function () {
               try {
                 safeApply(scope, function () {
