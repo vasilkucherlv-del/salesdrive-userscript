@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.16
+// @version      2.17
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4581,13 +4581,13 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   // наші пункти: клік просто «натискає» відповідну плаваючу кнопку її модуля.
   // Пункт видно лише коли кнопка існує (📋 і 📮 живуть тільки на сторінці списку заявок).
   var ITEMS = [
-    { id:'lk-side-cash', btn:'lk-cash-btn', ico:'💰', lab:'Каса',      title:'Каса самовивозу' },
-    { id:'lk-side-pick', btn:'lk-pick-btn', ico:'📋', lab:'Склад',     title:'Зведений лист комплектації' },
-    { id:'lk-side-ukp',  btn:'lk-ukp-btn',  ico:'📮', lab:'Укрпошта',  title:'Пром-оплата + Укрпошта (лист відправлень)' }
+    { id:'lk-side-cash', btn:'lk-cash-btn', ico:'💰', lab:'Каса',                      title:'Каса самовивозу' },
+    { id:'lk-side-pick', btn:'lk-pick-btn', ico:'📋', lab:'Лист комплектації',         title:'Зведений лист комплектації' },
+    { id:'lk-side-ukp',  btn:'lk-ukp-btn',  ico:'📮', lab:'Друк пром-оплата + Укрпошта', title:'Друк: пром-оплата + Укрпошта (лист відправлень)' }
   ];
 
   var css = ''
-    +'.lk-side-item{display:block;cursor:pointer;text-align:center;padding:9px 2px 10px;user-select:none;list-style:none}'
+    +'.lk-side-item{display:block;cursor:pointer;text-align:center;padding:9px 5px 10px;user-select:none;list-style:none}'
     +'.lk-side-item:hover{background:rgba(255,255,255,.09)}'
     +'.lk-side-item .ico{display:block;font-size:20px;line-height:1.2}'
     +'.lk-side-item .lab{display:block;font-size:10.5px;line-height:1.25;color:#cfd8dc;margin-top:2px}'
