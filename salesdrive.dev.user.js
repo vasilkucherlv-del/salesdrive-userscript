@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.12
+// @version      2.13
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -1809,9 +1809,27 @@ function __sdPageMain() {
             return added;
           }
 
+          // після успішного додавання — прибрати порожній рядок-редактор, який лишається
+          // від «розігріву» (фокус + autocomplete). Тільки для аналога (asRegular),
+          // щоб не чіпати робочий потік банера.
+          function cleanupAddRow() {
+            if (!asRegular) return;
+            setTimeout(function () {
+              try {
+                safeApply(scope, function () {
+                  try { vm.addAttribute = {}; } catch (e) {}
+                  try { if ("newName" in vm) vm.newName = ""; } catch (e) {}
+                });
+                var inp = findInput();
+                if (inp) { try { inp.value = ""; inp.blur(); } catch (e) {} }
+              } catch (e) {}
+            }, 30);
+          }
+          function ok(reason) { cleanupAddRow(); return setResult(true, reason); }
+
           // перша спроба одразу; якщо холодний рядок не додав — ще кілька спроб із паузою,
           // щоб користувачу вистачало ОДНОГО кліку (розігрів робимо самі)
-          if (attemptAdd()) return setResult(true, "ok-1");
+          if (attemptAdd()) return ok("ok-1");
           var tries = [90, 200, 350];
           (function next(i) {
             if (i >= tries.length) {
@@ -1826,7 +1844,7 @@ function __sdPageMain() {
               return setResult(false, "not-added");
             }
             setTimeout(function () {
-              if (attemptAdd()) return setResult(true, "ok-" + (i + 2));
+              if (attemptAdd()) return ok("ok-" + (i + 2));
               next(i + 1);
             }, tries[i]);
           })(0);
