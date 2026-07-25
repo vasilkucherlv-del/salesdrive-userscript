@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.17
+// @version      2.18
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4592,7 +4592,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     +'.lk-side-item .ico{display:block;font-size:20px;line-height:1.2}'
     +'.lk-side-item .lab{display:block;font-size:10.5px;line-height:1.25;color:#cfd8dc;margin-top:2px}'
     +'.lk-side-item:hover .lab{color:#fff}'
-    // коли пункти вбудовано в меню — плаваючі кружечки не потрібні
+    // кружечки ховаємо: і поки шукаємо меню на старті (lk-side-boot), і коли вже вбудовано
+    // (lk-side-on) — щоб на завантаженні вони не блимали перед перенесенням у меню
+    +'html.lk-side-boot #lk-cash-btn,html.lk-side-boot #lk-pick-btn,html.lk-side-boot #lk-ukp-btn,'
     +'html.lk-side-on #lk-cash-btn,html.lk-side-on #lk-pick-btn,html.lk-side-on #lk-ukp-btn{display:none!important}';
   var st=document.createElement('style'); st.textContent=css;
   (document.head||document.documentElement).appendChild(st);
@@ -4648,6 +4650,20 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 
   var t=null;
   function syncSoon(){ clearTimeout(t); t=setTimeout(sync,300); }
+
+  // старт: одразу ховаємо кружечки (lk-side-boot) і активно шукаємо меню до ~6с;
+  // знайшли — sync() поставить lk-side-on; ні — знімаємо boot, кружечки повертаються
+  document.documentElement.classList.add('lk-side-boot');
+  var tries=0, boot=setInterval(function(){
+    sync();
+    tries++;
+    var ok=document.documentElement.classList.contains('lk-side-on');
+    if(ok || tries>=30){
+      clearInterval(boot);
+      document.documentElement.classList.remove('lk-side-boot');
+    }
+  },200);
+
   sync();
   window.addEventListener('lkdom', syncSoon);
 })();
