@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      2.15
+// @version      2.19
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -28,9 +28,11 @@
      • lkComplectPrice — роздрібна ціна біля товару в таблиці «Товари в комплекті»
      • lkUpsellRedesign— компактний вигляд картки допродажу
      • lkStockPayWarn  — попередження: передоплата + малий залишок
+     • lkBundleFix     — 🧹 «Разом дешевше»: прибрати NEW PRODUCT, ціни товарів → сума акції
      • lkCashRegister  — 💰 Каса самовивозу
      • lkPickList      — 📋 зведений лист комплектації (сума товарів по заявках статусу)
      • lkUkrPromList   — 📮 лист «Пром-оплата + Укрпошта» (відправник/отримувач/індекс/ТТН, друк)
+     • lkSideMenu      — пункти скрипта (💰Каса/📋Склад/📮Укрпошта) у лівому штатному меню
      • lkQuickPickup   — ➕ нова заявка самовивозу + 📋 список усіх самовивозів
      • lkAutoOrgByPayment — організація: самовивіз→Кучер Василь, інакше→ФОП з платежу
      • lkCheckCashbox   — підстановка «каса самовивозу» у формі чека (оплата готівка/термінал)
@@ -2006,6 +2008,81 @@ function __sdPageMain() {
     });
   });
 
+  // ---------- «РАЗОМ ДЕШЕВШЕ»: прибрати NEW PRODUCT і перерахувати ціни ----------
+  // Маркетплейс кладе в заявку службові рядки NEW PRODUCT: один із ціною акції
+  // («Разом дешевше», напр. 749), другий DISCOUNT зі знижкою на суму товарів.
+  // Кнопка модуля lkBundleFix шле подію sdBundleFix: тут видаляємо службові рядки
+  // і пропорційно масштабуємо ціни справжніх товарів так, щоб разом = ціна акції
+  // (останній рядок добирає копійки — сума сходиться до копійки).
+  window.addEventListener("sdBundleFix", function () {
+    var token = document.documentElement.getAttribute("data-sd-bundle-token") || "";
+    function respond(o) {
+      o.token = token;
+      document.documentElement.setAttribute("data-sd-bundle-result", JSON.stringify(o));
+      window.dispatchEvent(new Event("sdBundleFixResult"));
+    }
+    var got = getVMcached();
+    if (!got || !got.vm) return respond({ ok: false, err: "no-viewModel" });
+    var vm = got.vm, scope = got.scope, items = vm.items || [];
+
+    function num(v) {
+      var n = parseFloat(String(v == null ? "" : v).replace(/\s/g, "").replace(",", "."));
+      return isNaN(n) ? 0 : n;
+    }
+    function qtyOf(x) {
+      var q = num(x.count != null ? x.count : (x.amount != null ? x.amount : x.quantity));
+      return q > 0 ? q : 1;
+    }
+    function isNP(x) {
+      return /new\s*product/i.test(String((x && (x.name || x.documentName)) || ""));
+    }
+
+    var pseudo = items.filter(isNP);
+    if (!pseudo.length) return respond({ ok: false, err: "NEW PRODUCT не знайдено" });
+
+    var target = 0;
+    pseudo.forEach(function (x) { var p = num(x.price); if (p > 0) target += p * qtyOf(x); });
+    target = Math.round(target * 100) / 100;
+    if (!(target > 0)) return respond({ ok: false, err: "у NEW PRODUCT нема ціни «Разом дешевше»" });
+
+    var real = items.filter(function (x) { return !isNP(x); });
+    if (!real.length) return respond({ ok: false, err: "нема звичайних товарів" });
+    var base = 0;
+    real.forEach(function (x) { base += num(x.price) * qtyOf(x); });
+    if (!(base > 0)) return respond({ ok: false, err: "сума товарів = 0" });
+
+    // планування нових цін ДО застосування (щоб відмовитись цілком, якщо щось не сходиться)
+    var plan = [], acc = 0, i, x, q, p;
+    for (i = 0; i < real.length; i++) {
+      x = real[i]; q = qtyOf(x);
+      if (i < real.length - 1) { p = Math.round(num(x.price) * target / base * 100) / 100; acc += p * q; }
+      else { p = Math.round((target - acc) / q * 100) / 100; }
+      if (!(p > 0)) return respond({ ok: false, err: "нова ціна ≤ 0 — не застосовую" });
+      plan.push(p);
+    }
+
+    try {
+      safeApply(scope, function () {
+        for (var k = 0; k < real.length; k++) {
+          var s = plan[k].toFixed(2).replace(".", ",");
+          real[k].defaultPrice = plan[k];
+          real[k].price = s;
+          real[k].newDefaultPrice = s;
+        }
+        for (var j = items.length - 1; j >= 0; j--) if (isNP(items[j])) items.splice(j, 1);
+        try { if (typeof vm.updateItems === "function") vm.updateItems(); } catch (e) {}
+        if (typeof vm.itemChange === "function") {
+          real.forEach(function (r, idx) {
+            try { vm.itemChange(r, r.index != null ? r.index : idx); } catch (e) {}
+          });
+        }
+      });
+      respond({ ok: true, target: target, removed: pseudo.length });
+    } catch (e) {
+      respond({ ok: false, err: String(e) });
+    }
+  });
+
   // ---------- МАЛЕНЬКІ КАРТИНКИ ТОВАРІВ У ВИПАДНОМУ СПИСКУ ----------
   function imgToUrl(s) {
     if (typeof s !== "string") return null;
@@ -3495,6 +3572,103 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 }catch(e){ try{ console.warn("[SD] модуль «lkStockPayWarn» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkStockPayWarn ▲▲▲ */
 
+/* ▼▼▼ МОДУЛЬ-START • lkBundleFix — 🧹 «Разом дешевше»: прибрати NEW PRODUCT і перерахувати ціни ▼▼▼ */
+/* ===== Кнопка в заявці з NEW PRODUCT: видалити службові рядки, ціни товарів → сума акції ===== */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
+(function lkBundleFix(){
+  'use strict';
+  var PAGE=(typeof unsafeWindow!=='undefined'&&unsafeWindow)||window;
+
+  var css=''
+    +'#sd-bundle-fix{position:relative;margin:10px 0;padding:10px 34px 10px 12px;'
+    +'  border:1px solid #7bb3a9;border-left:4px solid #00897B;background:#eef8f6;border-radius:6px;'
+    +'  font:13px/1.5 -apple-system,"Segoe UI",Roboto,Arial,sans-serif;color:#0f3d39;max-width:980px;box-sizing:border-box}'
+    +'#sd-bundle-fix .bf-top{font-weight:700;color:#00695c;margin-bottom:6px}'
+    +'#sd-bundle-fix .bf-btn{cursor:pointer;border:none;background:#00897B;color:#fff;font-weight:700;'
+    +'  padding:7px 14px;border-radius:6px;font-size:13px}'
+    +'#sd-bundle-fix .bf-btn:hover{background:#00695c}'
+    +'#sd-bundle-fix .bf-btn[disabled]{background:#9e9e9e;cursor:default}'
+    +'#sd-bundle-fix .bf-res{margin-left:10px;font-weight:700}'
+    +'#sd-bundle-fix .bf-res.ok{color:#1B5E20}'
+    +'#sd-bundle-fix .bf-res.er{color:#B71C1C}'
+    +'html.sd-modal-open #sd-bundle-fix{display:none !important}';
+  var st=document.createElement('style'); st.textContent=css;
+  (document.head||document.documentElement).appendChild(st);
+
+  // місце вставки — перед таблицею товарів (як у lkStockPayWarn: якір — кнопка «+ Додати»)
+  function findSpot(){
+    var btn=null, all=document.querySelectorAll('[ng-click]');
+    for(var i=0;i<all.length;i++){
+      if((all[i].getAttribute('ng-click')||'').replace(/\s+/g,'')==='viewModel.addOption()'){ btn=all[i]; break; }
+    }
+    if(!btn) btn=document.getElementById('addCompleteProduct');
+    if(!btn) return null;
+    var tbl=btn.closest('table');
+    if(tbl && tbl.parentElement && tbl.parentElement!==document.body) return { parent: tbl.parentElement, ref: tbl };
+    return null;
+  }
+
+  function runFix(box){
+    var b=box.querySelector('.bf-btn'), res=box.querySelector('.bf-res');
+    b.disabled=true; res.textContent='працюю…'; res.className='bf-res';
+    var token=String(Date.now())+'_'+Math.random().toString(36).slice(2);
+    var tm=null;
+    function onRes(){
+      var raw=document.documentElement.getAttribute('data-sd-bundle-result');
+      if(!raw) return;
+      var d; try{ d=JSON.parse(raw); }catch(e){ return; }
+      if(!d || d.token!==token) return;
+      PAGE.removeEventListener('sdBundleFixResult', onRes); clearTimeout(tm);
+      if(d.ok){
+        box.setAttribute('data-done','1');
+        box.innerHTML='<div class="bf-top">✓ Готово: видалено рядків NEW PRODUCT — '+d.removed
+          +', ціни товарів перераховано (разом '+String(d.target.toFixed(2)).replace('.',',')
+          +' ₴). Перевір суми й натисни «Зберегти».</div>';
+        setTimeout(function(){ try{ box.remove(); }catch(e){} }, 9000);
+      }else{
+        b.disabled=false; res.className='bf-res er'; res.textContent='✗ '+(d.err||'не вийшло');
+      }
+    }
+    PAGE.addEventListener('sdBundleFixResult', onRes);
+    document.documentElement.setAttribute('data-sd-bundle-token', token);
+    document.documentElement.removeAttribute('data-sd-bundle-result');
+    PAGE.dispatchEvent(new Event('sdBundleFix'));
+    tm=setTimeout(function(){
+      PAGE.removeEventListener('sdBundleFixResult', onRes);
+      b.disabled=false; res.className='bf-res er'; res.textContent='✗ нема відповіді';
+    },5000);
+  }
+
+  function build(){
+    var box=document.createElement('div'); box.id='sd-bundle-fix';
+    var top=document.createElement('div'); top.className='bf-top';
+    top.textContent='🧹 Замовлення «Разом дешевше»: є службові рядки NEW PRODUCT.';
+    var b=document.createElement('button'); b.type='button'; b.className='bf-btn';
+    b.textContent='Прибрати NEW PRODUCT і перерахувати ціни';
+    var res=document.createElement('span'); res.className='bf-res';
+    b.addEventListener('click', function(e){ e.preventDefault(); e.stopPropagation(); runFix(box); });
+    box.appendChild(top); box.appendChild(b); box.appendChild(res);
+    return box;
+  }
+
+  function sync(){
+    var old=document.getElementById('sd-bundle-fix');
+    if(old && old.getAttribute('data-done')) return;   // показуємо результат — не чіпаємо
+    var spot=findSpot();
+    var need=!!(spot && /NEW\s*PRODUCT/i.test(spot.ref.textContent||''));
+    if(!need){ if(old) old.remove(); return; }
+    if(old) return;
+    spot.parent.insertBefore(build(), spot.ref);
+  }
+
+  var t=null;
+  function syncSoon(){ clearTimeout(t); t=setTimeout(sync,350); }
+  sync();
+  window.addEventListener('lkdom', syncSoon);
+})();
+}catch(e){ try{ console.warn("[SD] модуль «lkBundleFix» не запустився:", e); }catch(_){} }
+/* ▲▲▲ МОДУЛЬ-END • lkBundleFix ▲▲▲ */
+
 /* ▼▼▼ МОДУЛЬ-START • lkCashRegister — 💰 Каса самовивозу (день/тиждень/місяць/період) ▼▼▼ */
 /* ===== 💰 Каса самовивозу — день / тиждень / місяць / період ===== */
 try{ // SD-ізоляція: помилка цього модуля не зупинить решту
@@ -4570,6 +4744,104 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 })();
 }catch(e){ try{ console.warn("[SD] модуль «lkUkrPromList» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkUkrPromList ▲▲▲ */
+
+/* ▼▼▼ МОДУЛЬ-START • lkSideMenu — кнопки скрипта (Каса/Склад/Укрпошта) у лівому штатному меню ▼▼▼ */
+/* ===== Пункти скрипта в лівому меню СРМ (під «Установки») замість плаваючих кружечків ===== */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
+(function lkSideMenu(){
+  'use strict';
+
+  // наші пункти: клік просто «натискає» відповідну плаваючу кнопку її модуля.
+  // Пункт видно лише коли кнопка існує (📋 і 📮 живуть тільки на сторінці списку заявок).
+  var ITEMS = [
+    { id:'lk-side-cash', btn:'lk-cash-btn', ico:'💰', lab:'Каса',                      title:'Каса самовивозу' },
+    { id:'lk-side-pick', btn:'lk-pick-btn', ico:'📋', lab:'Лист комплектації',         title:'Зведений лист комплектації' },
+    { id:'lk-side-ukp',  btn:'lk-ukp-btn',  ico:'📮', lab:'Друк пром-оплата + Укрпошта', title:'Друк: пром-оплата + Укрпошта (лист відправлень)' }
+  ];
+
+  var css = ''
+    +'.lk-side-item{display:block;cursor:pointer;text-align:center;padding:9px 5px 10px;user-select:none;list-style:none}'
+    +'.lk-side-item:hover{background:rgba(255,255,255,.09)}'
+    +'.lk-side-item .ico{display:block;font-size:20px;line-height:1.2}'
+    +'.lk-side-item .lab{display:block;font-size:10.5px;line-height:1.25;color:#cfd8dc;margin-top:2px}'
+    +'.lk-side-item:hover .lab{color:#fff}'
+    // кружечки ховаємо: і поки шукаємо меню на старті (lk-side-boot), і коли вже вбудовано
+    // (lk-side-on) — щоб на завантаженні вони не блимали перед перенесенням у меню
+    +'html.lk-side-boot #lk-cash-btn,html.lk-side-boot #lk-pick-btn,html.lk-side-boot #lk-ukp-btn,'
+    +'html.lk-side-on #lk-cash-btn,html.lk-side-on #lk-pick-btn,html.lk-side-on #lk-ukp-btn{display:none!important}';
+  var st=document.createElement('style'); st.textContent=css;
+  (document.head||document.documentElement).appendChild(st);
+
+  // знайти контейнер лівого меню за штатним пунктом «Установки» (фолбек — «Звіти»):
+  // беремо елемент з таким текстом, що реально стоїть біля лівого краю і вузький (це сайдбар,
+  // а не слово в контенті сторінки), і повертаємо його пункт меню (li або батька).
+  function findMenuEntry(){
+    var labels=['Установки','Звіти'];
+    for(var L=0; L<labels.length; L++){
+      var r;
+      try{
+        r=document.evaluate('//*[normalize-space(text())="'+labels[L]+'"]',
+          document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+      }catch(e){ return null; }
+      for(var i=0;i<r.snapshotLength;i++){
+        var el=r.snapshotItem(i);
+        if(el.closest('.lk-side-item')) continue;
+        var entry=el.closest('li')||el.parentElement;
+        if(!entry||!entry.parentElement) continue;
+        var b=entry.getBoundingClientRect();
+        if(b.width>0 && b.width<170 && b.left<120) return entry;
+      }
+    }
+    return null;
+  }
+
+  function makeItem(it, refTag){
+    var el=document.createElement(refTag||'li');
+    el.id=it.id; el.className='lk-side-item'; el.title=it.title;
+    var i=document.createElement('span'); i.className='ico'; i.textContent=it.ico;
+    var l=document.createElement('span'); l.className='lab'; l.textContent=it.lab;
+    el.appendChild(i); el.appendChild(l);
+    el.addEventListener('click', function(e){
+      e.preventDefault(); e.stopPropagation();
+      var b=document.getElementById(it.btn); if(b) b.click();
+    });
+    return el;
+  }
+
+  function sync(){
+    var entry=findMenuEntry();
+    if(!entry){ document.documentElement.classList.remove('lk-side-on'); return; }
+    var box=entry.parentElement;
+    ITEMS.forEach(function(it){
+      var el=document.getElementById(it.id);
+      if(!el){ el=makeItem(it, entry.tagName); box.appendChild(el); }
+      else if(el.parentElement!==box) box.appendChild(el);   // меню перемалювалось — повертаємо
+      el.style.display = document.getElementById(it.btn) ? '' : 'none';
+    });
+    document.documentElement.classList.add('lk-side-on');
+  }
+
+  var t=null;
+  function syncSoon(){ clearTimeout(t); t=setTimeout(sync,300); }
+
+  // старт: одразу ховаємо кружечки (lk-side-boot) і активно шукаємо меню до ~6с;
+  // знайшли — sync() поставить lk-side-on; ні — знімаємо boot, кружечки повертаються
+  document.documentElement.classList.add('lk-side-boot');
+  var tries=0, boot=setInterval(function(){
+    sync();
+    tries++;
+    var ok=document.documentElement.classList.contains('lk-side-on');
+    if(ok || tries>=30){
+      clearInterval(boot);
+      document.documentElement.classList.remove('lk-side-boot');
+    }
+  },200);
+
+  sync();
+  window.addEventListener('lkdom', syncSoon);
+})();
+}catch(e){ try{ console.warn("[SD] модуль «lkSideMenu» не запустився:", e); }catch(_){} }
+/* ▲▲▲ МОДУЛЬ-END • lkSideMenu ▲▲▲ */
 
 /* ▼▼▼ МОДУЛЬ-START • lkQuickPickup — ➕ Швидка кнопка: нова заявка із самовивозом ▼▼▼ */
 /* ===== ➕ Швидка кнопка: нова заявка із самовивозом ===== */
