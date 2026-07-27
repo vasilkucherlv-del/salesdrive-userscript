@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.21
+// @version      2.22
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -3703,7 +3703,20 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     +'.sd-cf-toast .a a:hover{background:#a93226}'
     +'.sd-cf-toast .a button{border:1px solid #c0392b;background:#fff;color:#c0392b;font-weight:700;'
     +'  padding:3px 12px;border-radius:5px;cursor:pointer;font-size:12px}'
-    +'.sd-cf-toast .a button:hover{background:#fde9e7}';
+    +'.sd-cf-toast .a button:hover{background:#fde9e7}'
+    // зведення ЗВЕРХУ на сторінці списку заявок (будь-який фільтр менеджера)
+    +'#sd-cf-topbar{position:fixed;top:56px;left:50%;transform:translateX(-50%);z-index:2147483599;'
+    +'  background:#fdf3f3;border:1px solid #e0b4b4;border-left:5px solid #c0392b;border-radius:8px;'
+    +'  padding:8px 12px;box-shadow:0 4px 14px rgba(0,0,0,.28);font:13px/1.5 Arial,sans-serif;'
+    +'  color:#7a1f1f;max-width:min(920px,94vw);display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center}'
+    +'#sd-cf-topbar .lb{font-weight:800;color:#c0392b}'
+    +'#sd-cf-topbar .chip{display:inline-flex;align-items:center;gap:4px;background:#fff;'
+    +'  border:1px solid #e0b4b4;border-radius:14px;padding:2px 4px 2px 10px}'
+    +'#sd-cf-topbar .chip a{color:#c0392b;font-weight:800;text-decoration:none}'
+    +'#sd-cf-topbar .chip a:hover{text-decoration:underline}'
+    +'#sd-cf-topbar .chip button{border:none;background:transparent;color:#c0392b;font-weight:700;'
+    +'  cursor:pointer;padding:0 6px;font-size:13px}'
+    +'#sd-cf-topbar .chip button:hover{color:#7a1f1f}';
   var st=document.createElement('style'); st.textContent=css;
   (document.head||document.documentElement).appendChild(st);
 
@@ -3738,17 +3751,61 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     var last=rows[rows.length-1], t=last.querySelector('span[title]');
     return rows.length+'|'+((t&&t.getAttribute('title'))||'');
   }
+  function ackKey(k){
+    var m=loadAll(); if(m[k]){ m[k].ack=1; saveAll(m); }
+    renderToasts();
+  }
+
+  // зведення зверху на списку заявок: «⛔ Клієнт НЕ отримав повідомлення у заявках: #N ✕ …»
+  function renderTopbar(all, keys){
+    var bar=document.getElementById('sd-cf-topbar');
+    if(!bar){
+      bar=document.createElement('div'); bar.id='sd-cf-topbar';
+      var lab=document.createElement('span'); lab.className='lb';
+      lab.textContent='⛔ Клієнт НЕ отримав повідомлення у заявках:';
+      var chips=document.createElement('span'); chips.className='chips';
+      chips.style.display='inline-flex'; chips.style.flexWrap='wrap'; chips.style.gap='6px';
+      bar.appendChild(lab); bar.appendChild(chips);
+      document.body.appendChild(bar);
+    }
+    var chips=bar.querySelector('.chips');
+    chips.innerHTML='';
+    keys.forEach(function(k){
+      var r=all[k];
+      var c=document.createElement('span'); c.className='chip';
+      var a=document.createElement('a'); a.href=r.url||'#';
+      a.textContent='#'+r.num;
+      a.title=(r.reason||'повідомлення не доставлено')+' — відкрити заявку';
+      var x=document.createElement('button'); x.type='button'; x.textContent='✕';
+      x.title='OK, зрозумів — прибрати';
+      x.addEventListener('click',function(e){ e.preventDefault(); e.stopPropagation(); ackKey(k); });
+      c.appendChild(a); c.appendChild(x); chips.appendChild(c);
+    });
+  }
+
   function renderToasts(){
-    var all=loadAll(), now=Date.now(), changed=false, cur=null;
-    var keys=Object.keys(all);
-    // прибираємо старі (5 днів)
-    keys.forEach(function(k){ if(now-(all[k].t||0)>5*24*3600*1000){ delete all[k]; changed=true; } });
+    var all=loadAll(), now=Date.now(), changed=false;
+    Object.keys(all).forEach(function(k){
+      if(now-(all[k].t||0)>5*24*3600*1000){ delete all[k]; changed=true; }  // чистка старших за 5 днів
+    });
     if(changed) saveAll(all);
-    keys=Object.keys(all).filter(function(k){ return !all[k].ack; });
+    var keys=Object.keys(all).filter(function(k){ return !all[k].ack; });
     var box=document.getElementById('sd-cf-toasts');
-    if(keys.length) cur=curOrderNum();   // на сторінці самої заявки плашку не дублюємо (там банер)
-    keys=keys.filter(function(k){ return all[k].num!==cur; });
-    if(!keys.length){ if(box) box.remove(); return; }
+    var bar=document.getElementById('sd-cf-topbar');
+    var onList=/\/order\/index/.test(location.hash||'');   // список заявок (будь-які фільтри менеджера)
+
+    if(!onList && keys.length){
+      var cur=curOrderNum();   // на сторінці самої заявки не дублюємо (там банер над чатом)
+      keys=keys.filter(function(k){ return all[k].num!==cur; });
+    }
+    if(!keys.length){ if(box) box.remove(); if(bar) bar.remove(); return; }
+
+    if(onList){
+      if(box) box.remove();
+      renderTopbar(all, keys);
+      return;
+    }
+    if(bar) bar.remove();
     if(!box){ box=document.createElement('div'); box.id='sd-cf-toasts'; document.body.appendChild(box); }
     keys.forEach(function(k){
       var r=all[k];
@@ -3760,17 +3817,12 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       var a=document.createElement('div'); a.className='a';
       var op=document.createElement('a'); op.textContent='Відкрити заявку'; op.href=r.url||'#';
       var ok=document.createElement('button'); ok.type='button'; ok.textContent='OK, зрозумів';
-      ok.addEventListener('click',function(){
-        var m=loadAll(); if(m[k]){ m[k].ack=1; saveAll(m); }
-        d.remove();
-        var b2=document.getElementById('sd-cf-toasts');
-        if(b2 && !b2.children.length) b2.remove();
-      });
+      ok.addEventListener('click',function(){ ackKey(k); });
       a.appendChild(op); a.appendChild(ok);
       d.appendChild(t); d.appendChild(w); d.appendChild(a);
       box.appendChild(d);
     });
-    // прибрати плашки, яких уже нема в списку (напр., OK в іншій вкладці)
+    // прибрати плашки, яких уже нема (напр., OK в іншій вкладці)
     [].forEach.call(box.querySelectorAll('[data-k]'),function(d){
       if(keys.indexOf(d.getAttribute('data-k'))<0) d.remove();
     });
@@ -3830,6 +3882,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   function syncSoon(){ clearTimeout(t); t=setTimeout(sync,400); }
   sync();
   window.addEventListener('lkdom', syncSoon);
+  window.addEventListener('hashchange', syncSoon);   // перехід список↔заявка в SPA
 })();
 }catch(e){ try{ console.warn("[SD] модуль «lkChatFailWarn» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkChatFailWarn ▲▲▲ */
