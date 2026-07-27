@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.28
+// @version      2.29
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -30,6 +30,7 @@
      • lkStockPayWarn  — попередження: передоплата + малий залишок
      • lkBundleFix     — 🧹 «Разом дешевше»: прибрати NEW PRODUCT, ціни товарів → сума акції
      • lkChatFailWarn  — ⛔ чат: повідомлення НЕ доставлено (нема Viber/Telegram на номері)
+     • lkPayRequired   — ⛔ заборона зберігати заявку без «Способу оплати»
      • lkCashRegister  — 💰 Каса самовивозу
      • lkPickList      — 📋 зведений лист комплектації (сума товарів по заявках статусу)
      • lkUkrPromList   — 📮 лист «Пром-оплата + Укрпошта» (відправник/отримувач/індекс/ТТН, друк)
@@ -4093,6 +4094,81 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 })();
 }catch(e){ try{ console.warn("[SD] модуль «lkChatFailWarn» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkChatFailWarn ▲▲▲ */
+
+/* ▼▼▼ МОДУЛЬ-START • lkPayRequired — ⛔ заборона зберігати заявку без способу оплати ▼▼▼ */
+/* ===== Менеджер тисне «Зберегти» на картці заявки, а «Спосіб оплати» порожній →
+   блокуємо збереження, підсвічуємо поле червоним і показуємо попередження. ===== */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
+(function lkPayRequired(){
+  'use strict';
+
+  var css=''
+    +'#sd-payreq-warn{position:fixed;top:56px;left:50%;transform:translateX(-50%);z-index:2147483600;'
+    +'  background:#fdf3f3;border:1px solid #e0b4b4;border-left:5px solid #c0392b;border-radius:8px;'
+    +'  padding:10px 16px;box-shadow:0 4px 14px rgba(0,0,0,.3);font:700 14px/1.4 Arial,sans-serif;color:#c0392b}'
+    +'.sd-payreq-hl{box-shadow:0 0 0 3px #c0392b !important;border-radius:4px}';
+  var st=document.createElement('style'); st.textContent=css;
+  (document.head||document.documentElement).appendChild(st);
+
+  function norm(s){ return String(s==null?'':s).replace(/ /g,' ').trim(); }
+  function onOrderPage(){ return /#\/order\/(update|create)/.test(location.hash||''); }
+
+  // порожній спосіб оплати? (той самий селект, що читає lkStockPayWarn)
+  function payEmpty(){
+    var sel=document.getElementById('payment_method-wk');
+    if(sel && 'value' in sel){
+      return !/\d/.test(String(sel.value||''));   // value без цифри (порожнє/`?`) = не вибрано
+    }
+    var cont=document.getElementById('select2-payment_method-wk-container')
+        || document.querySelector('[id^="select2-payment_method"][id$="-container"]');
+    if(cont){
+      var t=norm(cont.getAttribute('title')||cont.textContent);
+      return !t || t==='---' || t==='…' || t==='...';
+    }
+    return false;   // поля взагалі нема (режим перегляду) — не втручаємось
+  }
+
+  function payBox(){
+    return document.getElementById('select2-payment_method-wk-container')
+      ? (document.getElementById('select2-payment_method-wk-container').closest('.select2')
+         || document.getElementById('select2-payment_method-wk-container'))
+      : document.getElementById('payment_method-wk');
+  }
+
+  var wt=null;
+  function warn(){
+    var w=document.getElementById('sd-payreq-warn');
+    if(!w){
+      w=document.createElement('div'); w.id='sd-payreq-warn';
+      w.textContent='⛔ Заявку НЕ збережено — вкажи «Спосіб оплати»!';
+      document.body.appendChild(w);
+    }
+    clearTimeout(wt); wt=setTimeout(function(){ try{ w.remove(); }catch(e){} },6000);
+    var box=payBox();
+    if(box){
+      box.classList.add('sd-payreq-hl');
+      try{ box.scrollIntoView({block:'center',behavior:'smooth'}); }catch(e){}
+      setTimeout(function(){ try{ box.classList.remove('sd-payreq-hl'); }catch(e){} },6000);
+    }
+  }
+
+  // capture-фаза: перехоплюємо раніше за Angular; модалки (форма чека тощо) не чіпаємо
+  document.addEventListener('click', function(e){
+    try{
+      if(!onOrderPage()) return;
+      var t=e.target && e.target.closest ? e.target.closest('button,a,input[type=submit]') : null;
+      if(!t) return;
+      if(t.closest('.modal')) return;
+      var txt=norm(t.textContent||t.value);
+      if(!/^зберегти$/i.test(txt)) return;
+      if(!payEmpty()) return;
+      e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
+      warn();
+    }catch(err){}
+  }, true);
+})();
+}catch(e){ try{ console.warn("[SD] модуль «lkPayRequired» не запустився:", e); }catch(_){} }
+/* ▲▲▲ МОДУЛЬ-END • lkPayRequired ▲▲▲ */
 
 /* ▼▼▼ МОДУЛЬ-START • lkCashRegister — 💰 Каса самовивозу (день/тиждень/місяць/період) ▼▼▼ */
 /* ===== 💰 Каса самовивозу — день / тиждень / місяць / період ===== */
