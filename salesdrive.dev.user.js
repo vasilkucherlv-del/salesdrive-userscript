@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.27
+// @version      2.28
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -2119,24 +2119,59 @@ function __sdPageMain() {
       });
     }
 
+    function npCountVM() { return (vm.items || []).filter(isNP).length; }
+
+    // якщо після кліку ⊗ SalesDrive показує модалку підтвердження — тиснемо «Так» самі
+    function autoConfirm() {
+      try {
+        var btns = document.querySelectorAll('.modal button, .modal a.btn, .sweet-alert button, .swal2-container button, .bootbox button');
+        for (var i = 0; i < btns.length; i++) {
+          var b = btns[i];
+          if (!b.offsetParent) continue;                    // невидима кнопка
+          var t = (b.textContent || "").trim();
+          if (/^(так|да|видалити|удалить|ok|yes|підтвердити|подтвердить)$/i.test(t)) { b.click(); return true; }
+        }
+      } catch (e) {}
+      return false;
+    }
+
+    // фінал: (добити splice-ом, якщо щось лишилось) → ціни → контроль суми → звіт
+    function finishApply(warn) {
+      try {
+        if (npCountVM() > 0) {
+          safeApply(scope, function () {
+            for (var j = (vm.items || []).length - 1; j >= 0; j--) if (isNP(vm.items[j])) vm.items.splice(j, 1);
+          });
+        }
+        applyPrices();
+        var sum = 0;
+        (vm.items || []).forEach(function (x) { if (!isNP(x)) sum += num(x.price) * qtyOf(x); });
+        sum = Math.round(sum * 100) / 100;
+        var out = { ok: true, target: target, sum: sum, removed: pseudo.length,
+                    method: native ? "native" : "splice", warn: warn || null,
+                    diag: { base: base, plan: plan } };
+        try { console.log("[SD-РазомДешевше]", JSON.stringify(out)); } catch (e) {}
+        respond(out);
+      } catch (e) { respond({ ok: false, err: String(e) }); }
+    }
+
     var dels = npDeleteButtons();
     var native = dels.length === pseudo.length;   // кнопки знайдено для КОЖНОГО рядка
     try {
-      if (native) dels.forEach(function (d) { try { d.click(); } catch (e) {} });
-      // після штатного видалення даємо Angular перемалюватись, тоді ціни
-      setTimeout(function () {
-        try {
-          if (!native) {
-            safeApply(scope, function () {
-              for (var j = items.length - 1; j >= 0; j--) if (isNP(items[j])) items.splice(j, 1);
-            });
-          }
-          applyPrices();
-          respond({ ok: true, target: target, removed: pseudo.length, method: native ? "native" : "splice" });
-        } catch (e) {
-          respond({ ok: false, err: String(e) });
-        }
-      }, native ? 250 : 0);
+      if (!native) { finishApply(); }
+      else {
+        dels.forEach(function (d) { try { d.click(); } catch (e) {} });
+        // ціни застосовуємо ЛИШЕ коли рядки СПРАВДІ зникли з vm.items
+        // (а не за фіксовану паузу — модалка могла тримати видалення)
+        var t0 = Date.now();
+        (function waitGone() {
+          autoConfirm();
+          if (npCountVM() === 0) return finishApply();
+          if (Date.now() - t0 > 12000)
+            return finishApply("рядки не видалились штатно — прибрав напряму; перевір суми уважно");
+          setTimeout(waitGone, 200);
+        })();
+      }
     } catch (e) {
       respond({ ok: false, err: String(e) });
     }
@@ -3680,10 +3715,15 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       PAGE.removeEventListener('sdBundleFixResult', onRes); clearTimeout(tm);
       if(d.ok){
         box.setAttribute('data-done','1');
-        box.innerHTML='<div class="bf-top">✓ Готово: видалено рядків NEW PRODUCT — '+d.removed
-          +', ціни товарів перераховано (разом '+String(d.target.toFixed(2)).replace('.',',')
-          +' ₴). Спершу натисни «Зберегти», і лише потім формуй ТТН.</div>';
-        setTimeout(function(){ try{ box.remove(); }catch(e){} }, 12000);
+        var s=(d.sum!=null?d.sum:d.target);
+        var mism=(d.sum!=null && Math.abs(d.sum-d.target)>=0.01);
+        box.innerHTML='<div class="bf-top">✓ Рядків NEW PRODUCT видалено: '+d.removed
+          +'. Разом тепер '+String(s.toFixed(2)).replace('.',',')+' ₴ (ціль акції '
+          +String(d.target.toFixed(2)).replace('.',',')+' ₴).'
+          +(mism?' ⚠ СУМИ НЕ ЗБІГЛИСЬ — не зберігай, напиши Клоду!':'')
+          +(d.warn?' ⚠ '+d.warn+'.':'')
+          +' Спершу «Зберегти», потім ТТН.</div>';
+        setTimeout(function(){ try{ box.remove(); }catch(e){} }, mism?60000:15000);
       }else{
         b.disabled=false; res.className='bf-res er'; res.textContent='✗ '+(d.err||'не вийшло');
       }
@@ -3695,13 +3735,14 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     tm=setTimeout(function(){
       PAGE.removeEventListener('sdBundleFixResult', onRes);
       b.disabled=false; res.className='bf-res er'; res.textContent='✗ нема відповіді';
-    },5000);
+    },20000);
   }
 
   function build(){
     var box=document.createElement('div'); box.id='sd-bundle-fix';
     var top=document.createElement('div'); top.className='bf-top';
-    top.textContent='🧹 Замовлення «Разом дешевше»: є службові рядки NEW PRODUCT.';
+    var ver=''; try{ if(typeof GM_info!=='undefined'&&GM_info.script&&GM_info.script.version) ver=' · v'+GM_info.script.version; }catch(e){}
+    top.textContent='🧹 Замовлення «Разом дешевше»: є службові рядки NEW PRODUCT'+ver+'.';
     var b=document.createElement('button'); b.type='button'; b.className='bf-btn';
     b.textContent='Прибрати NEW PRODUCT і перерахувати ціни';
     var res=document.createElement('span'); res.className='bf-res';
