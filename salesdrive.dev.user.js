@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.19
+// @version      2.20
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -29,6 +29,7 @@
      • lkUpsellRedesign— компактний вигляд картки допродажу
      • lkStockPayWarn  — попередження: передоплата + малий залишок
      • lkBundleFix     — 🧹 «Разом дешевше»: прибрати NEW PRODUCT, ціни товарів → сума акції
+     • lkChatFailWarn  — ⛔ чат: повідомлення НЕ доставлено (нема Viber/Telegram на номері)
      • lkCashRegister  — 💰 Каса самовивозу
      • lkPickList      — 📋 зведений лист комплектації (сума товарів по заявках статусу)
      • lkUkrPromList   — 📮 лист «Пром-оплата + Укрпошта» (відправник/отримувач/індекс/ТТН, друк)
@@ -3668,6 +3669,86 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 })();
 }catch(e){ try{ console.warn("[SD] модуль «lkBundleFix» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkBundleFix ▲▲▲ */
+
+/* ▼▼▼ МОДУЛЬ-START • lkChatFailWarn — ⛔ чат: повідомлення НЕ доставлено (нема Viber/Telegram) ▼▼▼ */
+/* ===== Менеджер пише у Viber/Telegram, а в клієнта їх нема на номері — СРМ показує лише
+   крихітну сіру іконку, менеджер не бачить і дарма чекає відповіді. Робимо це помітним:
+   підсвітка рядка + бейдж «НЕ ДОСТАВЛЕНО» + червоний банер над чатом із причиною. ===== */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
+(function lkChatFailWarn(){
+  'use strict';
+
+  var css=''
+    // сам невдалий рядок у чаті — червона підсвітка + помітна іконка
+    +'tr.message-status-failed td{background:#fdecea!important}'
+    +'tr.message-status-failed .fa-exclamation-circle{color:#c0392b;font-size:15px}'
+    +'.sd-cf-badge{display:inline-block;margin-left:8px;padding:1px 8px;border-radius:10px;'
+    +'  background:#c0392b;color:#fff;font:700 11px/1.7 Arial,sans-serif;white-space:nowrap;vertical-align:middle}'
+    // банер над чатом
+    +'#sd-chatfail-warn{position:relative;margin:8px 0;padding:10px 12px;'
+    +'  border:1px solid #e0b4b4;border-left:5px solid #c0392b;background:#fdf3f3;border-radius:6px;'
+    +'  font:13px/1.5 -apple-system,"Segoe UI",Roboto,Arial,sans-serif;color:#7a1f1f;box-sizing:border-box}'
+    +'#sd-chatfail-warn .cf-top{font-weight:800;color:#c0392b;font-size:14px}'
+    +'#sd-chatfail-warn .cf-why{margin-top:3px}';
+  var st=document.createElement('style'); st.textContent=css;
+  (document.head||document.documentElement).appendChild(st);
+
+  function reasonOf(row){
+    var ic=row.querySelector('[uib-tooltip]');
+    var t=(ic&&ic.getAttribute('uib-tooltip'))||'';
+    if(/viber/i.test(t))    return 'на номері немає Viber';
+    if(/telegram/i.test(t)) return 'на номері немає Telegram';
+    return t||'повідомлення не доставлено';
+  }
+  function pl(n){
+    var d=n%10, h=n%100;
+    return (d===1&&h!==11)?'повідомлення':((d>=2&&d<=4&&(h<12||h>14))?'повідомлення':'повідомлень');
+  }
+
+  function sync(){
+    var rows=document.querySelectorAll('tr.message-status-failed');
+    var old=document.getElementById('sd-chatfail-warn');
+    if(!rows.length){ if(old) old.remove(); return; }
+
+    var reasons={};
+    [].forEach.call(rows,function(r){
+      reasons[reasonOf(r)]=1;
+      // бейдж у сам рядок (один раз)
+      if(!r.getAttribute('data-sdcf')){
+        r.setAttribute('data-sdcf','1');
+        var td=r.querySelector('td.allow-word-wrap')||r.querySelector('td:nth-child(2)');
+        if(td){
+          var b=document.createElement('span'); b.className='sd-cf-badge';
+          b.textContent='⛔ НЕ ДОСТАВЛЕНО'; b.title=reasonOf(r);
+          td.appendChild(b);
+        }
+      }
+    });
+
+    // банер над списком повідомлень (якорем — зовнішня таблиця чату)
+    var cell=rows[0].closest('td.comment-cell');
+    var outer=cell?cell.closest('table'):null;
+    var host=outer&&outer.parentElement?outer.parentElement:null;
+    if(!host){ if(old) old.remove(); return; }
+    if(!old){
+      old=document.createElement('div'); old.id='sd-chatfail-warn';
+      var top=document.createElement('div'); top.className='cf-top';
+      var why=document.createElement('div'); why.className='cf-why';
+      why.textContent='Клієнт цього НЕ бачив — звʼяжися інакше: 📞 подзвони або надішли SMS.';
+      old.appendChild(top); old.appendChild(why);
+    }
+    if(old.parentElement!==host || old.nextSibling!==outer) host.insertBefore(old, outer);
+    old.querySelector('.cf-top').textContent=
+      '⛔ У чаті '+rows.length+' '+pl(rows.length)+' НЕ доставлено: '+Object.keys(reasons).join('; ')+'.';
+  }
+
+  var t=null;
+  function syncSoon(){ clearTimeout(t); t=setTimeout(sync,400); }
+  sync();
+  window.addEventListener('lkdom', syncSoon);
+})();
+}catch(e){ try{ console.warn("[SD] модуль «lkChatFailWarn» не запустився:", e); }catch(_){} }
+/* ▲▲▲ МОДУЛЬ-END • lkChatFailWarn ▲▲▲ */
 
 /* ▼▼▼ МОДУЛЬ-START • lkCashRegister — 💰 Каса самовивозу (день/тиждень/місяць/період) ▼▼▼ */
 /* ===== 💰 Каса самовивозу — день / тиждень / місяць / період ===== */
