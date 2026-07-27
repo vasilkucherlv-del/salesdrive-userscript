@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.25
+// @version      2.26
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -2041,8 +2041,29 @@ function __sdPageMain() {
     var pseudo = items.filter(isNP);
     if (!pseudo.length) return respond({ ok: false, err: "NEW PRODUCT не знайдено" });
 
+    // ціль = ТІЛЬКИ рядок акції («Разом/Вместе дешевле»), БЕЗ DISCOUNT-рядка:
+    // маркетплейс інколи кладе в DISCOUNT теж додатню ціну (напр., 8,00) — її не рахуємо
+    function hasDiscountStr(o) {
+      try {
+        for (var k in o) {
+          if (typeof o[k] === "string" && /discount/i.test(o[k])) return true;
+        }
+      } catch (e) {}
+      return false;
+    }
+    function isDiscountRow(x) {
+      return hasDiscountStr(x) || (x && x.product && hasDiscountStr(x.product));
+    }
+
     var target = 0;
-    pseudo.forEach(function (x) { var p = num(x.price); if (p > 0) target += p * qtyOf(x); });
+    pseudo.forEach(function (x) {
+      if (isDiscountRow(x)) return;
+      var p = num(x.price); if (p > 0) target += p * qtyOf(x);
+    });
+    // фолбек: якщо рядок акції не розпізнано — стара логіка (усі NEW PRODUCT з ціною)
+    if (!(target > 0)) {
+      pseudo.forEach(function (x) { var p = num(x.price); if (p > 0) target += p * qtyOf(x); });
+    }
     target = Math.round(target * 100) / 100;
     if (!(target > 0)) return respond({ ok: false, err: "у NEW PRODUCT нема ціни «Разом дешевше»" });
 
