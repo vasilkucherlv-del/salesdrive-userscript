@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.23
+// @version      2.24
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -3968,6 +3968,29 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   sync();
   window.addEventListener('lkdom', syncSoon);
   window.addEventListener('hashchange', syncSoon);   // перехід список↔заявка в SPA
+
+  // МИТТЄВА реакція на появу нового повідомлення в чаті (не чекаємо lkdom-пульс ~0.4-1с):
+  // щойно СРМ домальовує відправлене повідомлення — одразу пишемо ⏳ у память,
+  // навіть якщо менеджер закриє заявку за мить після відправки.
+  var moT=null;
+  try{
+    var mo=new MutationObserver(function(muts){
+      for(var i=0;i<muts.length;i++){
+        var ad=muts[i].addedNodes;
+        for(var j=0;j<ad.length;j++){
+          var n=ad[j];
+          if(n && n.nodeType===1 &&
+             ((n.matches && n.matches('td.comment-cell')) ||
+              (n.querySelector && n.querySelector('td.comment-cell')))){
+            clearTimeout(moT);
+            moT=setTimeout(function(){ trackNewSends(); renderToasts(); },30);
+            return;
+          }
+        }
+      }
+    });
+    mo.observe(document.body||document.documentElement,{childList:true,subtree:true});
+  }catch(e){}
 })();
 }catch(e){ try{ console.warn("[SD] модуль «lkChatFailWarn» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkChatFailWarn ▲▲▲ */
