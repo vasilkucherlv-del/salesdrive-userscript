@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      2.24
+// @version      2.28
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -2041,8 +2041,33 @@ function __sdPageMain() {
     var pseudo = items.filter(isNP);
     if (!pseudo.length) return respond({ ok: false, err: "NEW PRODUCT не знайдено" });
 
+    // ціль = ТІЛЬКИ рядок акції («Разом/Вместе дешевле»), БЕЗ DISCOUNT-рядка:
+    // маркетплейс інколи кладе в DISCOUNT теж додатню ціну (напр., 8,00) — її не рахуємо
+    function hasDiscountStr(o) {
+      try {
+        for (var k in o) {
+          if (typeof o[k] === "string" && /discount/i.test(o[k])) return true;
+        }
+      } catch (e) {}
+      return false;
+    }
+    function isDiscountRow(x) {
+      return hasDiscountStr(x) || (x && x.product && hasDiscountStr(x.product));
+    }
+
+    // ціль = НАЙБІЛЬШИЙ не-DISCOUNT рядок NEW PRODUCT (НЕ сума всіх!):
+    // рядок акції завжди несе повну суму замовлення (749; 412), а DISCOUNT-довісок —
+    // меншу (0; 8), тож максимум дає правильну ціль незалежно від формату полів
     var target = 0;
-    pseudo.forEach(function (x) { var p = num(x.price); if (p > 0) target += p * qtyOf(x); });
+    pseudo.forEach(function (x) {
+      if (isDiscountRow(x)) return;
+      var p = num(x.price) * qtyOf(x);
+      if (p > target) target = p;
+    });
+    // фолбек: якщо не-DISCOUNT рядків із ціною не знайшлось — максимум серед усіх
+    if (!(target > 0)) {
+      pseudo.forEach(function (x) { var p = num(x.price) * qtyOf(x); if (p > target) target = p; });
+    }
     target = Math.round(target * 100) / 100;
     if (!(target > 0)) return respond({ ok: false, err: "у NEW PRODUCT нема ціни «Разом дешевше»" });
 
@@ -2062,7 +2087,22 @@ function __sdPageMain() {
       plan.push(p);
     }
 
-    try {
+    // Видалення НАСАМПЕРЕД через штатну кнопку ⊗ рядка: тоді SalesDrive сам
+    // перераховує оплату/післяплату/оголошену вартість (важливо для ТТН Укрпошти).
+    // Фолбек — splice, якщо кнопки не знайшлися.
+    function npDeleteButtons() {
+      var out = [], trs = document.querySelectorAll("tr");
+      for (var i = 0; i < trs.length; i++) {
+        var tr = trs[i];
+        if (!/NEW\s*PRODUCT/i.test(tr.textContent || "")) continue;
+        if (tr.querySelector("tr")) continue;   // беремо найглибший tr, не батьківські
+        var del = tr.querySelector('[ng-click*="elete"],[ng-click*="emove"]');
+        if (del) out.push(del);
+      }
+      return out;
+    }
+
+    function applyPrices() {
       safeApply(scope, function () {
         for (var k = 0; k < real.length; k++) {
           var s = plan[k].toFixed(2).replace(".", ",");
@@ -2070,15 +2110,68 @@ function __sdPageMain() {
           real[k].price = s;
           real[k].newDefaultPrice = s;
         }
-        for (var j = items.length - 1; j >= 0; j--) if (isNP(items[j])) items.splice(j, 1);
-        try { if (typeof vm.updateItems === "function") vm.updateItems(); } catch (e) {}
         if (typeof vm.itemChange === "function") {
           real.forEach(function (r, idx) {
             try { vm.itemChange(r, r.index != null ? r.index : idx); } catch (e) {}
           });
         }
+        try { if (typeof vm.updateItems === "function") vm.updateItems(); } catch (e) {}
       });
-      respond({ ok: true, target: target, removed: pseudo.length });
+    }
+
+    function npCountVM() { return (vm.items || []).filter(isNP).length; }
+
+    // якщо після кліку ⊗ SalesDrive показує модалку підтвердження — тиснемо «Так» самі
+    function autoConfirm() {
+      try {
+        var btns = document.querySelectorAll('.modal button, .modal a.btn, .sweet-alert button, .swal2-container button, .bootbox button');
+        for (var i = 0; i < btns.length; i++) {
+          var b = btns[i];
+          if (!b.offsetParent) continue;                    // невидима кнопка
+          var t = (b.textContent || "").trim();
+          if (/^(так|да|видалити|удалить|ok|yes|підтвердити|подтвердить)$/i.test(t)) { b.click(); return true; }
+        }
+      } catch (e) {}
+      return false;
+    }
+
+    // фінал: (добити splice-ом, якщо щось лишилось) → ціни → контроль суми → звіт
+    function finishApply(warn) {
+      try {
+        if (npCountVM() > 0) {
+          safeApply(scope, function () {
+            for (var j = (vm.items || []).length - 1; j >= 0; j--) if (isNP(vm.items[j])) vm.items.splice(j, 1);
+          });
+        }
+        applyPrices();
+        var sum = 0;
+        (vm.items || []).forEach(function (x) { if (!isNP(x)) sum += num(x.price) * qtyOf(x); });
+        sum = Math.round(sum * 100) / 100;
+        var out = { ok: true, target: target, sum: sum, removed: pseudo.length,
+                    method: native ? "native" : "splice", warn: warn || null,
+                    diag: { base: base, plan: plan } };
+        try { console.log("[SD-РазомДешевше]", JSON.stringify(out)); } catch (e) {}
+        respond(out);
+      } catch (e) { respond({ ok: false, err: String(e) }); }
+    }
+
+    var dels = npDeleteButtons();
+    var native = dels.length === pseudo.length;   // кнопки знайдено для КОЖНОГО рядка
+    try {
+      if (!native) { finishApply(); }
+      else {
+        dels.forEach(function (d) { try { d.click(); } catch (e) {} });
+        // ціни застосовуємо ЛИШЕ коли рядки СПРАВДІ зникли з vm.items
+        // (а не за фіксовану паузу — модалка могла тримати видалення)
+        var t0 = Date.now();
+        (function waitGone() {
+          autoConfirm();
+          if (npCountVM() === 0) return finishApply();
+          if (Date.now() - t0 > 12000)
+            return finishApply("рядки не видалились штатно — прибрав напряму; перевір суми уважно");
+          setTimeout(waitGone, 200);
+        })();
+      }
     } catch (e) {
       respond({ ok: false, err: String(e) });
     }
@@ -3622,10 +3715,15 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       PAGE.removeEventListener('sdBundleFixResult', onRes); clearTimeout(tm);
       if(d.ok){
         box.setAttribute('data-done','1');
-        box.innerHTML='<div class="bf-top">✓ Готово: видалено рядків NEW PRODUCT — '+d.removed
-          +', ціни товарів перераховано (разом '+String(d.target.toFixed(2)).replace('.',',')
-          +' ₴). Перевір суми й натисни «Зберегти».</div>';
-        setTimeout(function(){ try{ box.remove(); }catch(e){} }, 9000);
+        var s=(d.sum!=null?d.sum:d.target);
+        var mism=(d.sum!=null && Math.abs(d.sum-d.target)>=0.01);
+        box.innerHTML='<div class="bf-top">✓ Рядків NEW PRODUCT видалено: '+d.removed
+          +'. Разом тепер '+String(s.toFixed(2)).replace('.',',')+' ₴ (ціль акції '
+          +String(d.target.toFixed(2)).replace('.',',')+' ₴).'
+          +(mism?' ⚠ СУМИ НЕ ЗБІГЛИСЬ — не зберігай, напиши Клоду!':'')
+          +(d.warn?' ⚠ '+d.warn+'.':'')
+          +' Спершу «Зберегти», потім ТТН.</div>';
+        setTimeout(function(){ try{ box.remove(); }catch(e){} }, mism?60000:15000);
       }else{
         b.disabled=false; res.className='bf-res er'; res.textContent='✗ '+(d.err||'не вийшло');
       }
@@ -3637,13 +3735,14 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     tm=setTimeout(function(){
       PAGE.removeEventListener('sdBundleFixResult', onRes);
       b.disabled=false; res.className='bf-res er'; res.textContent='✗ нема відповіді';
-    },5000);
+    },20000);
   }
 
   function build(){
     var box=document.createElement('div'); box.id='sd-bundle-fix';
     var top=document.createElement('div'); top.className='bf-top';
-    top.textContent='🧹 Замовлення «Разом дешевше»: є службові рядки NEW PRODUCT.';
+    var ver=''; try{ if(typeof GM_info!=='undefined'&&GM_info.script&&GM_info.script.version) ver=' · v'+GM_info.script.version; }catch(e){}
+    top.textContent='🧹 Замовлення «Разом дешевше»: є службові рядки NEW PRODUCT'+ver+'.';
     var b=document.createElement('button'); b.type='button'; b.className='bf-btn';
     b.textContent='Прибрати NEW PRODUCT і перерахувати ціни';
     var res=document.createElement('span'); res.className='bf-res';
