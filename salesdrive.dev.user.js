@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.22
+// @version      2.23
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -3751,36 +3751,113 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     var last=rows[rows.length-1], t=last.querySelector('span[title]');
     return rows.length+'|'+((t&&t.getAttribute('title'))||'');
   }
+
+  // ---- відстеження ЩОЙНО надісланих повідомлень ----
+  // Менеджер може закрити заявку одразу після відправки й не побачити «не доставлено».
+  // Тому в момент появи нового ВИХІДНОГО повідомлення в чаті створюємо запис
+  // «⏳ доставка не підтверджена» (kind:pending). Якщо менеджер лишився — за ~8с
+  // статус зʼясовується: ok → запис тихо знімається; failed → стане ⛔ (alert-логіка).
+  // Якщо закрив — ⏳ висить у зведенні, доки заявку не відкриють знову.
+  var seedHash=null, seeded=false, emptySyncs=0, seen={}, watch={};
+  function cellsAll(){ return document.querySelectorAll('td.comment-cell'); }
+  function sigCell(c){
+    var t=c.querySelector('.comment-title span[title]');
+    var b=c.querySelector('.comment-body');
+    return ((t&&t.getAttribute('title'))||'')+'|'+String(b?b.textContent:'').trim().slice(0,60);
+  }
+  function isOut(c){ return !!c.querySelector('.comment-body i.fa-arrow-right'); }
+  function isFailCell(c){ return !!c.querySelector('tr.message-status-failed'); }
+
+  function trackNewSends(){
+    var now=Date.now();
+    if(location.hash!==seedHash){ seedHash=location.hash; seeded=false; emptySyncs=0; watch={}; }
+    var cells=cellsAll();
+    if(!seeded){
+      // засіваємо історію чату (або визнаємо чат порожнім після 3 тиків), нових не чіпаємо
+      if(cells.length || emptySyncs>=3){
+        [].forEach.call(cells,function(c){ seen[sigCell(c)]=1; });
+        seeded=true;
+      } else { emptySyncs++; }
+      return;
+    }
+    [].forEach.call(cells,function(c){
+      var s=sigCell(c);
+      if(seen[s]) return;
+      seen[s]=1;
+      if(!isOut(c)) return;               // вхідні (від клієнта) не цікавлять
+      watch[s]={first:now};
+      var num=curOrderNum();
+      if(num){
+        var all=loadAll(), rec=all[num];
+        // не перекриваємо активний ⛔; інакше — ставимо/оновлюємо ⏳
+        if(!rec || rec.ack || rec.kind==='pending'){
+          all[num]={num:num, sig:'p:'+s, url:location.href, t:now, kind:'pending',
+                    reason:'доставка повідомлення не підтверджена', ack:0};
+          saveAll(all);
+        }
+      }
+    });
+    // ведемо відправлені під наглядом до розвʼязки
+    Object.keys(watch).forEach(function(s){
+      var found=null;
+      [].some.call(cellsAll(),function(c){ if(sigCell(c)===s){ found=c; return true; } return false; });
+      if(!found) return;                  // чат перемальовується — глянемо наступного тику
+      var num=curOrderNum(), all;
+      if(isFailCell(found)){
+        delete watch[s];
+        // прибрати ⏳ — alert-логіка нижче одразу запише ⛔ по цій заявці
+        if(num){ all=loadAll(); if(all[num]&&all[num].kind==='pending'){ delete all[num]; saveAll(all); } }
+      } else if(Date.now()-watch[s].first>8000){
+        delete watch[s];                  // 8с без failed → доставлено, знімаємо ⏳
+        if(num){ all=loadAll();
+          if(all[num]&&all[num].kind==='pending'&&all[num].sig==='p:'+s){ delete all[num]; saveAll(all); } }
+      }
+    });
+  }
+
+  // відкрили заявку зі старим ⏳ (закрив зарано минулого разу): чат видно →
+  // або тут є failed (alert-логіка запише ⛔), або все ок — ⏳ знімаємо
+  function resolvePendingIfViewing(){
+    var num=curOrderNum(); if(!num) return;
+    var all=loadAll(), rec=all[num];
+    if(!rec || rec.kind!=='pending') return;
+    if(Date.now()-(rec.t||0)<30000) return;   // свіжий ⏳ цієї ж сесії — ним керує trackNewSends
+    if(!cellsAll().length) return;            // чат ще не домальований
+    delete all[num]; saveAll(all);            // failed є? — alert-логіка нижче знову запише ⛔
+  }
   function ackKey(k){
     var m=loadAll(); if(m[k]){ m[k].ack=1; saveAll(m); }
     renderToasts();
   }
 
-  // зведення зверху на списку заявок: «⛔ Клієнт НЕ отримав повідомлення у заявках: #N ✕ …»
+  // зведення зверху на списку заявок: ⛔ не доставлено + ⏳ доставка не підтверджена
   function renderTopbar(all, keys){
     var bar=document.getElementById('sd-cf-topbar');
     if(!bar){
       bar=document.createElement('div'); bar.id='sd-cf-topbar';
-      var lab=document.createElement('span'); lab.className='lb';
-      lab.textContent='⛔ Клієнт НЕ отримав повідомлення у заявках:';
-      var chips=document.createElement('span'); chips.className='chips';
-      chips.style.display='inline-flex'; chips.style.flexWrap='wrap'; chips.style.gap='6px';
-      bar.appendChild(lab); bar.appendChild(chips);
       document.body.appendChild(bar);
     }
-    var chips=bar.querySelector('.chips');
-    chips.innerHTML='';
-    keys.forEach(function(k){
-      var r=all[k];
-      var c=document.createElement('span'); c.className='chip';
-      var a=document.createElement('a'); a.href=r.url||'#';
-      a.textContent='#'+r.num;
-      a.title=(r.reason||'повідомлення не доставлено')+' — відкрити заявку';
-      var x=document.createElement('button'); x.type='button'; x.textContent='✕';
-      x.title='OK, зрозумів — прибрати';
-      x.addEventListener('click',function(e){ e.preventDefault(); e.stopPropagation(); ackKey(k); });
-      c.appendChild(a); c.appendChild(x); chips.appendChild(c);
-    });
+    bar.innerHTML='';
+    function addGroup(label, ks){
+      if(!ks.length) return;
+      var lab=document.createElement('span'); lab.className='lb'; lab.textContent=label;
+      bar.appendChild(lab);
+      ks.forEach(function(k){
+        var r=all[k];
+        var c=document.createElement('span'); c.className='chip';
+        var a=document.createElement('a'); a.href=r.url||'#';
+        a.textContent='#'+r.num;
+        a.title=(r.reason||'повідомлення не доставлено')+' — відкрити заявку';
+        var x=document.createElement('button'); x.type='button'; x.textContent='✕';
+        x.title='OK, зрозумів — прибрати';
+        x.addEventListener('click',function(e){ e.preventDefault(); e.stopPropagation(); ackKey(k); });
+        c.appendChild(a); c.appendChild(x); bar.appendChild(c);
+      });
+    }
+    addGroup('⛔ Клієнт НЕ отримав повідомлення:',
+      keys.filter(function(k){ return (all[k].kind||'alert')==='alert'; }));
+    addGroup('⏳ Перевір доставку (заявку закрито зарано):',
+      keys.filter(function(k){ return all[k].kind==='pending'; }));
   }
 
   function renderToasts(){
@@ -3812,8 +3889,14 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       if(box.querySelector('[data-k="'+k+'"]')) return;
       var d=document.createElement('div'); d.className='sd-cf-toast'; d.setAttribute('data-k',k);
       var t=document.createElement('div'); t.className='t';
-      t.textContent='⛔ Заявка #'+r.num+': повідомлення НЕ доставлено';
-      var w=document.createElement('div'); w.textContent=(r.reason||'')+'. Клієнт його не бачив — подзвони або SMS.';
+      var pend=(r.kind==='pending');
+      t.textContent=pend
+        ? '⏳ Заявка #'+r.num+': доставка не підтверджена'
+        : '⛔ Заявка #'+r.num+': повідомлення НЕ доставлено';
+      var w=document.createElement('div');
+      w.textContent=pend
+        ? 'Заявку закрито одразу після відправки. Відкрий і перевір чат.'
+        : (r.reason||'')+'. Клієнт його не бачив — подзвони або SMS.';
       var a=document.createElement('div'); a.className='a';
       var op=document.createElement('a'); op.textContent='Відкрити заявку'; op.href=r.url||'#';
       var ok=document.createElement('button'); ok.type='button'; ok.textContent='OK, зрозумів';
@@ -3830,6 +3913,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   }
 
   function sync(){
+    trackNewSends();
+    resolvePendingIfViewing();
     var rows=document.querySelectorAll('tr.message-status-failed');
     var old=document.getElementById('sd-chatfail-warn');
     if(!rows.length){ if(old) old.remove(); renderToasts(); return; }
@@ -3869,8 +3954,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     var num=curOrderNum();
     if(num){
       var all=loadAll(), sig=sigOf(rows), rec=all[num];
-      if(!rec || rec.sig!==sig){
-        all[num]={ num:num, sig:sig, url:location.href, t:Date.now(),
+      if(!rec || rec.sig!==sig || rec.kind==='pending'){
+        all[num]={ num:num, sig:sig, url:location.href, t:Date.now(), kind:'alert',
                    reason:Object.keys(reasons).join('; '), ack:0 };
         saveAll(all);
       }
