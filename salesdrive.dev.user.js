@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.26
+// @version      2.27
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -2055,14 +2055,18 @@ function __sdPageMain() {
       return hasDiscountStr(x) || (x && x.product && hasDiscountStr(x.product));
     }
 
+    // ціль = НАЙБІЛЬШИЙ не-DISCOUNT рядок NEW PRODUCT (НЕ сума всіх!):
+    // рядок акції завжди несе повну суму замовлення (749; 412), а DISCOUNT-довісок —
+    // меншу (0; 8), тож максимум дає правильну ціль незалежно від формату полів
     var target = 0;
     pseudo.forEach(function (x) {
       if (isDiscountRow(x)) return;
-      var p = num(x.price); if (p > 0) target += p * qtyOf(x);
+      var p = num(x.price) * qtyOf(x);
+      if (p > target) target = p;
     });
-    // фолбек: якщо рядок акції не розпізнано — стара логіка (усі NEW PRODUCT з ціною)
+    // фолбек: якщо не-DISCOUNT рядків із ціною не знайшлось — максимум серед усіх
     if (!(target > 0)) {
-      pseudo.forEach(function (x) { var p = num(x.price); if (p > 0) target += p * qtyOf(x); });
+      pseudo.forEach(function (x) { var p = num(x.price) * qtyOf(x); if (p > target) target = p; });
     }
     target = Math.round(target * 100) / 100;
     if (!(target > 0)) return respond({ ok: false, err: "у NEW PRODUCT нема ціни «Разом дешевше»" });
