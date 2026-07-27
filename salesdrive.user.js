@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      2.19
+// @version      2.24
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -29,6 +29,7 @@
      • lkUpsellRedesign— компактний вигляд картки допродажу
      • lkStockPayWarn  — попередження: передоплата + малий залишок
      • lkBundleFix     — 🧹 «Разом дешевше»: прибрати NEW PRODUCT, ціни товарів → сума акції
+     • lkChatFailWarn  — ⛔ чат: повідомлення НЕ доставлено (нема Viber/Telegram на номері)
      • lkCashRegister  — 💰 Каса самовивозу
      • lkPickList      — 📋 зведений лист комплектації (сума товарів по заявках статусу)
      • lkUkrPromList   — 📮 лист «Пром-оплата + Укрпошта» (відправник/отримувач/індекс/ТТН, друк)
@@ -3668,6 +3669,331 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 })();
 }catch(e){ try{ console.warn("[SD] модуль «lkBundleFix» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkBundleFix ▲▲▲ */
+
+/* ▼▼▼ МОДУЛЬ-START • lkChatFailWarn — ⛔ чат: повідомлення НЕ доставлено (нема Viber/Telegram) ▼▼▼ */
+/* ===== Менеджер пише у Viber/Telegram, а в клієнта їх нема на номері — СРМ показує лише
+   крихітну сіру іконку, менеджер не бачить і дарма чекає відповіді. Робимо це помітним:
+   підсвітка рядка + бейдж «НЕ ДОСТАВЛЕНО» + червоний банер над чатом із причиною. ===== */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
+(function lkChatFailWarn(){
+  'use strict';
+
+  var css=''
+    // сам невдалий рядок у чаті — червона підсвітка + помітна іконка
+    +'tr.message-status-failed td{background:#fdecea!important}'
+    +'tr.message-status-failed .fa-exclamation-circle{color:#c0392b;font-size:15px}'
+    +'.sd-cf-badge{display:inline-block;margin-left:8px;padding:1px 8px;border-radius:10px;'
+    +'  background:#c0392b;color:#fff;font:700 11px/1.7 Arial,sans-serif;white-space:nowrap;vertical-align:middle}'
+    // банер над чатом
+    +'#sd-chatfail-warn{position:relative;margin:8px 0;padding:10px 12px;'
+    +'  border:1px solid #e0b4b4;border-left:5px solid #c0392b;background:#fdf3f3;border-radius:6px;'
+    +'  font:13px/1.5 -apple-system,"Segoe UI",Roboto,Arial,sans-serif;color:#7a1f1f;box-sizing:border-box}'
+    +'#sd-chatfail-warn .cf-top{font-weight:800;color:#c0392b;font-size:14px}'
+    +'#sd-chatfail-warn .cf-why{margin-top:3px}'
+    // липкі сповіщення (видно на БУДЬ-ЯКІЙ сторінці СРМ, поки не натиснуто OK)
+    +'#sd-cf-toasts{position:fixed;right:18px;bottom:84px;z-index:2147483599;display:flex;'
+    +'  flex-direction:column;gap:8px;max-width:360px}'
+    +'.sd-cf-toast{background:#fdf3f3;border:1px solid #e0b4b4;border-left:5px solid #c0392b;'
+    +'  border-radius:8px;padding:9px 11px;box-shadow:0 4px 14px rgba(0,0,0,.25);'
+    +'  font:13px/1.45 Arial,sans-serif;color:#7a1f1f}'
+    +'.sd-cf-toast .t{font-weight:800;color:#c0392b;margin-bottom:2px}'
+    +'.sd-cf-toast .a{margin-top:6px;display:flex;gap:8px;align-items:center}'
+    +'.sd-cf-toast .a a{display:inline-block;background:#c0392b;color:#fff;font-weight:700;'
+    +'  padding:4px 12px;border-radius:5px;text-decoration:none;font-size:12px}'
+    +'.sd-cf-toast .a a:hover{background:#a93226}'
+    +'.sd-cf-toast .a button{border:1px solid #c0392b;background:#fff;color:#c0392b;font-weight:700;'
+    +'  padding:3px 12px;border-radius:5px;cursor:pointer;font-size:12px}'
+    +'.sd-cf-toast .a button:hover{background:#fde9e7}'
+    // зведення ЗВЕРХУ на сторінці списку заявок (будь-який фільтр менеджера)
+    +'#sd-cf-topbar{position:fixed;top:56px;left:50%;transform:translateX(-50%);z-index:2147483599;'
+    +'  background:#fdf3f3;border:1px solid #e0b4b4;border-left:5px solid #c0392b;border-radius:8px;'
+    +'  padding:8px 12px;box-shadow:0 4px 14px rgba(0,0,0,.28);font:13px/1.5 Arial,sans-serif;'
+    +'  color:#7a1f1f;max-width:min(920px,94vw);display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center}'
+    +'#sd-cf-topbar .lb{font-weight:800;color:#c0392b}'
+    +'#sd-cf-topbar .chip{display:inline-flex;align-items:center;gap:4px;background:#fff;'
+    +'  border:1px solid #e0b4b4;border-radius:14px;padding:2px 4px 2px 10px}'
+    +'#sd-cf-topbar .chip a{color:#c0392b;font-weight:800;text-decoration:none}'
+    +'#sd-cf-topbar .chip a:hover{text-decoration:underline}'
+    +'#sd-cf-topbar .chip button{border:none;background:transparent;color:#c0392b;font-weight:700;'
+    +'  cursor:pointer;padding:0 6px;font-size:13px}'
+    +'#sd-cf-topbar .chip button:hover{color:#7a1f1f}';
+  var st=document.createElement('style'); st.textContent=css;
+  (document.head||document.documentElement).appendChild(st);
+
+  function reasonOf(row){
+    var ic=row.querySelector('[uib-tooltip]');
+    var t=(ic&&ic.getAttribute('uib-tooltip'))||'';
+    if(/viber/i.test(t))    return 'на номері немає Viber';
+    if(/telegram/i.test(t)) return 'на номері немає Telegram';
+    return t||'повідомлення не доставлено';
+  }
+  function pl(n){
+    var d=n%10, h=n%100;
+    return (d===1&&h!==11)?'повідомлення':((d>=2&&d<=4&&(h<12||h>14))?'повідомлення':'повідомлень');
+  }
+
+  // ---- памʼять «недоставлено у заявці #N» (localStorage): плашка висить на всіх
+  // сторінках СРМ, поки менеджер не натисне OK. Підпис (sig) = к-ть + час останнього
+  // невдалого — та сама стара помилка після OK не турбує, нова — турбує знову.
+  var LS='lk_chatfail_v1';
+  function loadAll(){ try{ return JSON.parse(localStorage.getItem(LS))||{}; }catch(e){ return {}; } }
+  function saveAll(o){ try{ localStorage.setItem(LS, JSON.stringify(o)); }catch(e){} }
+  function curOrderNum(){
+    var m=(document.title||'').match(/#\s*(\d{4,})/);
+    if(m) return m[1];
+    var el=document.querySelector('h1,h2,.page-title,.page-header');
+    m=el && el.textContent.match(/Заявка\s*#\s*(\d+)/);
+    if(m) return m[1];
+    try{ m=(document.body.innerText||'').match(/Заявка\s*#\s*(\d+)/); }catch(e){ m=null; }
+    return m?m[1]:null;
+  }
+  function sigOf(rows){
+    var last=rows[rows.length-1], t=last.querySelector('span[title]');
+    return rows.length+'|'+((t&&t.getAttribute('title'))||'');
+  }
+
+  // ---- відстеження ЩОЙНО надісланих повідомлень ----
+  // Менеджер може закрити заявку одразу після відправки й не побачити «не доставлено».
+  // Тому в момент появи нового ВИХІДНОГО повідомлення в чаті створюємо запис
+  // «⏳ доставка не підтверджена» (kind:pending). Якщо менеджер лишився — за ~8с
+  // статус зʼясовується: ok → запис тихо знімається; failed → стане ⛔ (alert-логіка).
+  // Якщо закрив — ⏳ висить у зведенні, доки заявку не відкриють знову.
+  var seedHash=null, seeded=false, emptySyncs=0, seen={}, watch={};
+  function cellsAll(){ return document.querySelectorAll('td.comment-cell'); }
+  function sigCell(c){
+    var t=c.querySelector('.comment-title span[title]');
+    var b=c.querySelector('.comment-body');
+    return ((t&&t.getAttribute('title'))||'')+'|'+String(b?b.textContent:'').trim().slice(0,60);
+  }
+  function isOut(c){ return !!c.querySelector('.comment-body i.fa-arrow-right'); }
+  function isFailCell(c){ return !!c.querySelector('tr.message-status-failed'); }
+
+  function trackNewSends(){
+    var now=Date.now();
+    if(location.hash!==seedHash){ seedHash=location.hash; seeded=false; emptySyncs=0; watch={}; }
+    var cells=cellsAll();
+    if(!seeded){
+      // засіваємо історію чату (або визнаємо чат порожнім після 3 тиків), нових не чіпаємо
+      if(cells.length || emptySyncs>=3){
+        [].forEach.call(cells,function(c){ seen[sigCell(c)]=1; });
+        seeded=true;
+      } else { emptySyncs++; }
+      return;
+    }
+    [].forEach.call(cells,function(c){
+      var s=sigCell(c);
+      if(seen[s]) return;
+      seen[s]=1;
+      if(!isOut(c)) return;               // вхідні (від клієнта) не цікавлять
+      watch[s]={first:now};
+      var num=curOrderNum();
+      if(num){
+        var all=loadAll(), rec=all[num];
+        // не перекриваємо активний ⛔; інакше — ставимо/оновлюємо ⏳
+        if(!rec || rec.ack || rec.kind==='pending'){
+          all[num]={num:num, sig:'p:'+s, url:location.href, t:now, kind:'pending',
+                    reason:'доставка повідомлення не підтверджена', ack:0};
+          saveAll(all);
+        }
+      }
+    });
+    // ведемо відправлені під наглядом до розвʼязки
+    Object.keys(watch).forEach(function(s){
+      var found=null;
+      [].some.call(cellsAll(),function(c){ if(sigCell(c)===s){ found=c; return true; } return false; });
+      if(!found) return;                  // чат перемальовується — глянемо наступного тику
+      var num=curOrderNum(), all;
+      if(isFailCell(found)){
+        delete watch[s];
+        // прибрати ⏳ — alert-логіка нижче одразу запише ⛔ по цій заявці
+        if(num){ all=loadAll(); if(all[num]&&all[num].kind==='pending'){ delete all[num]; saveAll(all); } }
+      } else if(Date.now()-watch[s].first>8000){
+        delete watch[s];                  // 8с без failed → доставлено, знімаємо ⏳
+        if(num){ all=loadAll();
+          if(all[num]&&all[num].kind==='pending'&&all[num].sig==='p:'+s){ delete all[num]; saveAll(all); } }
+      }
+    });
+  }
+
+  // відкрили заявку зі старим ⏳ (закрив зарано минулого разу): чат видно →
+  // або тут є failed (alert-логіка запише ⛔), або все ок — ⏳ знімаємо
+  function resolvePendingIfViewing(){
+    var num=curOrderNum(); if(!num) return;
+    var all=loadAll(), rec=all[num];
+    if(!rec || rec.kind!=='pending') return;
+    if(Date.now()-(rec.t||0)<30000) return;   // свіжий ⏳ цієї ж сесії — ним керує trackNewSends
+    if(!cellsAll().length) return;            // чат ще не домальований
+    delete all[num]; saveAll(all);            // failed є? — alert-логіка нижче знову запише ⛔
+  }
+  function ackKey(k){
+    var m=loadAll(); if(m[k]){ m[k].ack=1; saveAll(m); }
+    renderToasts();
+  }
+
+  // зведення зверху на списку заявок: ⛔ не доставлено + ⏳ доставка не підтверджена
+  function renderTopbar(all, keys){
+    var bar=document.getElementById('sd-cf-topbar');
+    if(!bar){
+      bar=document.createElement('div'); bar.id='sd-cf-topbar';
+      document.body.appendChild(bar);
+    }
+    bar.innerHTML='';
+    function addGroup(label, ks){
+      if(!ks.length) return;
+      var lab=document.createElement('span'); lab.className='lb'; lab.textContent=label;
+      bar.appendChild(lab);
+      ks.forEach(function(k){
+        var r=all[k];
+        var c=document.createElement('span'); c.className='chip';
+        var a=document.createElement('a'); a.href=r.url||'#';
+        a.textContent='#'+r.num;
+        a.title=(r.reason||'повідомлення не доставлено')+' — відкрити заявку';
+        var x=document.createElement('button'); x.type='button'; x.textContent='✕';
+        x.title='OK, зрозумів — прибрати';
+        x.addEventListener('click',function(e){ e.preventDefault(); e.stopPropagation(); ackKey(k); });
+        c.appendChild(a); c.appendChild(x); bar.appendChild(c);
+      });
+    }
+    addGroup('⛔ Клієнт НЕ отримав повідомлення:',
+      keys.filter(function(k){ return (all[k].kind||'alert')==='alert'; }));
+    addGroup('⏳ Перевір доставку (заявку закрито зарано):',
+      keys.filter(function(k){ return all[k].kind==='pending'; }));
+  }
+
+  function renderToasts(){
+    var all=loadAll(), now=Date.now(), changed=false;
+    Object.keys(all).forEach(function(k){
+      if(now-(all[k].t||0)>5*24*3600*1000){ delete all[k]; changed=true; }  // чистка старших за 5 днів
+    });
+    if(changed) saveAll(all);
+    var keys=Object.keys(all).filter(function(k){ return !all[k].ack; });
+    var box=document.getElementById('sd-cf-toasts');
+    var bar=document.getElementById('sd-cf-topbar');
+    var onList=/\/order\/index/.test(location.hash||'');   // список заявок (будь-які фільтри менеджера)
+
+    if(!onList && keys.length){
+      var cur=curOrderNum();   // на сторінці самої заявки не дублюємо (там банер над чатом)
+      keys=keys.filter(function(k){ return all[k].num!==cur; });
+    }
+    if(!keys.length){ if(box) box.remove(); if(bar) bar.remove(); return; }
+
+    if(onList){
+      if(box) box.remove();
+      renderTopbar(all, keys);
+      return;
+    }
+    if(bar) bar.remove();
+    if(!box){ box=document.createElement('div'); box.id='sd-cf-toasts'; document.body.appendChild(box); }
+    keys.forEach(function(k){
+      var r=all[k];
+      if(box.querySelector('[data-k="'+k+'"]')) return;
+      var d=document.createElement('div'); d.className='sd-cf-toast'; d.setAttribute('data-k',k);
+      var t=document.createElement('div'); t.className='t';
+      var pend=(r.kind==='pending');
+      t.textContent=pend
+        ? '⏳ Заявка #'+r.num+': доставка не підтверджена'
+        : '⛔ Заявка #'+r.num+': повідомлення НЕ доставлено';
+      var w=document.createElement('div');
+      w.textContent=pend
+        ? 'Заявку закрито одразу після відправки. Відкрий і перевір чат.'
+        : (r.reason||'')+'. Клієнт його не бачив — подзвони або SMS.';
+      var a=document.createElement('div'); a.className='a';
+      var op=document.createElement('a'); op.textContent='Відкрити заявку'; op.href=r.url||'#';
+      var ok=document.createElement('button'); ok.type='button'; ok.textContent='OK, зрозумів';
+      ok.addEventListener('click',function(){ ackKey(k); });
+      a.appendChild(op); a.appendChild(ok);
+      d.appendChild(t); d.appendChild(w); d.appendChild(a);
+      box.appendChild(d);
+    });
+    // прибрати плашки, яких уже нема (напр., OK в іншій вкладці)
+    [].forEach.call(box.querySelectorAll('[data-k]'),function(d){
+      if(keys.indexOf(d.getAttribute('data-k'))<0) d.remove();
+    });
+    if(!box.children.length) box.remove();
+  }
+
+  function sync(){
+    trackNewSends();
+    resolvePendingIfViewing();
+    var rows=document.querySelectorAll('tr.message-status-failed');
+    var old=document.getElementById('sd-chatfail-warn');
+    if(!rows.length){ if(old) old.remove(); renderToasts(); return; }
+
+    var reasons={};
+    [].forEach.call(rows,function(r){
+      reasons[reasonOf(r)]=1;
+      // бейдж у сам рядок (один раз)
+      if(!r.getAttribute('data-sdcf')){
+        r.setAttribute('data-sdcf','1');
+        var td=r.querySelector('td.allow-word-wrap')||r.querySelector('td:nth-child(2)');
+        if(td){
+          var b=document.createElement('span'); b.className='sd-cf-badge';
+          b.textContent='⛔ НЕ ДОСТАВЛЕНО'; b.title=reasonOf(r);
+          td.appendChild(b);
+        }
+      }
+    });
+
+    // банер над списком повідомлень (якорем — зовнішня таблиця чату)
+    var cell=rows[0].closest('td.comment-cell');
+    var outer=cell?cell.closest('table'):null;
+    var host=outer&&outer.parentElement?outer.parentElement:null;
+    if(!host){ if(old) old.remove(); return; }
+    if(!old){
+      old=document.createElement('div'); old.id='sd-chatfail-warn';
+      var top=document.createElement('div'); top.className='cf-top';
+      var why=document.createElement('div'); why.className='cf-why';
+      why.textContent='Клієнт цього НЕ бачив — звʼяжися інакше: 📞 подзвони або надішли SMS.';
+      old.appendChild(top); old.appendChild(why);
+    }
+    if(old.parentElement!==host || old.nextSibling!==outer) host.insertBefore(old, outer);
+    old.querySelector('.cf-top').textContent=
+      '⛔ У чаті '+rows.length+' '+pl(rows.length)+' НЕ доставлено: '+Object.keys(reasons).join('; ')+'.';
+
+    // запамʼятати для липкої плашки на інших сторінках (щоб не загубилось після закриття заявки)
+    var num=curOrderNum();
+    if(num){
+      var all=loadAll(), sig=sigOf(rows), rec=all[num];
+      if(!rec || rec.sig!==sig || rec.kind==='pending'){
+        all[num]={ num:num, sig:sig, url:location.href, t:Date.now(), kind:'alert',
+                   reason:Object.keys(reasons).join('; '), ack:0 };
+        saveAll(all);
+      }
+    }
+    renderToasts();
+  }
+
+  var t=null;
+  function syncSoon(){ clearTimeout(t); t=setTimeout(sync,400); }
+  sync();
+  window.addEventListener('lkdom', syncSoon);
+  window.addEventListener('hashchange', syncSoon);   // перехід список↔заявка в SPA
+
+  // МИТТЄВА реакція на появу нового повідомлення в чаті (не чекаємо lkdom-пульс ~0.4-1с):
+  // щойно СРМ домальовує відправлене повідомлення — одразу пишемо ⏳ у память,
+  // навіть якщо менеджер закриє заявку за мить після відправки.
+  var moT=null;
+  try{
+    var mo=new MutationObserver(function(muts){
+      for(var i=0;i<muts.length;i++){
+        var ad=muts[i].addedNodes;
+        for(var j=0;j<ad.length;j++){
+          var n=ad[j];
+          if(n && n.nodeType===1 &&
+             ((n.matches && n.matches('td.comment-cell')) ||
+              (n.querySelector && n.querySelector('td.comment-cell')))){
+            clearTimeout(moT);
+            moT=setTimeout(function(){ trackNewSends(); renderToasts(); },30);
+            return;
+          }
+        }
+      }
+    });
+    mo.observe(document.body||document.documentElement,{childList:true,subtree:true});
+  }catch(e){}
+})();
+}catch(e){ try{ console.warn("[SD] модуль «lkChatFailWarn» не запустився:", e); }catch(_){} }
+/* ▲▲▲ МОДУЛЬ-END • lkChatFailWarn ▲▲▲ */
 
 /* ▼▼▼ МОДУЛЬ-START • lkCashRegister — 💰 Каса самовивозу (день/тиждень/місяць/період) ▼▼▼ */
 /* ===== 💰 Каса самовивозу — день / тиждень / місяць / період ===== */
