@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.24
+// @version      2.25
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -2062,7 +2062,22 @@ function __sdPageMain() {
       plan.push(p);
     }
 
-    try {
+    // Видалення НАСАМПЕРЕД через штатну кнопку ⊗ рядка: тоді SalesDrive сам
+    // перераховує оплату/післяплату/оголошену вартість (важливо для ТТН Укрпошти).
+    // Фолбек — splice, якщо кнопки не знайшлися.
+    function npDeleteButtons() {
+      var out = [], trs = document.querySelectorAll("tr");
+      for (var i = 0; i < trs.length; i++) {
+        var tr = trs[i];
+        if (!/NEW\s*PRODUCT/i.test(tr.textContent || "")) continue;
+        if (tr.querySelector("tr")) continue;   // беремо найглибший tr, не батьківські
+        var del = tr.querySelector('[ng-click*="elete"],[ng-click*="emove"]');
+        if (del) out.push(del);
+      }
+      return out;
+    }
+
+    function applyPrices() {
       safeApply(scope, function () {
         for (var k = 0; k < real.length; k++) {
           var s = plan[k].toFixed(2).replace(".", ",");
@@ -2070,15 +2085,33 @@ function __sdPageMain() {
           real[k].price = s;
           real[k].newDefaultPrice = s;
         }
-        for (var j = items.length - 1; j >= 0; j--) if (isNP(items[j])) items.splice(j, 1);
-        try { if (typeof vm.updateItems === "function") vm.updateItems(); } catch (e) {}
         if (typeof vm.itemChange === "function") {
           real.forEach(function (r, idx) {
             try { vm.itemChange(r, r.index != null ? r.index : idx); } catch (e) {}
           });
         }
+        try { if (typeof vm.updateItems === "function") vm.updateItems(); } catch (e) {}
       });
-      respond({ ok: true, target: target, removed: pseudo.length });
+    }
+
+    var dels = npDeleteButtons();
+    var native = dels.length === pseudo.length;   // кнопки знайдено для КОЖНОГО рядка
+    try {
+      if (native) dels.forEach(function (d) { try { d.click(); } catch (e) {} });
+      // після штатного видалення даємо Angular перемалюватись, тоді ціни
+      setTimeout(function () {
+        try {
+          if (!native) {
+            safeApply(scope, function () {
+              for (var j = items.length - 1; j >= 0; j--) if (isNP(items[j])) items.splice(j, 1);
+            });
+          }
+          applyPrices();
+          respond({ ok: true, target: target, removed: pseudo.length, method: native ? "native" : "splice" });
+        } catch (e) {
+          respond({ ok: false, err: String(e) });
+        }
+      }, native ? 250 : 0);
     } catch (e) {
       respond({ ok: false, err: String(e) });
     }
@@ -3624,8 +3657,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
         box.setAttribute('data-done','1');
         box.innerHTML='<div class="bf-top">✓ Готово: видалено рядків NEW PRODUCT — '+d.removed
           +', ціни товарів перераховано (разом '+String(d.target.toFixed(2)).replace('.',',')
-          +' ₴). Перевір суми й натисни «Зберегти».</div>';
-        setTimeout(function(){ try{ box.remove(); }catch(e){} }, 9000);
+          +' ₴). Спершу натисни «Зберегти», і лише потім формуй ТТН.</div>';
+        setTimeout(function(){ try{ box.remove(); }catch(e){} }, 12000);
       }else{
         b.disabled=false; res.className='bf-res er'; res.textContent='✗ '+(d.err||'не вийшло');
       }
