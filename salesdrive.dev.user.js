@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.20
+// @version      2.21
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -3689,7 +3689,21 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     +'  border:1px solid #e0b4b4;border-left:5px solid #c0392b;background:#fdf3f3;border-radius:6px;'
     +'  font:13px/1.5 -apple-system,"Segoe UI",Roboto,Arial,sans-serif;color:#7a1f1f;box-sizing:border-box}'
     +'#sd-chatfail-warn .cf-top{font-weight:800;color:#c0392b;font-size:14px}'
-    +'#sd-chatfail-warn .cf-why{margin-top:3px}';
+    +'#sd-chatfail-warn .cf-why{margin-top:3px}'
+    // липкі сповіщення (видно на БУДЬ-ЯКІЙ сторінці СРМ, поки не натиснуто OK)
+    +'#sd-cf-toasts{position:fixed;right:18px;bottom:84px;z-index:2147483599;display:flex;'
+    +'  flex-direction:column;gap:8px;max-width:360px}'
+    +'.sd-cf-toast{background:#fdf3f3;border:1px solid #e0b4b4;border-left:5px solid #c0392b;'
+    +'  border-radius:8px;padding:9px 11px;box-shadow:0 4px 14px rgba(0,0,0,.25);'
+    +'  font:13px/1.45 Arial,sans-serif;color:#7a1f1f}'
+    +'.sd-cf-toast .t{font-weight:800;color:#c0392b;margin-bottom:2px}'
+    +'.sd-cf-toast .a{margin-top:6px;display:flex;gap:8px;align-items:center}'
+    +'.sd-cf-toast .a a{display:inline-block;background:#c0392b;color:#fff;font-weight:700;'
+    +'  padding:4px 12px;border-radius:5px;text-decoration:none;font-size:12px}'
+    +'.sd-cf-toast .a a:hover{background:#a93226}'
+    +'.sd-cf-toast .a button{border:1px solid #c0392b;background:#fff;color:#c0392b;font-weight:700;'
+    +'  padding:3px 12px;border-radius:5px;cursor:pointer;font-size:12px}'
+    +'.sd-cf-toast .a button:hover{background:#fde9e7}';
   var st=document.createElement('style'); st.textContent=css;
   (document.head||document.documentElement).appendChild(st);
 
@@ -3705,10 +3719,68 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     return (d===1&&h!==11)?'повідомлення':((d>=2&&d<=4&&(h<12||h>14))?'повідомлення':'повідомлень');
   }
 
+  // ---- памʼять «недоставлено у заявці #N» (localStorage): плашка висить на всіх
+  // сторінках СРМ, поки менеджер не натисне OK. Підпис (sig) = к-ть + час останнього
+  // невдалого — та сама стара помилка після OK не турбує, нова — турбує знову.
+  var LS='lk_chatfail_v1';
+  function loadAll(){ try{ return JSON.parse(localStorage.getItem(LS))||{}; }catch(e){ return {}; } }
+  function saveAll(o){ try{ localStorage.setItem(LS, JSON.stringify(o)); }catch(e){} }
+  function curOrderNum(){
+    var m=(document.title||'').match(/#\s*(\d{4,})/);
+    if(m) return m[1];
+    var el=document.querySelector('h1,h2,.page-title,.page-header');
+    m=el && el.textContent.match(/Заявка\s*#\s*(\d+)/);
+    if(m) return m[1];
+    try{ m=(document.body.innerText||'').match(/Заявка\s*#\s*(\d+)/); }catch(e){ m=null; }
+    return m?m[1]:null;
+  }
+  function sigOf(rows){
+    var last=rows[rows.length-1], t=last.querySelector('span[title]');
+    return rows.length+'|'+((t&&t.getAttribute('title'))||'');
+  }
+  function renderToasts(){
+    var all=loadAll(), now=Date.now(), changed=false, cur=null;
+    var keys=Object.keys(all);
+    // прибираємо старі (5 днів)
+    keys.forEach(function(k){ if(now-(all[k].t||0)>5*24*3600*1000){ delete all[k]; changed=true; } });
+    if(changed) saveAll(all);
+    keys=Object.keys(all).filter(function(k){ return !all[k].ack; });
+    var box=document.getElementById('sd-cf-toasts');
+    if(keys.length) cur=curOrderNum();   // на сторінці самої заявки плашку не дублюємо (там банер)
+    keys=keys.filter(function(k){ return all[k].num!==cur; });
+    if(!keys.length){ if(box) box.remove(); return; }
+    if(!box){ box=document.createElement('div'); box.id='sd-cf-toasts'; document.body.appendChild(box); }
+    keys.forEach(function(k){
+      var r=all[k];
+      if(box.querySelector('[data-k="'+k+'"]')) return;
+      var d=document.createElement('div'); d.className='sd-cf-toast'; d.setAttribute('data-k',k);
+      var t=document.createElement('div'); t.className='t';
+      t.textContent='⛔ Заявка #'+r.num+': повідомлення НЕ доставлено';
+      var w=document.createElement('div'); w.textContent=(r.reason||'')+'. Клієнт його не бачив — подзвони або SMS.';
+      var a=document.createElement('div'); a.className='a';
+      var op=document.createElement('a'); op.textContent='Відкрити заявку'; op.href=r.url||'#';
+      var ok=document.createElement('button'); ok.type='button'; ok.textContent='OK, зрозумів';
+      ok.addEventListener('click',function(){
+        var m=loadAll(); if(m[k]){ m[k].ack=1; saveAll(m); }
+        d.remove();
+        var b2=document.getElementById('sd-cf-toasts');
+        if(b2 && !b2.children.length) b2.remove();
+      });
+      a.appendChild(op); a.appendChild(ok);
+      d.appendChild(t); d.appendChild(w); d.appendChild(a);
+      box.appendChild(d);
+    });
+    // прибрати плашки, яких уже нема в списку (напр., OK в іншій вкладці)
+    [].forEach.call(box.querySelectorAll('[data-k]'),function(d){
+      if(keys.indexOf(d.getAttribute('data-k'))<0) d.remove();
+    });
+    if(!box.children.length) box.remove();
+  }
+
   function sync(){
     var rows=document.querySelectorAll('tr.message-status-failed');
     var old=document.getElementById('sd-chatfail-warn');
-    if(!rows.length){ if(old) old.remove(); return; }
+    if(!rows.length){ if(old) old.remove(); renderToasts(); return; }
 
     var reasons={};
     [].forEach.call(rows,function(r){
@@ -3740,6 +3812,18 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     if(old.parentElement!==host || old.nextSibling!==outer) host.insertBefore(old, outer);
     old.querySelector('.cf-top').textContent=
       '⛔ У чаті '+rows.length+' '+pl(rows.length)+' НЕ доставлено: '+Object.keys(reasons).join('; ')+'.';
+
+    // запамʼятати для липкої плашки на інших сторінках (щоб не загубилось після закриття заявки)
+    var num=curOrderNum();
+    if(num){
+      var all=loadAll(), sig=sigOf(rows), rec=all[num];
+      if(!rec || rec.sig!==sig){
+        all[num]={ num:num, sig:sig, url:location.href, t:Date.now(),
+                   reason:Object.keys(reasons).join('; '), ack:0 };
+        saveAll(all);
+      }
+    }
+    renderToasts();
   }
 
   var t=null;
