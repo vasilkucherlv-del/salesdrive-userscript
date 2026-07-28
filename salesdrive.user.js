@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      2.28
+// @version      2.30
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -30,6 +30,8 @@
      • lkStockPayWarn  — попередження: передоплата + малий залишок
      • lkBundleFix     — 🧹 «Разом дешевше»: прибрати NEW PRODUCT, ціни товарів → сума акції
      • lkChatFailWarn  — ⛔ чат: повідомлення НЕ доставлено (нема Viber/Telegram на номері)
+     • lkPayRequired   — ⛔ заборона зберігати заявку без «Способу оплати»
+     • lkArrivalCount  — 📦 к-ть позицій та одиниць біля заголовка «Надходження товарів»
      • lkCashRegister  — 💰 Каса самовивозу
      • lkPickList      — 📋 зведений лист комплектації (сума товарів по заявках статусу)
      • lkUkrPromList   — 📮 лист «Пром-оплата + Укрпошта» (відправник/отримувач/індекс/ТТН, друк)
@@ -4093,6 +4095,133 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 })();
 }catch(e){ try{ console.warn("[SD] модуль «lkChatFailWarn» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkChatFailWarn ▲▲▲ */
+
+/* ▼▼▼ МОДУЛЬ-START • lkPayRequired — ⛔ заборона зберігати заявку без способу оплати ▼▼▼ */
+/* ===== Менеджер тисне «Зберегти» на картці заявки, а «Спосіб оплати» порожній →
+   блокуємо збереження, підсвічуємо поле червоним і показуємо попередження. ===== */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
+(function lkPayRequired(){
+  'use strict';
+
+  var css=''
+    +'#sd-payreq-warn{position:fixed;top:56px;left:50%;transform:translateX(-50%);z-index:2147483600;'
+    +'  background:#fdf3f3;border:1px solid #e0b4b4;border-left:5px solid #c0392b;border-radius:8px;'
+    +'  padding:10px 16px;box-shadow:0 4px 14px rgba(0,0,0,.3);font:700 14px/1.4 Arial,sans-serif;color:#c0392b}'
+    +'.sd-payreq-hl{box-shadow:0 0 0 3px #c0392b !important;border-radius:4px}';
+  var st=document.createElement('style'); st.textContent=css;
+  (document.head||document.documentElement).appendChild(st);
+
+  function norm(s){ return String(s==null?'':s).replace(/ /g,' ').trim(); }
+  function onOrderPage(){ return /#\/order\/(update|create)/.test(location.hash||''); }
+
+  // порожній спосіб оплати? (той самий селект, що читає lkStockPayWarn)
+  function payEmpty(){
+    var sel=document.getElementById('payment_method-wk');
+    if(sel && 'value' in sel){
+      return !/\d/.test(String(sel.value||''));   // value без цифри (порожнє/`?`) = не вибрано
+    }
+    var cont=document.getElementById('select2-payment_method-wk-container')
+        || document.querySelector('[id^="select2-payment_method"][id$="-container"]');
+    if(cont){
+      var t=norm(cont.getAttribute('title')||cont.textContent);
+      return !t || t==='---' || t==='…' || t==='...';
+    }
+    return false;   // поля взагалі нема (режим перегляду) — не втручаємось
+  }
+
+  function payBox(){
+    return document.getElementById('select2-payment_method-wk-container')
+      ? (document.getElementById('select2-payment_method-wk-container').closest('.select2')
+         || document.getElementById('select2-payment_method-wk-container'))
+      : document.getElementById('payment_method-wk');
+  }
+
+  var wt=null;
+  function warn(){
+    var w=document.getElementById('sd-payreq-warn');
+    if(!w){
+      w=document.createElement('div'); w.id='sd-payreq-warn';
+      w.textContent='⛔ Заявку НЕ збережено — вкажи «Спосіб оплати»!';
+      document.body.appendChild(w);
+    }
+    clearTimeout(wt); wt=setTimeout(function(){ try{ w.remove(); }catch(e){} },6000);
+    var box=payBox();
+    if(box){
+      box.classList.add('sd-payreq-hl');
+      try{ box.scrollIntoView({block:'center',behavior:'smooth'}); }catch(e){}
+      setTimeout(function(){ try{ box.classList.remove('sd-payreq-hl'); }catch(e){} },6000);
+    }
+  }
+
+  // capture-фаза: перехоплюємо раніше за Angular; модалки (форма чека тощо) не чіпаємо
+  document.addEventListener('click', function(e){
+    try{
+      if(!onOrderPage()) return;
+      var t=e.target && e.target.closest ? e.target.closest('button,a,input[type=submit]') : null;
+      if(!t) return;
+      if(t.closest('.modal')) return;
+      var txt=norm(t.textContent||t.value);
+      if(!/^зберегти$/i.test(txt)) return;
+      if(!payEmpty()) return;
+      e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
+      warn();
+    }catch(err){}
+  }, true);
+})();
+}catch(e){ try{ console.warn("[SD] модуль «lkPayRequired» не запустився:", e); }catch(_){} }
+/* ▲▲▲ МОДУЛЬ-END • lkPayRequired ▲▲▲ */
+
+/* ▼▼▼ МОДУЛЬ-START • lkArrivalCount — 📦 к-ть позицій та одиниць у «Надходженні товарів» ▼▼▼ */
+/* ===== Бейдж біля заголовка прихідної накладної: скільки позицій (рядків) і одиниць разом ===== */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
+(function lkArrivalCount(){
+  'use strict';
+  var css='.lk-arrcnt{display:inline-block;margin-left:12px;padding:3px 12px;border-radius:14px;'
+    +'background:#e3f4f2;color:#00695c;font:700 13px/1.5 Arial,sans-serif;vertical-align:middle;white-space:nowrap}';
+  var st=document.createElement('style'); st.textContent=css;
+  (document.head||document.documentElement).appendChild(st);
+
+  function onPage(){ return /#\/document\/arrival-product\//.test(location.hash||''); }
+  function num(v){ var n=parseFloat(String(v==null?'':v).replace(/\s| /g,'').replace(',','.')); return isNaN(n)?0:n; }
+  function fmt(n){ n=Math.round(n*100)/100; return String(n%1===0?n:n.toFixed(2)).replace('.',','); }
+
+  function sync(){
+    var badge=document.querySelector('.lk-arrcnt');
+    if(!onPage()){ if(badge) badge.remove(); return; }
+    // рядки товарів у накладній (ng-repeat="invoiceItem in viewModel.item.documentItems…")
+    var rows=document.querySelectorAll('tr[ng-repeat^="invoiceItem"]');
+    if(!rows.length){ if(badge) badge.remove(); return; }
+    var units=0;
+    [].forEach.call(rows,function(r){
+      var td=r.cells&&r.cells[2];        // колонка «К-ть»
+      if(!td) return;
+      var v=num(td.textContent);
+      if(!v){ var inp=td.querySelector('input'); if(inp) v=num(inp.value); }  // рядок у режимі редагування
+      units+=v;
+    });
+    if(!badge){
+      var h=null, hs=document.querySelectorAll('h1,h2,h3');
+      for(var i=0;i<hs.length;i++){
+        if(/^Надходження товарів №/.test((hs[i].textContent||'').trim())){ h=hs[i]; break; }
+      }
+      badge=document.createElement('span'); badge.className='lk-arrcnt';
+      if(h) h.appendChild(badge);
+      else{
+        var t=document.querySelector('table.document-invoice-products');
+        if(t&&t.parentElement) t.parentElement.insertBefore(badge,t); else return;
+      }
+    }
+    badge.textContent='📦 Позицій: '+rows.length+' · Одиниць: '+fmt(units);
+  }
+
+  var t=null;
+  function syncSoon(){ clearTimeout(t); t=setTimeout(sync,300); }
+  sync();
+  window.addEventListener('lkdom', syncSoon);
+  window.addEventListener('hashchange', syncSoon);
+})();
+}catch(e){ try{ console.warn("[SD] модуль «lkArrivalCount» не запустився:", e); }catch(_){} }
+/* ▲▲▲ МОДУЛЬ-END • lkArrivalCount ▲▲▲ */
 
 /* ▼▼▼ МОДУЛЬ-START • lkCashRegister — 💰 Каса самовивозу (день/тиждень/місяць/період) ▼▼▼ */
 /* ===== 💰 Каса самовивозу — день / тиждень / місяць / період ===== */
