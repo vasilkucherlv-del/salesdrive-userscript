@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.30
+// @version      2.31
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -3798,26 +3798,33 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     +'  border-radius:8px;padding:9px 11px;box-shadow:0 4px 14px rgba(0,0,0,.25);'
     +'  font:13px/1.45 Arial,sans-serif;color:#7a1f1f}'
     +'.sd-cf-toast .t{font-weight:800;color:#c0392b;margin-bottom:2px}'
-    +'.sd-cf-toast .a{margin-top:6px;display:flex;gap:8px;align-items:center}'
-    +'.sd-cf-toast .a a{display:inline-block;background:#c0392b;color:#fff;font-weight:700;'
-    +'  padding:4px 12px;border-radius:5px;text-decoration:none;font-size:12px}'
+    // кнопки великі — щоб легко влучити мишею
+    +'.sd-cf-toast .a{margin-top:10px;display:flex;gap:10px;align-items:stretch}'
+    +'.sd-cf-toast .a a{flex:1 1 auto;display:flex;align-items:center;justify-content:center;'
+    +'  min-height:42px;background:#c0392b;color:#fff;font-weight:800;'
+    +'  padding:10px 16px;border-radius:7px;text-decoration:none;font-size:14px;text-align:center}'
     +'.sd-cf-toast .a a:hover{background:#a93226}'
-    +'.sd-cf-toast .a button{border:1px solid #c0392b;background:#fff;color:#c0392b;font-weight:700;'
-    +'  padding:3px 12px;border-radius:5px;cursor:pointer;font-size:12px}'
+    +'.sd-cf-toast .a button{flex:1 1 auto;min-height:42px;border:2px solid #c0392b;background:#fff;'
+    +'  color:#c0392b;font-weight:800;padding:10px 16px;border-radius:7px;cursor:pointer;font-size:14px}'
     +'.sd-cf-toast .a button:hover{background:#fde9e7}'
+    +'.sd-cf-toast .a button:active{transform:translateY(1px)}'
     // зведення ЗВЕРХУ на сторінці списку заявок (будь-який фільтр менеджера)
     +'#sd-cf-topbar{position:fixed;top:56px;left:50%;transform:translateX(-50%);z-index:2147483599;'
     +'  background:#fdf3f3;border:1px solid #e0b4b4;border-left:5px solid #c0392b;border-radius:8px;'
     +'  padding:8px 12px;box-shadow:0 4px 14px rgba(0,0,0,.28);font:13px/1.5 Arial,sans-serif;'
     +'  color:#7a1f1f;max-width:min(920px,94vw);display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center}'
     +'#sd-cf-topbar .lb{font-weight:800;color:#c0392b}'
-    +'#sd-cf-topbar .chip{display:inline-flex;align-items:center;gap:4px;background:#fff;'
-    +'  border:1px solid #e0b4b4;border-radius:14px;padding:2px 4px 2px 10px}'
-    +'#sd-cf-topbar .chip a{color:#c0392b;font-weight:800;text-decoration:none}'
-    +'#sd-cf-topbar .chip a:hover{text-decoration:underline}'
-    +'#sd-cf-topbar .chip button{border:none;background:transparent;color:#c0392b;font-weight:700;'
-    +'  cursor:pointer;padding:0 6px;font-size:13px}'
-    +'#sd-cf-topbar .chip button:hover{color:#7a1f1f}';
+    +'#sd-cf-topbar .chip{display:inline-flex;align-items:stretch;gap:0;background:#fff;'
+    +'  border:1px solid #e0b4b4;border-radius:8px;overflow:hidden}'
+    +'#sd-cf-topbar .chip a{display:flex;align-items:center;color:#c0392b;font-weight:800;'
+    +'  text-decoration:none;padding:9px 14px;font-size:14px}'
+    +'#sd-cf-topbar .chip a:hover{background:#fdf3f3;text-decoration:underline}'
+    // «OK» — велика кнопка з підписом, а не крихітний хрестик
+    +'#sd-cf-topbar .chip button{border:none;border-left:1px solid #e0b4b4;background:#f7eceb;'
+    +'  color:#c0392b;font-weight:800;cursor:pointer;padding:9px 14px;font-size:13px;'
+    +'  min-width:74px;white-space:nowrap}'
+    +'#sd-cf-topbar .chip button:hover{background:#c0392b;color:#fff}'
+    +'#sd-cf-topbar .chip button:active{transform:translateY(1px)}';
   var st=document.createElement('style'); st.textContent=css;
   (document.head||document.documentElement).appendChild(st);
 
@@ -3949,8 +3956,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
         var a=document.createElement('a'); a.href=r.url||'#';
         a.textContent='#'+r.num;
         a.title=(r.reason||'повідомлення не доставлено')+' — відкрити заявку';
-        var x=document.createElement('button'); x.type='button'; x.textContent='✕';
-        x.title='OK, зрозумів — прибрати';
+        var x=document.createElement('button'); x.type='button'; x.textContent='✓ OK';
+        x.title='OK, зрозумів — прибрати з переліку';
         x.addEventListener('click',function(e){ e.preventDefault(); e.stopPropagation(); ackKey(k); });
         c.appendChild(a); c.appendChild(x); bar.appendChild(c);
       });
