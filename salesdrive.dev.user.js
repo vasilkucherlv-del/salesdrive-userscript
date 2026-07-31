@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.31
+// @version      2.32
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -32,6 +32,7 @@
      • lkChatFailWarn  — ⛔ чат: повідомлення НЕ доставлено (нема Viber/Telegram на номері)
      • lkPayRequired   — ⛔ заборона зберігати заявку без «Способу оплати»
      • lkArrivalCount  — 📦 к-ть позицій та одиниць біля заголовка «Надходження товарів»
+     • lkTtnPrintGuard — 🖨 попередження про повторний друк ТТН Укрпошти
      • lkCashRegister  — 💰 Каса самовивозу
      • lkPickList      — 📋 зведений лист комплектації (сума товарів по заявках статусу)
      • lkUkrPromList   — 📮 лист «Пром-оплата + Укрпошта» (відправник/отримувач/індекс/ТТН, друк)
@@ -4229,6 +4230,132 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 })();
 }catch(e){ try{ console.warn("[SD] модуль «lkArrivalCount» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkArrivalCount ▲▲▲ */
+
+/* ▼▼▼ МОДУЛЬ-START • lkTtnPrintGuard — 🖨 попередження про ПОВТОРНИЙ друк ТТН Укрпошти ▼▼▼ */
+/* ===== СРМ має серверний прапорець isPrinted (спільний для всіх менеджерів) — якщо ТТН
+   уже друкували, попереджаємо перед повторним друком і показуємо бейдж біля ТТН.
+   Додатково рахуємо друки на цьому ПК (точна кількість разів). ===== */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
+(function lkTtnPrintGuard(){
+  'use strict';
+  var API_KEY='9yC3JYj4MlYitQ8J3KUf-uy_qPDYkFzwoITQSUeiWEDMZntbQ4uj0NxNcHrqAg8VAB6wDmkdXJZ1LMFgnQbuivTSrzutQbVB66wN';
+  var LKEY='lk_ttnprint_v1';
+
+  var css=''
+    +'.lk-ttnp{display:inline-block;margin-left:8px;padding:2px 10px;border-radius:12px;'
+    +'  font:700 11.5px/1.6 Arial,sans-serif;vertical-align:middle;white-space:nowrap}'
+    +'.lk-ttnp.was{background:#fdecea;color:#b71c1c;border:1px solid #f5b7b1}'
+    +'.lk-ttnp.new{background:#E6F4EA;color:#1B5E20;border:1px solid #A5D6A7}';
+  var st=document.createElement('style'); st.textContent=css;
+  (document.head||document.documentElement).appendChild(st);
+
+  function orderId(){ var m=(location.hash||'').match(/#\/order\/update\/(\d+)/); return m?m[1]:null; }
+  function load(){ try{ return JSON.parse(localStorage.getItem(LKEY))||{}; }catch(e){ return {}; } }
+  function save(o){ try{ localStorage.setItem(LKEY, JSON.stringify(o)); }catch(e){} }
+  function fmtDate(t){
+    try{ var d=new Date(t), p=function(n){ return (n<10?'0':'')+n; };
+      return p(d.getDate())+'.'+p(d.getMonth()+1)+'.'+d.getFullYear()+' '+p(d.getHours())+':'+p(d.getMinutes());
+    }catch(e){ return ''; }
+  }
+
+  // стан заявки з API: чи Укрпошта, ТТН, серверний прапорець друку
+  var state={};   // orderId -> {ready, ukr, ttn, srvPrinted}
+  function fetchState(id){
+    if(state[id]) return;
+    state[id]={ready:false};
+    fetch('/api/order/list/?filter%5Bid%5D%5B%5D='+encodeURIComponent(id),
+          {headers:{'Form-Api-Key':API_KEY,'Accept':'application/json'}})
+      .then(function(r){ return r.json(); })
+      .then(function(j){
+        var o=(j.data||[])[0]||{}, d=(o.ord_delivery_data||[])[0]||{};
+        state[id]={ ready:true,
+          ukr: (String(d.provider||'')==='ukrposhta' || Number(o.shipping_method)===30),
+          ttn: String(d.trackingNumber||''),
+          srvPrinted: !!Number(d.isPrinted) };
+        badge();
+      })
+      .catch(function(){ state[id]={ready:true, ukr:false, ttn:'', srvPrinted:false}; });
+  }
+
+  function localRec(ttn){ return ttn ? (load()[ttn]||null) : null; }
+
+  // бейдж біля номера ТТН у картці заявки
+  function badge(){
+    var id=orderId(); if(!id) return;
+    var s=state[id];
+    var old=document.querySelector('.lk-ttnp');
+    if(!s || !s.ready || !s.ukr || !s.ttn){ if(old) old.remove(); return; }
+    // елемент із номером ТТН (посилання з 13 цифрами)
+    var host=null, all=document.querySelectorAll('a,span,div');
+    for(var i=0;i<all.length;i++){
+      var el=all[i];
+      if(el.children.length) continue;
+      if(String(el.textContent||'').trim()===s.ttn){ host=el; break; }
+    }
+    if(!host){ if(old) old.remove(); return; }
+    var rec=localRec(s.ttn);
+    var was=s.srvPrinted || !!rec;
+    var b=old;
+    if(!b){ b=document.createElement('span'); b.className='lk-ttnp'; }
+    b.className='lk-ttnp '+(was?'was':'new');
+    if(was){
+      var n=rec&&rec.n?rec.n:null;
+      b.textContent='🖨 ТТН уже друкували'+(n?(' · '+n+'× на цьому ПК'):'');
+      b.title=(rec&&rec.t)?('останній друк тут: '+fmtDate(rec.t)):'позначено в СРМ як роздрукована';
+    }else{
+      b.textContent='🖨 ще не друкована';
+      b.title='за даними СРМ цю ТТН ще не друкували';
+    }
+    if(b.parentElement!==host.parentElement || b.previousSibling!==host){
+      try{ host.insertAdjacentElement('afterend', b); }catch(e){}
+    }
+  }
+
+  // перехоплення кліку по кнопках друку ТТН (у СРМ: ng-click="viewModel.setIsPrinted(viewModel.ukrposhta)")
+  document.addEventListener('click', function(e){
+    try{
+      var id=orderId(); if(!id) return;
+      var t=e.target&&e.target.closest?e.target.closest('[ng-click]'):null;
+      if(!t) return;
+      var ng=t.getAttribute('ng-click')||'';
+      if(!/setIsPrinted/i.test(ng)) return;
+      if(!/ukrposhta/i.test(ng)) return;            // сторожа лише для Укрпошти
+      var s=state[id];
+      if(!s || !s.ready || !s.ttn) return;          // стан невідомий — не заважаємо
+      var rec=localRec(s.ttn);
+      if(s.srvPrinted || rec){
+        var msg='⚠ ПОВТОРНИЙ ДРУК ТТН!\n\nТТН '+s.ttn+' (заявка №'+id+') уже друкували';
+        if(rec) msg+='\n• на цьому ПК: '+rec.n+'× , останній раз '+fmtDate(rec.t);
+        if(s.srvPrinted) msg+='\n• у СРМ позначена як роздрукована (міг друкувати інший менеджер)';
+        msg+='\n\nДрукувати ще раз?';
+        if(!confirm(msg)){ e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation(); return; }
+      }
+      var m=load(), now=Date.now();
+      var cur=m[s.ttn]||{n:0};
+      cur.n=(cur.n||0)+1; cur.t=now; cur.id=id;
+      m[s.ttn]=cur;
+      var lim=now-120*24*3600*1000;                 // чистка старших за 120 днів
+      Object.keys(m).forEach(function(k){ if((m[k].t||0)<lim) delete m[k]; });
+      save(m);
+      s.srvPrinted=true;
+      setTimeout(badge, 300);
+    }catch(err){}
+  }, true);
+
+  var t=null;
+  function sync(){
+    var id=orderId();
+    if(!id){ var o=document.querySelector('.lk-ttnp'); if(o) o.remove(); return; }
+    fetchState(id);
+    badge();
+  }
+  function syncSoon(){ clearTimeout(t); t=setTimeout(sync,400); }
+  sync();
+  window.addEventListener('lkdom', syncSoon);
+  window.addEventListener('hashchange', syncSoon);
+})();
+}catch(e){ try{ console.warn("[SD] модуль «lkTtnPrintGuard» не запустився:", e); }catch(_){} }
+/* ▲▲▲ МОДУЛЬ-END • lkTtnPrintGuard ▲▲▲ */
 
 /* ▼▼▼ МОДУЛЬ-START • lkCashRegister — 💰 Каса самовивозу (день/тиждень/місяць/період) ▼▼▼ */
 /* ===== 💰 Каса самовивозу — день / тиждень / місяць / період ===== */
