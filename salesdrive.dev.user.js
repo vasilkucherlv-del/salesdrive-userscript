@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.41
+// @version      2.42
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4777,17 +4777,36 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     tm=setTimeout(function(){ done(); cb(null); },8000);
   }
 
+  // видима кнопка «Зберегти» самої заявки (не в модалці)
+  function orderSaveBtn(){
+    var bs=document.querySelectorAll('button,a,input[type=submit]');
+    for(var i=0;i<bs.length;i++){
+      var b=bs[i];
+      if(!b.offsetParent) continue;
+      if(b.closest('.modal')) continue;
+      if(/^зберегти$/i.test((b.textContent||b.value||'').trim())) return b;
+    }
+    return null;
+  }
+
   function applyTarget(v, btn, res){
     btn.disabled=true; res.className=''; res.textContent='…';
     invoke(v, function(d){
       btn.disabled=false;
       if(!d || !d.ok){ res.className='er'; res.textContent='✗ '+((d&&d.err)||'нема відповіді'); return; }
       if(d.same){ res.className='ok'; res.textContent='✓ сума вже '+fN(d.total); return; }
-      res.className=d.exact?'ok':'er';
-      res.textContent='✓ '+fN(d.from)+' → '+fN(d.to)
+      var base='✓ '+fN(d.from)+' → '+fN(d.to)
         +' ('+(d.row&&d.row.name?d.row.name:'')+': нова ціна '+fN(d.row.newPrice)+')'
-        +(d.exact?'':' ⚠ не рівно '+d.target+' — перевір')
-        +' · натисни «Зберегти»';
+        +(d.exact?'':' ⚠ не рівно '+d.target+' — перевір');
+      res.className=d.exact?'ok':'er';
+      res.textContent=base+' · зберігаю…';
+      // авто-«Зберегти» через паузу (дати Angular домалювати суму)
+      setTimeout(function(){
+        var sb=orderSaveBtn();
+        if(!sb){ res.textContent=base+' ⚠ кнопку «Зберегти» не знайшов — збережи вручну'; return; }
+        sb.click();
+        setTimeout(function(){ res.textContent=base+' · ✓ збережено'; },1500);
+      },400);
     });
   }
 
