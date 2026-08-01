@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.37
+// @version      2.38
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4681,13 +4681,15 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 
   function onOrderPage(){ return /#\/order\/(update|create)/.test(location.hash||''); }
 
-  // самовивіз? — селект способу доставки (число 43) або текст у select2-контейнері
+  // самовивіз? — головний селектор той самий, що в lkQuickPickup (перевірений на формі):
+  // [attr-field-name="shipping_method"]; запасні — селект/select2-контейнер
   function isPickup(){
+    var f=document.querySelector('[attr-field-name="shipping_method"]');
+    if(f && /самовив/i.test((f.textContent||''))) return true;
     var sel=document.getElementById('shipping_method-wk');
     if(sel && 'value' in sel && /\d/.test(String(sel.value||''))) return /(^|:)43$/.test(String(sel.value))||/\b43\b/.test(String(sel.value));
-    var c=document.getElementById('select2-shipping_method-wk-container')
-        || document.querySelector('[id^="select2-shipping_method"][id$="-container"]');
-    if(c) return /самовив/i.test(c.getAttribute('title')||c.textContent||'');
+    var c=document.querySelector('[id^="select2-shipping_method"][id$="-container"]');
+    if(c && /самовив/i.test(c.getAttribute('title')||c.textContent||'')) return true;
     return false;
   }
 
