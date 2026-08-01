@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.38
+// @version      2.39
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4681,16 +4681,43 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 
   function onOrderPage(){ return /#\/order\/(update|create)/.test(location.hash||''); }
 
-  // самовивіз? — головний селектор той самий, що в lkQuickPickup (перевірений на формі):
-  // [attr-field-name="shipping_method"]; запасні — селект/select2-контейнер
+  // самовивіз? — кілька способів, від точних до загального:
+  // 1) поле [attr-field-name="shipping_method"] (як у lkQuickPickup);
+  // 2) селект/select2 (значення 43 або текст);
+  // 3) рядок «Спосіб доставки: …» у «Даних заявки» (текст містить «самовив»)
   function isPickup(){
     var f=document.querySelector('[attr-field-name="shipping_method"]');
     if(f && /самовив/i.test((f.textContent||''))) return true;
     var sel=document.getElementById('shipping_method-wk');
-    if(sel && 'value' in sel && /\d/.test(String(sel.value||''))) return /(^|:)43$/.test(String(sel.value))||/\b43\b/.test(String(sel.value));
+    if(sel && 'value' in sel && /\d/.test(String(sel.value||''))){
+      if(/(^|:)43$/.test(String(sel.value))||/\b43\b/.test(String(sel.value))) return true;
+    }
     var c=document.querySelector('[id^="select2-shipping_method"][id$="-container"]');
     if(c && /самовив/i.test(c.getAttribute('title')||c.textContent||'')) return true;
+    // фолбек: підпис «Спосіб доставки» → його рядок/контейнер
+    var els=document.querySelectorAll('label,td,div,span');
+    for(var i=0;i<els.length;i++){
+      var t=(els[i].textContent||'').replace(/\s+/g,' ').trim();
+      if(!/^Спосіб\s*доставки$/i.test(t)) continue;
+      var row=els[i].closest('tr')||els[i].parentElement;
+      for(var up=0; row && up<3; up++){
+        var rt=(row.textContent||'');
+        if(rt.length<200 && /самовив/i.test(rt)) return true;
+        row=row.parentElement;
+      }
+    }
     return false;
+  }
+
+  // діагностика: чому кнопки нема (видно у консолі F12 як [SD-Округлення])
+  var lastDbg='';
+  function dbg(m){
+    if(m===lastDbg) return;
+    lastDbg=m;
+    try{
+      var v=(typeof GM_info!=='undefined'&&GM_info.script)?GM_info.script.version:'?';
+      console.debug('[SD-Округлення v'+v+']', m);
+    }catch(e){}
   }
 
   // місце: одразу ПІСЛЯ таблиці товарів (якір — кнопка «+ Додати»)
@@ -4734,9 +4761,15 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 
   function sync(){
     var btn=document.getElementById('lk-round-btn');
-    if(!onOrderPage() || !isPickup()){ if(btn){ btn.remove(); var r0=document.getElementById('lk-round-res'); if(r0) r0.remove(); } return; }
+    if(!onOrderPage()){ if(btn){ btn.remove(); var r1=document.getElementById('lk-round-res'); if(r1) r1.remove(); } return; }
+    if(!isPickup()){
+      dbg('кнопки нема: самовивіз не визначено на цій сторінці');
+      if(btn){ btn.remove(); var r0=document.getElementById('lk-round-res'); if(r0) r0.remove(); }
+      return;
+    }
     var tbl=findSpot();
-    if(!tbl){ if(btn) btn.remove(); return; }
+    if(!tbl){ dbg('кнопки нема: не знайдено таблицю товарів (режим перегляду?)'); if(btn) btn.remove(); return; }
+    dbg('кнопка показана');
     if(btn) return;
     btn=document.createElement('button'); btn.type='button'; btn.id='lk-round-btn';
     btn.textContent='🔟 Заокруглити суму (вгору до 10 ₴)';
