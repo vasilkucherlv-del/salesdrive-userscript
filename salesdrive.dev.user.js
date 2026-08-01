@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.40
+// @version      2.41
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -2375,13 +2375,23 @@ function __sdPageMain() {
     var newPrice = r2(num(pick.price) + add);
     if (!(newPrice > 0)) return respond({ ok: false, err: "нова ціна рядка ≤ 0 — обери більшу ціль" });
     try {
+      // ШТАТНИЙ шлях зміни ціни рядка (інакше «Зберегти» не фіксує зміну!):
+      // editComment(рядок) → item.newDefaultPrice → updateComment(рядок)
+      var fakeEvt = { preventDefault: function () {}, stopPropagation: function () {} };
       safeApply(scope, function () {
         var s = newPrice.toFixed(2).replace(".", ",");
-        pick.defaultPrice = newPrice;
-        pick.price = s;
-        pick.newDefaultPrice = s;
-        try { if (typeof vm.itemChange === "function") vm.itemChange(pick, pick.index); } catch (e) {}
-        try { if (typeof vm.updateItems === "function") vm.updateItems(); } catch (e) {}
+        if (typeof vm.editComment === "function" && typeof vm.updateComment === "function") {
+          vm.editComment(pick, pick.index, fakeEvt);
+          pick.newDefaultPrice = s;
+          vm.updateComment(pick, pick.index);
+        } else {
+          // фолбек — старий прямий спосіб
+          pick.defaultPrice = newPrice;
+          pick.price = s;
+          pick.newDefaultPrice = s;
+          try { if (typeof vm.itemChange === "function") vm.itemChange(pick, pick.index); } catch (e) {}
+          try { if (typeof vm.updateItems === "function") vm.updateItems(); } catch (e) {}
+        }
       });
       var total2 = 0;
       items.forEach(function (x) { total2 += num(x.price) * qty(x) - num(x.discount); });
