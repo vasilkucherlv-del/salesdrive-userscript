@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.34
+// @version      2.35
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4370,9 +4370,10 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 /* ▲▲▲ МОДУЛЬ-END • lkArrivalCount ▲▲▲ */
 
 /* ▼▼▼ МОДУЛЬ-START • lkArrivalOpt — 💰 опт-ціни товарів із собівартості накладної ▼▼▼ */
-/* ===== Кнопка на «Надходженні товарів»: для кожного рядка бере собівартість (ціну
-   закупки) і записує в картку товару ціни Великий опт (×1.2), середній опт (×1.25),
-   майстри (×1.3 вгору до 5). Розрахунок і запис робить core-обробник sdArrivalOpt. ===== */
+/* ===== Кнопка на «Надходженні товарів»: рахує з собівартості (ціна закупки × курс
+   валюти накладної) ціни Великий опт (×1.2), середній опт (×1.25), майстри (×1.3
+   вгору до 5) і показує їх КОЛОНКОЮ прямо біля кожного товару (нові жирним, «було»
+   дрібним). Запис у картки товарів — лише після «✅ Записати». Core: sdArrivalOpt. ===== */
 try{ // SD-ізоляція: помилка цього модуля не зупинить решту
 (function lkArrivalOpt(){
   'use strict';
@@ -4383,20 +4384,91 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     +'  background:#00897B;color:#fff;font:700 13px/1.5 Arial,sans-serif;cursor:pointer;vertical-align:middle;white-space:nowrap}'
     +'.lk-arropt-btn:hover{background:#00695c}'
     +'.lk-arropt-btn[disabled]{background:#9e9e9e;cursor:default}'
-    +'#lk-arropt-res{margin:8px 0;padding:10px 12px;border:1px solid #7bb3a9;border-left:4px solid #00897B;'
-    +'  background:#eef8f6;border-radius:6px;font:12.5px/1.6 ui-monospace,Menlo,Consolas,monospace;color:#0f3d39;'
+    // компактна панель дій над таблицею
+    +'#lk-arropt-res{margin:8px 0;padding:9px 12px;border:1px solid #7bb3a9;border-left:4px solid #00897B;'
+    +'  background:#eef8f6;border-radius:6px;font:13px/1.6 Arial,sans-serif;color:#0f3d39;'
     +'  max-width:980px;box-sizing:border-box;position:relative}'
-    +'#lk-arropt-res .h{font:700 13px/1.5 Arial,sans-serif;color:#00695c;margin-bottom:5px}'
-    +'#lk-arropt-res .r.er{color:#B71C1C;font-weight:700}'
+    +'#lk-arropt-res .h{font-weight:700;color:#00695c;margin-bottom:4px}'
+    +'#lk-arropt-res .er{color:#B71C1C;font-weight:700;font-size:12px}'
     +'#lk-arropt-res .x{position:absolute;top:5px;right:9px;border:none;background:none;cursor:pointer;'
-    +'  font-size:17px;color:#00695c}';
+    +'  font-size:17px;color:#00695c}'
+    // колонка «Опт» у таблиці накладної
+    +'td.lk-arropt-td{font:12px/1.4 ui-monospace,Menlo,Consolas,monospace;color:#0f3d39;white-space:nowrap;'
+    +'  padding:4px 9px;border-left:2px solid #00897B;background:#f2fbfa;vertical-align:middle}'
+    +'td.lk-arropt-td .nw{font-weight:800;color:#00695c;font-size:12.5px}'
+    +'td.lk-arropt-td .od{color:#8a9a97;font-size:10.5px}'
+    +'td.lk-arropt-td.er{color:#B71C1C;font-weight:700;font-size:11px;white-space:normal}'
+    +'td.lk-arropt-td.blank{background:transparent;border-left:none}'
+    +'th.lk-arropt-td{font:700 11px/1.4 Arial,sans-serif;background:#e3f4f2;color:#00695c;'
+    +'  padding:4px 9px;border-left:2px solid #00897B;white-space:nowrap}';
   var st=document.createElement('style'); st.textContent=css;
   (document.head||document.documentElement).appendChild(st);
 
   function onPage(){ return /#\/document\/arrival-product\/update\//.test(location.hash||''); }
   function rowsCount(){ return document.querySelectorAll('tr[ng-repeat^="invoiceItem"]').length; }
+  var fmtN=function(n){ return String(n==null?'—':n).replace('.',','); };
 
-  // запуск обробника: mode='preview' (лише читає) або 'apply' (пише)
+  // поточний прогноз/результат: {list, bySku, applied, rate}
+  var view=null;
+
+  function skuOfRow(tr){
+    var m=String((tr.cells&&tr.cells[1]?tr.cells[1].textContent:'')||'').match(/\(([\w\-]+)\)/g);
+    return m?m[m.length-1].replace(/[()]/g,''):null;
+  }
+
+  // домалювати колонку «Опт» у таблицю (перемальовується на кожен lkdom-пульс, поки view активний)
+  function renderColumn(){
+    if(!view) return;
+    var t=document.querySelector('table.document-invoice-products'); if(!t) return;
+    var headRow=t.querySelector('thead tr')||t.querySelector('tr');
+    if(headRow && !headRow.querySelector('th.lk-arropt-td')){
+      var th=document.createElement('th'); th.className='lk-arropt-td';
+      th.textContent='Опт: Вел / Сер / Май';
+      headRow.appendChild(th);
+    }
+    var i=0;
+    [].forEach.call(t.querySelectorAll('tr[ng-repeat^="invoiceItem"]'),function(tr){
+      var sku=skuOfRow(tr);
+      var r=(sku&&view.bySku[sku])||view.list[i]; i++;
+      var td=tr.querySelector('td.lk-arropt-td');
+      if(!td){ td=document.createElement('td'); td.className='lk-arropt-td'; tr.appendChild(td); }
+      td.classList.remove('er');
+      if(!r){ td.textContent=''; return; }
+      if(r.err){ td.classList.add('er'); td.textContent='✗ '+r.err; td.title=r.name||''; return; }
+      var changed=(Number(r.o2)!==Number(r.p2))||(Number(r.o5)!==Number(r.p5))||(Number(r.o7)!==Number(r.p7));
+      td.innerHTML='';
+      var l1=document.createElement('div'); l1.className='nw';
+      l1.textContent=(view.applied?'✓ ':'')+r.p2+' / '+r.p5+' / '+r.p7;
+      var l2=document.createElement('div'); l2.className='od';
+      l2.textContent=r.o2==null&&r.o5==null&&r.o7==null
+        ? 'типів цін не було — нові'
+        : (changed?('було: '+fmtN(r.o2)+' / '+fmtN(r.o5)+' / '+fmtN(r.o7)):'без змін');
+      td.appendChild(l1); td.appendChild(l2);
+      td.title=(r.name||'')+(r.created&&r.created.length?(' · створено типи: '+r.created.join(',')):'');
+    });
+    // не-товарні рядки (підсумок тощо) — порожня клітинка, щоб сітка не зʼїхала
+    [].forEach.call(t.querySelectorAll('tr'),function(tr){
+      if(tr.getAttribute('ng-repeat')) return;
+      if(tr.querySelector('.lk-arropt-td')) return;
+      if(tr.querySelector('th')) return;
+      if(!tr.cells || tr.cells.length<3) return;
+      var td=document.createElement('td'); td.className='lk-arropt-td blank';
+      tr.appendChild(td);
+    });
+  }
+  function clearView(){
+    view=null;
+    [].forEach.call(document.querySelectorAll('.lk-arropt-td'),function(n){ n.remove(); });
+    var r=document.getElementById('lk-arropt-res'); if(r) r.remove();
+  }
+  function setView(rows, applied, rate){
+    var bySku={};
+    (rows||[]).forEach(function(r){ if(r.sku) bySku[r.sku]=r; });
+    view={ list:rows||[], bySku:bySku, applied:!!applied, rate:rate };
+    renderColumn();
+  }
+
+  // запуск core-обробника: mode='preview' (лише читає) або 'apply' (пише)
   function invoke(mode, onDone, onProgTxt){
     var token=String(Date.now())+'_'+Math.random().toString(36).slice(2);
     var tm=null;
@@ -4424,97 +4496,91 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     tm=setTimeout(function(){ cleanup(); onDone(null); }, 180000);
   }
 
-  var fmtN=function(n){ return String(n==null?'—':n).replace('.',','); };
-  function lineTxt(r, applied){
-    if(r.err) return '✗ '+(r.sku||'')+' '+(r.name||'')+' — '+r.err;
-    function part(lab,o,n){
-      if(o==null) return lab+' (новий)→'+n;
-      return lab+' '+fmtN(o)+(Number(o)===Number(n)?' (=)':'→'+n);
-    }
-    return (applied?'✓ ':'• ')+(r.sku||'')+' · соб '+fmtN(r.base)+' · '
-      +part('Вел',r.o2,r.p2)+' · '+part('Сер',r.o5,r.p5)+' · '+part('Май',r.o7,r.p7);
-  }
-
-  function panel(){
+  function bar(){
     var old=document.getElementById('lk-arropt-res'); if(old) old.remove();
     var box=document.createElement('div'); box.id='lk-arropt-res';
     var x=document.createElement('button'); x.className='x'; x.textContent='✕';
-    x.addEventListener('click',function(){ box.remove(); });
+    x.addEventListener('click',function(){ clearView(); });
     box.appendChild(x);
     var t=document.querySelector('table.document-invoice-products');
     if(t&&t.parentElement) t.parentElement.insertBefore(box,t);
     else document.body.appendChild(box);
     return box;
   }
+  function errLines(box, rows){
+    (rows||[]).forEach(function(r){
+      if(!r.err) return;
+      var e=document.createElement('div'); e.className='er';
+      e.textContent='✗ '+(r.name||r.sku||'')+' — '+r.err;
+      box.appendChild(e);
+    });
+  }
 
-  // крок 1: ПЕРЕГЛЯД — нічого не пише, показує «стара → нова» по кожному товару
+  // крок 1: ПЕРЕГЛЯД — нічого не пише; ціни зʼявляються колонкою біля товарів
   function run(btn){
     if(!rowsCount()) return;
     btn.disabled=true; var orig=btn.textContent; btn.textContent='💰 Читаю…';
     invoke('preview', function(d){
       btn.disabled=false; btn.textContent=orig;
-      var box=panel();
-      var h=document.createElement('div'); h.className='h';
-      if(!d || !d.ok){ h.textContent='✗ Не вийшло: '+((d&&d.err)||'нема відповіді'); box.appendChild(h); return; }
-      var rows=d.rows||[], chg=0;
+      if(!d || !d.ok){
+        var b0=bar(); var h0=document.createElement('div'); h0.className='h';
+        h0.textContent='✗ Не вийшло: '+((d&&d.err)||'нема відповіді'); b0.appendChild(h0); return;
+      }
+      var rows=d.rows||[], chg=0, erN=0;
       rows.forEach(function(r){
-        if(r.err) return;
+        if(r.err){ erN++; return; }
         if(Number(r.o2)!==Number(r.p2)||Number(r.o5)!==Number(r.p5)||Number(r.o7)!==Number(r.p7)) chg++;
       });
-      h.textContent='👀 ПЕРЕГЛЯД (нічого ще не записано). Курс: '+fmtN(d.rate)
-        +'. Зміниться товарів: '+chg+' із '+rows.length+'. «стара→нова», (=) — без змін:';
+      setView(rows, false, d.rate);
+      var box=bar();
+      var h=document.createElement('div'); h.className='h';
+      h.textContent='👀 ПЕРЕГЛЯД: нові ціни — у колонці «Опт» біля товарів (нічого ще не записано). '
+        +'Курс: '+fmtN(d.rate)+' · зміниться: '+chg+' із '+rows.length+(erN?(' · помилок: '+erN):'');
       box.appendChild(h);
-      rows.forEach(function(r){
-        var line=document.createElement('div'); line.className='r'+(r.err?' er':'');
-        line.textContent=lineTxt(r,false);
-        box.appendChild(line);
-      });
-      // кнопки застосувати/закрити
-      var act=document.createElement('div'); act.style.marginTop='8px';
+      errLines(box, rows);
       var ap=document.createElement('button'); ap.className='lk-arropt-btn'; ap.style.marginLeft='0';
       ap.textContent='✅ Записати ці ціни у товари';
       ap.addEventListener('click',function(){
         if(!confirm('Записати нові опт-ціни у картки товарів ('+rows.length+' позицій)?')) return;
         ap.disabled=true;
         invoke('apply', function(d2){
-          var box2=panel();
+          if(!d2 || !d2.ok){
+            ap.disabled=false; ap.textContent='✗ не вдалось — ще раз';
+            return;
+          }
+          var ok2=0, er2=0;
+          (d2.rows||[]).forEach(function(r){ if(r.err) er2++; else ok2++; });
+          setView(d2.rows, true, d2.rate);
+          var box2=bar();
           var h2=document.createElement('div'); h2.className='h';
-          if(!d2 || !d2.ok){ h2.textContent='✗ Запис не вдався: '+((d2&&d2.err)||'нема відповіді'); box2.appendChild(h2); return; }
-          var okN=0, erN=0;
-          (d2.rows||[]).forEach(function(r){ if(r.err) erN++; else okN++; });
-          h2.textContent='💰 ЗАПИСАНО: '+okN+' товарів'+(erN?(' · помилок: '+erN):'')+':';
+          h2.textContent='💰 ЗАПИСАНО: '+ok2+' товарів'+(er2?(' · помилок: '+er2):'')+'. Колонка «Опт» — що тепер у картках.';
           box2.appendChild(h2);
-          (d2.rows||[]).forEach(function(r){
-            var line=document.createElement('div'); line.className='r'+(r.err?' er':'');
-            line.textContent=lineTxt(r,true)
-              +(r.created&&r.created.length?('  (+створено типи: '+r.created.join(',')+')'):'');
-            box2.appendChild(line);
-          });
+          errLines(box2, d2.rows);
         }, function(p){ ap.textContent='✅ Пишу '+p+'…'; });
       });
       var cl=document.createElement('button'); cl.className='lk-arropt-btn';
-      cl.style.background='#9e9e9e'; cl.textContent='✕ Закрити';
-      cl.addEventListener('click',function(){ box.remove(); });
-      act.appendChild(ap); act.appendChild(cl);
-      box.appendChild(act);
+      cl.style.background='#9e9e9e'; cl.textContent='✕ Прибрати';
+      cl.addEventListener('click',function(){ clearView(); });
+      box.appendChild(ap); box.appendChild(cl);
     }, function(p){ btn.textContent='💰 Читаю '+p+'…'; });
   }
 
   function sync(){
-    var btn=document.querySelector('.lk-arropt-btn');
-    if(!onPage()){ if(btn) btn.remove(); var r=document.getElementById('lk-arropt-res'); if(r) r.remove(); return; }
+    var btn=document.querySelector('.lk-arropt-btn-main');
+    if(!onPage()){ if(btn) btn.remove(); clearViewIfAny(); return; }
+    if(view) renderColumn();   // Angular перемалював рядки — повертаємо колонку
     if(!rowsCount()){ if(btn) btn.remove(); return; }
     if(btn) return;
-    // поруч із бейджем лічильника (у заголовку h1), фолбек — перед таблицею
     var host=null, hs=document.querySelectorAll('h1,h2,h3');
     for(var i=0;i<hs.length;i++){ if(/^Надходження товарів №/.test((hs[i].textContent||'').trim())){ host=hs[i]; break; } }
-    btn=document.createElement('button'); btn.type='button'; btn.className='lk-arropt-btn';
+    btn=document.createElement('button'); btn.type='button'; btn.className='lk-arropt-btn lk-arropt-btn-main';
     btn.textContent='💰 Опт-ціни з собівартості';
-    btn.title='Записати у картки товарів: Великий опт ×1.2, середній опт ×1.25, майстри ×1.3 (вгору до 5)';
+    btn.title='Показати нові ціни (Великий ×1.2, середній ×1.25, майстри ×1.3↑5) колонкою біля товарів; запис — окремою кнопкою';
     btn.addEventListener('click',function(e){ e.preventDefault(); e.stopPropagation(); run(btn); });
     if(host) host.appendChild(btn);
     else{ var t=document.querySelector('table.document-invoice-products'); if(t&&t.parentElement) t.parentElement.insertBefore(btn,t); }
   }
+  function clearViewIfAny(){ if(view||document.getElementById('lk-arropt-res')) clearView(); }
 
   var t=null;
   function syncSoon(){ clearTimeout(t); t=setTimeout(sync,300); }
