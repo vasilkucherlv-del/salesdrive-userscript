@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.39
+// @version      2.40
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -2348,9 +2348,16 @@ function __sdPageMain() {
     var total = 0;
     items.forEach(function (x) { total += num(x.price) * qty(x) - num(x.discount); });
     total = r2(total);
-    var target = Math.ceil(total / 10) * 10;
-    var delta = r2(target - total);
-    if (!(delta > 0)) return respond({ ok: true, same: true, total: total });
+
+    // режим 'calc' — лише порахувати суму (для меню вибору цілі), нічого не міняти
+    var tgtAttr = document.documentElement.getAttribute("data-sd-round-target") || "";
+    if (tgtAttr === "calc") return respond({ ok: true, calc: true, total: total });
+
+    // ціль: задана користувачем або (за замовчуванням) вгору до кратного 10
+    var target = num(tgtAttr);
+    if (!(target > 0)) target = Math.ceil(total / 10) * 10;
+    var delta = r2(target - total);   // може бути й відʼємною (заокруглення вниз)
+    if (delta === 0) return respond({ ok: true, same: true, total: total });
 
     // вибір рядка для корекції
     var pick = null, cents = Math.round(delta * 100);
@@ -2366,6 +2373,7 @@ function __sdPageMain() {
 
     var q = qty(pick), add = r2(delta / q);
     var newPrice = r2(num(pick.price) + add);
+    if (!(newPrice > 0)) return respond({ ok: false, err: "нова ціна рядка ≤ 0 — обери більшу ціль" });
     try {
       safeApply(scope, function () {
         var s = newPrice.toFixed(2).replace(".", ",");
@@ -4673,9 +4681,14 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     +'  background:#1565C0;color:#fff;font:700 13px/1.5 Arial,sans-serif;cursor:pointer;white-space:nowrap}'
     +'#lk-round-btn:hover{background:#0D47A1}'
     +'#lk-round-btn[disabled]{background:#9e9e9e;cursor:default}'
-    +'#lk-round-res{display:inline-block;margin-left:10px;font:700 13px/1.5 Arial,sans-serif}'
+    +'#lk-round-res{display:inline-block;margin-left:10px;font:700 13px/1.5 Arial,sans-serif;vertical-align:middle}'
     +'#lk-round-res.ok{color:#1B5E20}'
-    +'#lk-round-res.er{color:#B71C1C}';
+    +'#lk-round-res.er{color:#B71C1C}'
+    +'.lk-round-opt{margin-left:6px;padding:5px 13px;border:none;border-radius:6px;background:#1565C0;'
+    +'  color:#fff;font:700 13px/1.4 Arial,sans-serif;cursor:pointer}'
+    +'.lk-round-opt:hover{background:#0D47A1}'
+    +'.lk-round-inp{margin-left:10px;width:64px;padding:4px 8px;border:1px solid #90a4ae;border-radius:6px;'
+    +'  font:700 13px/1.4 Arial,sans-serif;text-align:center}';
   var st=document.createElement('style'); st.textContent=css;
   (document.head||document.documentElement).appendChild(st);
 
@@ -4732,31 +4745,77 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     return (tbl && tbl.parentElement) ? tbl : null;
   }
 
-  function run(btn,res){
-    btn.disabled=true; res.textContent='…'; res.className='';
+  var fN=function(n){ return String(Number(n).toFixed(2)).replace('.',','); };
+
+  // виклик core-обробника: target = 'calc' (лише сума) або число (ціль)
+  function invoke(target, cb){
     var token=String(Date.now())+'_'+Math.random().toString(36).slice(2);
     var tm=null;
-    function done(){ PAGE.removeEventListener('sdRoundPickupResult', onRes); clearTimeout(tm); btn.disabled=false; }
+    function done(){ PAGE.removeEventListener('sdRoundPickupResult', onRes); clearTimeout(tm); }
     function onRes(){
       var raw=document.documentElement.getAttribute('data-sd-round-result');
       if(!raw) return;
       var d; try{ d=JSON.parse(raw); }catch(e){ return; }
       if(!d || d.token!==token) return;
-      done();
-      var f=function(n){ return String(Number(n).toFixed(2)).replace('.',','); };
-      if(!d.ok){ res.className='er'; res.textContent='✗ '+(d.err||'не вийшло'); return; }
-      if(d.same){ res.className='ok'; res.textContent='✓ сума вже кругла: '+f(d.total); return; }
-      res.className=d.exact?'ok':'er';
-      res.textContent='✓ '+f(d.from)+' → '+f(d.to)
-        +' ('+(d.row&&d.row.name?d.row.name:'')+': нова ціна '+f(d.row.newPrice)+')'
-        +(d.exact?'':' ⚠ не рівно '+d.target+' — перевір')
-        +' · натисни «Зберегти»';
+      done(); cb(d);
     }
     PAGE.addEventListener('sdRoundPickupResult', onRes);
     document.documentElement.setAttribute('data-sd-round-token', token);
+    document.documentElement.setAttribute('data-sd-round-target', String(target));
     document.documentElement.removeAttribute('data-sd-round-result');
     PAGE.dispatchEvent(new Event('sdRoundPickup'));
-    tm=setTimeout(function(){ done(); res.className='er'; res.textContent='✗ нема відповіді'; },8000);
+    tm=setTimeout(function(){ done(); cb(null); },8000);
+  }
+
+  function applyTarget(v, btn, res){
+    btn.disabled=true; res.className=''; res.textContent='…';
+    invoke(v, function(d){
+      btn.disabled=false;
+      if(!d || !d.ok){ res.className='er'; res.textContent='✗ '+((d&&d.err)||'нема відповіді'); return; }
+      if(d.same){ res.className='ok'; res.textContent='✓ сума вже '+fN(d.total); return; }
+      res.className=d.exact?'ok':'er';
+      res.textContent='✓ '+fN(d.from)+' → '+fN(d.to)
+        +' ('+(d.row&&d.row.name?d.row.name:'')+': нова ціна '+fN(d.row.newPrice)+')'
+        +(d.exact?'':' ⚠ не рівно '+d.target+' — перевір')
+        +' · натисни «Зберегти»';
+    });
+  }
+
+  // крок 1: порахувати суму й показати ВИБІР цілі: [вниз до 10] [вгору до 5] [вгору до 10] [своя]
+  function run(btn,res){
+    btn.disabled=true; res.className=''; res.textContent='…';
+    invoke('calc', function(d){
+      btn.disabled=false;
+      if(!d || !d.ok){ res.className='er'; res.textContent='✗ '+((d&&d.err)||'нема відповіді'); return; }
+      var total=d.total;
+      res.textContent=''; res.className='';
+      var lbl=document.createElement('span'); lbl.textContent='Зараз '+fN(total)+' → ';
+      res.appendChild(lbl);
+      var f10=Math.floor(total/10)*10, c5=Math.ceil(total/5)*5, c10=Math.ceil(total/10)*10;
+      var opts=[];
+      if(f10>0 && f10<total) opts.push(f10);
+      if(c5>total) opts.push(c5);
+      if(c10>total && opts.indexOf(c10)<0) opts.push(c10);
+      if(!opts.length){ res.className='ok'; res.textContent='✓ сума вже кругла: '+fN(total); return; }
+      opts.forEach(function(v){
+        var b=document.createElement('button'); b.type='button'; b.className='lk-round-opt';
+        b.textContent=String(v);
+        b.title=(v<total?'заокруглити ВНИЗ':'заокруглити вгору');
+        b.addEventListener('click',function(e){ e.preventDefault(); e.stopPropagation(); applyTarget(v,btn,res); });
+        res.appendChild(b);
+      });
+      var inp=document.createElement('input'); inp.type='text'; inp.className='lk-round-inp';
+      inp.placeholder='своя'; inp.title='введи власну суму і натисни OK';
+      var ok=document.createElement('button'); ok.type='button'; ok.className='lk-round-opt'; ok.textContent='OK';
+      function go(){
+        var v=parseFloat(String(inp.value).replace(/\s/g,'').replace(',','.'));
+        if(!(v>0)){ inp.style.borderColor='#c0392b'; return; }
+        applyTarget(v,btn,res);
+      }
+      ok.addEventListener('click',function(e){ e.preventDefault(); e.stopPropagation(); go(); });
+      inp.addEventListener('keydown',function(e){ if(e.key==='Enter'){ e.preventDefault(); go(); } });
+      res.appendChild(inp); res.appendChild(ok);
+    });
   }
 
   function sync(){
