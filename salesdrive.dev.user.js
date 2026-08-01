@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.33
+// @version      2.34
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -2190,8 +2190,10 @@ function __sdPageMain() {
   // запитом при збереженні картки товару; CSRF — через Angular CsrfService).
   window.addEventListener("sdArrivalOpt", function () {
     var token = document.documentElement.getAttribute("data-sd-arropt-token") || "";
+    // 'preview' — лише прочитати й порахувати (НІЧОГО не пише); 'apply' — записати
+    var mode = document.documentElement.getAttribute("data-sd-arropt-mode") || "preview";
     function respond(o) {
-      o.token = token;
+      o.token = token; o.mode = mode;
       document.documentElement.setAttribute("data-sd-arropt-result", JSON.stringify(o));
       window.dispatchEvent(new Event("sdArrivalOptResult"));
     }
@@ -2247,14 +2249,24 @@ function __sdPageMain() {
       };
     }
 
+    // ВАЛЮТА накладної: ціна рядка може бути в €/$ — собівартість у грн = ціна × курс
+    // (vm.item.currencyRate; для гривневої накладної курсу нема → 1)
+    var rate = num(vm.item.currencyRate) || 1;
     var items = (vm.item.documentItems || []).map(function (di) {
       return {
-        pid: di.productId, base: num(di.price),
+        pid: di.productId,
+        base: Math.round(num(di.price) * rate * 100) / 100,
         name: String((di.product && (di.product.nameTranslate || di.product.name)) || di.productNewName || "").slice(0, 60),
         sku: String((di.product && di.product.sku) || "")
       };
     }).filter(function (x) { return x.pid; });
     if (!items.length) return respond({ ok: false, err: "у накладній нема товарів" });
+
+    function ptOf(item, id) {
+      var v = null;
+      (item.priceTypes || []).forEach(function (p) { if (Number(p.priceTypeId) === id) v = num(p.price); });
+      return v;   // null = типу ціни в картці немає
+    }
 
     var results = [], idx = 0;
     function progress() {
@@ -2263,7 +2275,7 @@ function __sdPageMain() {
     }
     function step() {
       progress();
-      if (idx >= items.length) return respond({ ok: true, rows: results });
+      if (idx >= items.length) return respond({ ok: true, rate: rate, rows: results });
       var x = items[idx++];
       if (!(x.base > 0)) { results.push({ sku: x.sku, name: x.name, err: "ціна закупки порожня" }); return step(); }
       var t = tiers(x.base);
@@ -2272,25 +2284,36 @@ function __sdPageMain() {
         .then(function (j) {
           var item = j.response && j.response.item;
           if (!item) throw new Error("картка товару недоступна");
-          var o = toPut(item), miss = [];
+          var row = { sku: x.sku || String(x.pid), name: x.name, base: x.base,
+                      o2: ptOf(item, 2), o5: ptOf(item, 5), o7: ptOf(item, 7),
+                      p2: t.p2, p5: t.p5, p7: t.p7 };
+          if (mode !== "apply") { results.push(row); return; }   // preview: тільки читаємо
+
+          var o = toPut(item), created = [];
           [[2, t.p2], [5, t.p5], [7, t.p7]].forEach(function (pair) {
-            var row = null;
-            (o.priceTypes || []).forEach(function (p) { if (Number(p.priceTypeId) === pair[0]) row = p; });
-            if (row) { row.price = money(pair[1]); row.defaultPrice = pair[1]; }
-            else miss.push(pair[0]);
+            var pr = null;
+            (o.priceTypes || []).forEach(function (p) { if (Number(p.priceTypeId) === pair[0]) pr = p; });
+            if (pr) { pr.price = money(pair[1]); pr.defaultPrice = pair[1]; }
+            else {
+              // типу ціни в картці нема — створюємо рядок (без id, як робить сама СРМ для нових)
+              if (!o.priceTypes) o.priceTypes = [];
+              o.priceTypes.push({ productId: o.id, priceTypeId: String(pair[0]), price: money(pair[1]),
+                                  currencyId: 0, discount: "0,00", percentDiscount: 0, defaultPrice: pair[1] });
+              created.push(pair[0]);
+            }
           });
           return fetch("/products/" + o.id + "/?formId=" + o.formId,
             { method: "PUT", credentials: "include", headers: csrfHead(), body: JSON.stringify(o) })
             .then(function (pr) {
               if (pr.status !== 200) throw new Error("HTTP " + pr.status);
-              results.push({ sku: x.sku || String(x.pid), name: x.name, base: x.base,
-                             p2: t.p2, p5: t.p5, p7: t.p7, miss: miss });
+              row.created = created;
+              results.push(row);
             });
         })
         .catch(function (e) {
           results.push({ sku: x.sku || String(x.pid), name: x.name, base: x.base, err: String((e && e.message) || e) });
         })
-        .then(function () { setTimeout(step, 250); });   // не гатимо сервер
+        .then(function () { setTimeout(step, mode === "apply" ? 250 : 120); });   // не гатимо сервер
     }
     step();
   });
@@ -4373,70 +4396,108 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   function onPage(){ return /#\/document\/arrival-product\/update\//.test(location.hash||''); }
   function rowsCount(){ return document.querySelectorAll('tr[ng-repeat^="invoiceItem"]').length; }
 
-  function run(btn){
-    var n=rowsCount();
-    if(!n) return;
-    if(!confirm('Оновити ОПТ-ціни у картках товарів цієї накладної ('+n+' позицій)?\n\n'
-      +'База — собівартість (ціна закупки рядка). Правила:\n'
-      +'• Великий опт = ×1.2 (до цілого)\n'
-      +'• середній опт = ×1.25 (до цілого)\n'
-      +'• майстри = ×1.3 (вгору до кратного 5)\n\n'
-      +'Роздріб / ROZETKA / REFORT не змінюються.')) return;
-    btn.disabled=true; var orig=btn.textContent;
+  // запуск обробника: mode='preview' (лише читає) або 'apply' (пише)
+  function invoke(mode, onDone, onProgTxt){
     var token=String(Date.now())+'_'+Math.random().toString(36).slice(2);
     var tm=null;
     function onProg(){
-      var p=document.documentElement.getAttribute('data-sd-arropt-progress')||'';
-      btn.textContent='💰 Пишу '+p+'…';
+      if(onProgTxt) onProgTxt(document.documentElement.getAttribute('data-sd-arropt-progress')||'');
     }
-    function done(){
+    function cleanup(){
       PAGE.removeEventListener('sdArrivalOptResult', onRes);
       PAGE.removeEventListener('sdArrivalOptProgress', onProg);
-      clearTimeout(tm); btn.disabled=false; btn.textContent=orig;
+      clearTimeout(tm);
     }
     function onRes(){
       var raw=document.documentElement.getAttribute('data-sd-arropt-result');
       if(!raw) return;
       var d; try{ d=JSON.parse(raw); }catch(e){ return; }
       if(!d || d.token!==token) return;
-      done();
-      showRes(d);
+      cleanup(); onDone(d);
     }
     PAGE.addEventListener('sdArrivalOptResult', onRes);
     PAGE.addEventListener('sdArrivalOptProgress', onProg);
     document.documentElement.setAttribute('data-sd-arropt-token', token);
+    document.documentElement.setAttribute('data-sd-arropt-mode', mode);
     document.documentElement.removeAttribute('data-sd-arropt-result');
     PAGE.dispatchEvent(new Event('sdArrivalOpt'));
-    tm=setTimeout(function(){ done(); alert('Опт-ціни: нема відповіді від СРМ. Спробуй ще раз.'); }, 120000);
+    tm=setTimeout(function(){ cleanup(); onDone(null); }, 180000);
   }
 
-  function showRes(d){
+  var fmtN=function(n){ return String(n==null?'—':n).replace('.',','); };
+  function lineTxt(r, applied){
+    if(r.err) return '✗ '+(r.sku||'')+' '+(r.name||'')+' — '+r.err;
+    function part(lab,o,n){
+      if(o==null) return lab+' (новий)→'+n;
+      return lab+' '+fmtN(o)+(Number(o)===Number(n)?' (=)':'→'+n);
+    }
+    return (applied?'✓ ':'• ')+(r.sku||'')+' · соб '+fmtN(r.base)+' · '
+      +part('Вел',r.o2,r.p2)+' · '+part('Сер',r.o5,r.p5)+' · '+part('Май',r.o7,r.p7);
+  }
+
+  function panel(){
     var old=document.getElementById('lk-arropt-res'); if(old) old.remove();
     var box=document.createElement('div'); box.id='lk-arropt-res';
     var x=document.createElement('button'); x.className='x'; x.textContent='✕';
     x.addEventListener('click',function(){ box.remove(); });
     box.appendChild(x);
-    var h=document.createElement('div'); h.className='h';
-    if(!d.ok){ h.textContent='✗ Не вийшло: '+(d.err||''); box.appendChild(h); }
-    else{
-      var okN=0, erN=0;
-      (d.rows||[]).forEach(function(r){ if(r.err) erN++; else okN++; });
-      h.textContent='💰 Опт-ціни оновлено: '+okN+' товарів'+(erN?(' · помилок: '+erN):'')+'. Соб → Вел/Сер/Майстри:';
-      box.appendChild(h);
-      (d.rows||[]).forEach(function(r){
-        var line=document.createElement('div'); line.className='r'+(r.err?' er':'');
-        line.textContent=r.err
-          ? ('✗ '+(r.sku||'')+' '+(r.name||'')+' — '+r.err)
-          : ('✓ '+(r.sku||'')+' · '+String(r.base).replace('.',',')+' → '
-             +r.p2+' / '+r.p5+' / '+r.p7
-             +(r.miss&&r.miss.length?('  ⚠ нема типу ціни: '+r.miss.join(',')):''));
-        box.appendChild(line);
-      });
-    }
-    // над таблицею накладної
     var t=document.querySelector('table.document-invoice-products');
     if(t&&t.parentElement) t.parentElement.insertBefore(box,t);
     else document.body.appendChild(box);
+    return box;
+  }
+
+  // крок 1: ПЕРЕГЛЯД — нічого не пише, показує «стара → нова» по кожному товару
+  function run(btn){
+    if(!rowsCount()) return;
+    btn.disabled=true; var orig=btn.textContent; btn.textContent='💰 Читаю…';
+    invoke('preview', function(d){
+      btn.disabled=false; btn.textContent=orig;
+      var box=panel();
+      var h=document.createElement('div'); h.className='h';
+      if(!d || !d.ok){ h.textContent='✗ Не вийшло: '+((d&&d.err)||'нема відповіді'); box.appendChild(h); return; }
+      var rows=d.rows||[], chg=0;
+      rows.forEach(function(r){
+        if(r.err) return;
+        if(Number(r.o2)!==Number(r.p2)||Number(r.o5)!==Number(r.p5)||Number(r.o7)!==Number(r.p7)) chg++;
+      });
+      h.textContent='👀 ПЕРЕГЛЯД (нічого ще не записано). Курс: '+fmtN(d.rate)
+        +'. Зміниться товарів: '+chg+' із '+rows.length+'. «стара→нова», (=) — без змін:';
+      box.appendChild(h);
+      rows.forEach(function(r){
+        var line=document.createElement('div'); line.className='r'+(r.err?' er':'');
+        line.textContent=lineTxt(r,false);
+        box.appendChild(line);
+      });
+      // кнопки застосувати/закрити
+      var act=document.createElement('div'); act.style.marginTop='8px';
+      var ap=document.createElement('button'); ap.className='lk-arropt-btn'; ap.style.marginLeft='0';
+      ap.textContent='✅ Записати ці ціни у товари';
+      ap.addEventListener('click',function(){
+        if(!confirm('Записати нові опт-ціни у картки товарів ('+rows.length+' позицій)?')) return;
+        ap.disabled=true;
+        invoke('apply', function(d2){
+          var box2=panel();
+          var h2=document.createElement('div'); h2.className='h';
+          if(!d2 || !d2.ok){ h2.textContent='✗ Запис не вдався: '+((d2&&d2.err)||'нема відповіді'); box2.appendChild(h2); return; }
+          var okN=0, erN=0;
+          (d2.rows||[]).forEach(function(r){ if(r.err) erN++; else okN++; });
+          h2.textContent='💰 ЗАПИСАНО: '+okN+' товарів'+(erN?(' · помилок: '+erN):'')+':';
+          box2.appendChild(h2);
+          (d2.rows||[]).forEach(function(r){
+            var line=document.createElement('div'); line.className='r'+(r.err?' er':'');
+            line.textContent=lineTxt(r,true)
+              +(r.created&&r.created.length?('  (+створено типи: '+r.created.join(',')+')'):'');
+            box2.appendChild(line);
+          });
+        }, function(p){ ap.textContent='✅ Пишу '+p+'…'; });
+      });
+      var cl=document.createElement('button'); cl.className='lk-arropt-btn';
+      cl.style.background='#9e9e9e'; cl.textContent='✕ Закрити';
+      cl.addEventListener('click',function(){ box.remove(); });
+      act.appendChild(ap); act.appendChild(cl);
+      box.appendChild(act);
+    }, function(p){ btn.textContent='💰 Читаю '+p+'…'; });
   }
 
   function sync(){
