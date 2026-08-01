@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.36
+// @version      2.37
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -33,6 +33,7 @@
      • lkPayRequired   — ⛔ заборона зберігати заявку без «Способу оплати»
      • lkArrivalCount  — 📦 к-ть позицій та одиниць біля заголовка «Надходження товарів»
      • lkArrivalOpt    — 💰 опт-ціни товарів (×1.2/×1.25/×1.3↑5) із собівартості накладної
+     • lkRoundPickup   — 🔟 заокруглення суми самовивозу вгору до 10 ₴ (99→100, 108→110)
      • lkTtnPrintGuard — 🖨 попередження про повторний друк ТТН Укрпошти
      • lkCashRegister  — 💰 Каса самовивозу
      • lkPickList      — 📋 зведений лист комплектації (сума товарів по заявках статусу)
@@ -2318,6 +2319,74 @@ function __sdPageMain() {
     step();
   });
 
+  // ---------- ЗАОКРУГЛЕННЯ СУМИ САМОВИВОЗУ (вгору до кратного 10) ----------
+  // Кнопка модуля lkRoundPickup шле подію sdRoundPickup: суму заявки доводимо до
+  // круглої (99→100, 108→110) корекцією ціни ОДНОГО рядка: беремо рядок із к-тю 1
+  // (найдорожчий), інакше — де різниця ділиться на к-ть без копійок, інакше —
+  // найдорожчий (можлива похибка в копійки — чесно скажемо).
+  window.addEventListener("sdRoundPickup", function () {
+    var token = document.documentElement.getAttribute("data-sd-round-token") || "";
+    function respond(o) {
+      o.token = token;
+      document.documentElement.setAttribute("data-sd-round-result", JSON.stringify(o));
+      window.dispatchEvent(new Event("sdRoundPickupResult"));
+    }
+    function num(v) { var n = parseFloat(String(v == null ? "" : v).replace(/\s/g, "").replace(",", ".")); return isNaN(n) ? 0 : n; }
+    function r2(n) { return Math.round(n * 100) / 100; }
+    function qty(x) { var q = num(x.count != null ? x.count : (x.amount != null ? x.amount : x.quantity)); return q > 0 ? q : 1; }
+
+    var got = getVMcached();
+    if (!got || !got.vm) return respond({ ok: false, err: "no-viewModel" });
+    var vm = got.vm, scope = got.scope, items = vm.items || [];
+    if (!items.length) return respond({ ok: false, err: "нема товарів" });
+    // самовивіз = спосіб доставки 43 (якщо поле є)
+    try {
+      var sm = vm.order && vm.order.shipping_method;
+      if (sm != null && Number(sm) !== 43) return respond({ ok: false, err: "не самовивіз" });
+    } catch (e) {}
+
+    var total = 0;
+    items.forEach(function (x) { total += num(x.price) * qty(x) - num(x.discount); });
+    total = r2(total);
+    var target = Math.ceil(total / 10) * 10;
+    var delta = r2(target - total);
+    if (!(delta > 0)) return respond({ ok: true, same: true, total: total });
+
+    // вибір рядка для корекції
+    var pick = null, cents = Math.round(delta * 100);
+    function best(f) {
+      var b = null;
+      items.forEach(function (x) { if (f(x) && (!b || num(x.price) > num(b.price))) b = x; });
+      return b;
+    }
+    pick = best(function (x) { return qty(x) === 1; });
+    if (!pick) pick = best(function (x) { return cents % qty(x) === 0; });
+    if (!pick) pick = best(function () { return true; });
+    if (!pick) return respond({ ok: false, err: "нема рядка для корекції" });
+
+    var q = qty(pick), add = r2(delta / q);
+    var newPrice = r2(num(pick.price) + add);
+    try {
+      safeApply(scope, function () {
+        var s = newPrice.toFixed(2).replace(".", ",");
+        pick.defaultPrice = newPrice;
+        pick.price = s;
+        pick.newDefaultPrice = s;
+        try { if (typeof vm.itemChange === "function") vm.itemChange(pick, pick.index); } catch (e) {}
+        try { if (typeof vm.updateItems === "function") vm.updateItems(); } catch (e) {}
+      });
+      var total2 = 0;
+      items.forEach(function (x) { total2 += num(x.price) * qty(x) - num(x.discount); });
+      total2 = r2(total2);
+      respond({ ok: true, from: total, to: total2, target: target,
+                exact: Math.abs(total2 - target) < 0.005,
+                row: { name: String(pick.name || pick.documentName || "").slice(0, 50),
+                       sku: String(pick.sku || ""), newPrice: newPrice } });
+    } catch (e) {
+      respond({ ok: false, err: String(e) });
+    }
+  });
+
   // ---------- МАЛЕНЬКІ КАРТИНКИ ТОВАРІВ У ВИПАДНОМУ СПИСКУ ----------
   function imgToUrl(s) {
     if (typeof s !== "string") return null;
@@ -4590,6 +4659,100 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 })();
 }catch(e){ try{ console.warn("[SD] модуль «lkArrivalOpt» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkArrivalOpt ▲▲▲ */
+
+/* ▼▼▼ МОДУЛЬ-START • lkRoundPickup — 🔟 заокруглення суми самовивозу вгору до 10 ₴ ▼▼▼ */
+/* ===== На картці заявки з доставкою «Самовивіз»: кнопка під таблицею товарів доводить
+   суму до круглої (99→100, 108→110) корекцією ціни одного рядка. Core: sdRoundPickup. ===== */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
+(function lkRoundPickup(){
+  'use strict';
+  var PAGE=(typeof unsafeWindow!=='undefined'&&unsafeWindow)||window;
+
+  var css=''
+    +'#lk-round-btn{display:inline-block;margin:6px 0 2px;padding:6px 16px;border:none;border-radius:7px;'
+    +'  background:#1565C0;color:#fff;font:700 13px/1.5 Arial,sans-serif;cursor:pointer;white-space:nowrap}'
+    +'#lk-round-btn:hover{background:#0D47A1}'
+    +'#lk-round-btn[disabled]{background:#9e9e9e;cursor:default}'
+    +'#lk-round-res{display:inline-block;margin-left:10px;font:700 13px/1.5 Arial,sans-serif}'
+    +'#lk-round-res.ok{color:#1B5E20}'
+    +'#lk-round-res.er{color:#B71C1C}';
+  var st=document.createElement('style'); st.textContent=css;
+  (document.head||document.documentElement).appendChild(st);
+
+  function onOrderPage(){ return /#\/order\/(update|create)/.test(location.hash||''); }
+
+  // самовивіз? — селект способу доставки (число 43) або текст у select2-контейнері
+  function isPickup(){
+    var sel=document.getElementById('shipping_method-wk');
+    if(sel && 'value' in sel && /\d/.test(String(sel.value||''))) return /(^|:)43$/.test(String(sel.value))||/\b43\b/.test(String(sel.value));
+    var c=document.getElementById('select2-shipping_method-wk-container')
+        || document.querySelector('[id^="select2-shipping_method"][id$="-container"]');
+    if(c) return /самовив/i.test(c.getAttribute('title')||c.textContent||'');
+    return false;
+  }
+
+  // місце: одразу ПІСЛЯ таблиці товарів (якір — кнопка «+ Додати»)
+  function findSpot(){
+    var btn=null, all=document.querySelectorAll('[ng-click]');
+    for(var i=0;i<all.length;i++){
+      if((all[i].getAttribute('ng-click')||'').replace(/\s+/g,'')==='viewModel.addOption()'){ btn=all[i]; break; }
+    }
+    if(!btn) btn=document.getElementById('addCompleteProduct');
+    if(!btn) return null;
+    var tbl=btn.closest('table');
+    return (tbl && tbl.parentElement) ? tbl : null;
+  }
+
+  function run(btn,res){
+    btn.disabled=true; res.textContent='…'; res.className='';
+    var token=String(Date.now())+'_'+Math.random().toString(36).slice(2);
+    var tm=null;
+    function done(){ PAGE.removeEventListener('sdRoundPickupResult', onRes); clearTimeout(tm); btn.disabled=false; }
+    function onRes(){
+      var raw=document.documentElement.getAttribute('data-sd-round-result');
+      if(!raw) return;
+      var d; try{ d=JSON.parse(raw); }catch(e){ return; }
+      if(!d || d.token!==token) return;
+      done();
+      var f=function(n){ return String(Number(n).toFixed(2)).replace('.',','); };
+      if(!d.ok){ res.className='er'; res.textContent='✗ '+(d.err||'не вийшло'); return; }
+      if(d.same){ res.className='ok'; res.textContent='✓ сума вже кругла: '+f(d.total); return; }
+      res.className=d.exact?'ok':'er';
+      res.textContent='✓ '+f(d.from)+' → '+f(d.to)
+        +' ('+(d.row&&d.row.name?d.row.name:'')+': нова ціна '+f(d.row.newPrice)+')'
+        +(d.exact?'':' ⚠ не рівно '+d.target+' — перевір')
+        +' · натисни «Зберегти»';
+    }
+    PAGE.addEventListener('sdRoundPickupResult', onRes);
+    document.documentElement.setAttribute('data-sd-round-token', token);
+    document.documentElement.removeAttribute('data-sd-round-result');
+    PAGE.dispatchEvent(new Event('sdRoundPickup'));
+    tm=setTimeout(function(){ done(); res.className='er'; res.textContent='✗ нема відповіді'; },8000);
+  }
+
+  function sync(){
+    var btn=document.getElementById('lk-round-btn');
+    if(!onOrderPage() || !isPickup()){ if(btn){ btn.remove(); var r0=document.getElementById('lk-round-res'); if(r0) r0.remove(); } return; }
+    var tbl=findSpot();
+    if(!tbl){ if(btn) btn.remove(); return; }
+    if(btn) return;
+    btn=document.createElement('button'); btn.type='button'; btn.id='lk-round-btn';
+    btn.textContent='🔟 Заокруглити суму (вгору до 10 ₴)';
+    btn.title='99 → 100, 108 → 110: корекція ціни одного рядка, потім «Зберегти»';
+    var res=document.createElement('span'); res.id='lk-round-res';
+    btn.addEventListener('click',function(e){ e.preventDefault(); e.stopPropagation(); run(btn,res); });
+    tbl.insertAdjacentElement('afterend', btn);
+    btn.insertAdjacentElement('afterend', res);
+  }
+
+  var t=null;
+  function syncSoon(){ clearTimeout(t); t=setTimeout(sync,400); }
+  sync();
+  window.addEventListener('lkdom', syncSoon);
+  window.addEventListener('hashchange', syncSoon);
+})();
+}catch(e){ try{ console.warn("[SD] модуль «lkRoundPickup» не запустився:", e); }catch(_){} }
+/* ▲▲▲ МОДУЛЬ-END • lkRoundPickup ▲▲▲ */
 
 /* ▼▼▼ МОДУЛЬ-START • lkTtnPrintGuard — 🖨 попередження про ПОВТОРНИЙ друк ТТН Укрпошти ▼▼▼ */
 /* ===== СРМ має серверний прапорець isPrinted (спільний для всіх менеджерів) — якщо ТТН
