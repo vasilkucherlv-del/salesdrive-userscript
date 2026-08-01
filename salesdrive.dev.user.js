@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.35
+// @version      2.36
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4392,15 +4392,15 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     +'#lk-arropt-res .er{color:#B71C1C;font-weight:700;font-size:12px}'
     +'#lk-arropt-res .x{position:absolute;top:5px;right:9px;border:none;background:none;cursor:pointer;'
     +'  font-size:17px;color:#00695c}'
-    // колонка «Опт» у таблиці накладної
-    +'td.lk-arropt-td{font:12px/1.4 ui-monospace,Menlo,Consolas,monospace;color:#0f3d39;white-space:nowrap;'
-    +'  padding:4px 9px;border-left:2px solid #00897B;background:#f2fbfa;vertical-align:middle}'
-    +'td.lk-arropt-td .nw{font-weight:800;color:#00695c;font-size:12.5px}'
-    +'td.lk-arropt-td .od{color:#8a9a97;font-size:10.5px}'
-    +'td.lk-arropt-td.er{color:#B71C1C;font-weight:700;font-size:11px;white-space:normal}'
+    // колонка «Опт» у таблиці накладної — великий читабельний шрифт
+    +'td.lk-arropt-td{font:14px/1.5 ui-monospace,Menlo,Consolas,monospace;color:#0f3d39;white-space:nowrap;'
+    +'  padding:8px 16px;border-left:3px solid #00897B;background:#f2fbfa;vertical-align:middle}'
+    +'td.lk-arropt-td .nw{font-weight:800;color:#00695c;font-size:17px;letter-spacing:.3px}'
+    +'td.lk-arropt-td .od{color:#7d8f8c;font-size:12.5px;margin-top:2px}'
+    +'td.lk-arropt-td.er{color:#B71C1C;font-weight:700;font-size:13px;white-space:normal}'
     +'td.lk-arropt-td.blank{background:transparent;border-left:none}'
-    +'th.lk-arropt-td{font:700 11px/1.4 Arial,sans-serif;background:#e3f4f2;color:#00695c;'
-    +'  padding:4px 9px;border-left:2px solid #00897B;white-space:nowrap}';
+    +'th.lk-arropt-td{font:700 13px/1.5 Arial,sans-serif;background:#e3f4f2;color:#00695c;'
+    +'  padding:8px 16px;border-left:3px solid #00897B;white-space:nowrap}';
   var st=document.createElement('style'); st.textContent=css;
   (document.head||document.documentElement).appendChild(st);
 
