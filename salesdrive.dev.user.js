@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.46
+// @version      2.47
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -2873,9 +2873,26 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     });
   }
 
+  // кеш віддаємо миттєво, але якщо він старший за SOFT_MS — тихо оновлюємо у фоні
+  // (інакше нові комплекти не видно до 6 год: саме через це бракувало позначок)
+  const SOFT_MS = 30 * 60 * 1000;
+  function refreshKitsBg() {
+    if (loading) return;
+    loading = true;
+    fetchKits()
+      .then(kits => {
+        comp2kits = build(kits);
+        try { GM_setValue('lknb_cache2', JSON.stringify({ ts: Date.now(), kits })); } catch (_) {}
+        try { scan(); } catch (_) {}
+      })
+      .catch(() => {})
+      .then(() => { loading = false; });
+  }
   async function ensureData() {
     if (comp2kits || loading) return;
-    try { const c = GM_getValue('lknb_cache2', null); if (c) { const o = JSON.parse(c); if (Date.now() - o.ts < TTL_MS && o.kits) { comp2kits = build(o.kits); return; } } } catch (_) {}
+    let ts = 0;
+    try { const c = GM_getValue('lknb_cache2', null); if (c) { const o = JSON.parse(c); if (Date.now() - o.ts < TTL_MS && o.kits) { comp2kits = build(o.kits); ts = o.ts; } } } catch (_) {}
+    if (comp2kits) { if (Date.now() - ts > SOFT_MS) refreshKitsBg(); return; }
     loading = true;
     try { const kits = await fetchKits(); comp2kits = build(kits); try { GM_setValue('lknb_cache2', JSON.stringify({ ts: Date.now(), kits })); } catch (_) {} }
     catch (e) { /* мовчки — спробуємо при наступному скані */ }
@@ -3569,9 +3586,25 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     });
   }
 
+  // як і в lkNaboryInline: кеш миттєво, старший за SOFT_MS — фонове оновлення
+  const SOFT_MS = 30 * 60 * 1000;
+  function refreshKitsBg() {
+    if (loading) return;
+    loading = true;
+    fetchKits()
+      .then(kits => {
+        id2kits = build(kits);
+        try { GM_setValue(CACHE_KEY, JSON.stringify({ ts: Date.now(), kits })); } catch (_) {}
+        try { process(); } catch (_) {}
+      })
+      .catch(() => {})
+      .then(() => { loading = false; });
+  }
   async function ensureData() {
     if (id2kits || loading) return;
-    try { const c = GM_getValue(CACHE_KEY, null); if (c) { const o = JSON.parse(c); if (Date.now() - o.ts < TTL_MS && o.kits) { id2kits = build(o.kits); return; } } } catch (_) {}
+    let ts = 0;
+    try { const c = GM_getValue(CACHE_KEY, null); if (c) { const o = JSON.parse(c); if (Date.now() - o.ts < TTL_MS && o.kits) { id2kits = build(o.kits); ts = o.ts; } } } catch (_) {}
+    if (id2kits) { if (Date.now() - ts > SOFT_MS) refreshKitsBg(); return; }
     loading = true;
     try { const kits = await fetchKits(); id2kits = build(kits); try { GM_setValue(CACHE_KEY, JSON.stringify({ ts: Date.now(), kits })); } catch (_) {} }
     catch (e) { /* мовчки — спробуємо при наступному скані */ }
@@ -5010,7 +5043,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   function loadKits(){
     if(comp2kits) return Promise.resolve(comp2kits);
     var c=gGet('lknb_cache2');
-    if(c && c.kits && Date.now()-c.ts<KITS_TTL){ comp2kits=buildComp(c.kits); return Promise.resolve(comp2kits); }
+    // свіжий кеш (до 30 хв) — беремо одразу; старіший — перечитуємо, щоб нові набори враховувались
+    if(c && c.kits && Date.now()-c.ts<30*60*1000){ comp2kits=buildComp(c.kits); return Promise.resolve(comp2kits); }
+    if(c && c.kits && Date.now()-c.ts<KITS_TTL) comp2kits=buildComp(c.kits);   // запас, якщо мережа впаде
     return new Promise(function(resolve){
       function done(txt){
         try{ var d=JSON.parse(txt); if(d.ok&&d.kits){ gSet('lknb_cache2',{ts:Date.now(),kits:d.kits}); comp2kits=buildComp(d.kits); } }catch(e){}
