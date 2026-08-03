@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.42
+// @version      2.43
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4072,14 +4072,26 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   var LS='lk_chatfail_v1';
   function loadAll(){ try{ return JSON.parse(localStorage.getItem(LS))||{}; }catch(e){ return {}; } }
   function saveAll(o){ try{ localStorage.setItem(LS, JSON.stringify(o)); }catch(e){} }
+  // номер заявки; результат кешується на hash (важкий фолбек по innerText —
+  // не частіше ніж раз на 3с, поки номер не знайдено)
+  var _ocHash=null,_ocNum=null,_ocT=0;
   function curOrderNum(){
+    var h=location.hash||'';
+    if(_ocHash===h && (_ocNum!=null || Date.now()-_ocT<3000)) return _ocNum;
+    var num=null;
     var m=(document.title||'').match(/#\s*(\d{4,})/);
-    if(m) return m[1];
-    var el=document.querySelector('h1,h2,.page-title,.page-header');
-    m=el && el.textContent.match(/Заявка\s*#\s*(\d+)/);
-    if(m) return m[1];
-    try{ m=(document.body.innerText||'').match(/Заявка\s*#\s*(\d+)/); }catch(e){ m=null; }
-    return m?m[1]:null;
+    if(m) num=m[1];
+    if(!num){
+      var el=document.querySelector('h1,h2,.page-title,.page-header');
+      m=el && el.textContent.match(/Заявка\s*#\s*(\d+)/);
+      if(m) num=m[1];
+    }
+    if(!num){
+      try{ m=(document.body.innerText||'').match(/Заявка\s*#\s*(\d+)/); }catch(e){ m=null; }
+      if(m) num=m[1];
+    }
+    _ocHash=h; _ocNum=num; _ocT=Date.now();
+    return num;
   }
   function sigOf(rows){
     var last=rows[rows.length-1], t=last.querySelector('span[title]');
@@ -4931,18 +4943,27 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     var s=state[id];
     var old=document.querySelector('.lk-ttnp');
     if(!s || !s.ready || !s.ukr || !s.ttn){ if(old) old.remove(); return; }
-    // елемент із номером ТТН (посилання з 13 цифрами)
-    var host=null, all=document.querySelectorAll('a,span,div');
-    for(var i=0;i<all.length;i++){
-      var el=all[i];
-      if(el.children.length) continue;
-      if(String(el.textContent||'').trim()===s.ttn){ host=el; break; }
-    }
-    if(!host){ if(old) old.remove(); return; }
     var rec=localRec(s.ttn);
     var was=s.srvPrinted || !!rec;
+    // якщо бейдж уже намальовано для цього стану — нічого не робимо (без сканувань DOM)
+    var sig=s.ttn+'|'+(was?1:0)+'|'+((rec&&rec.n)||0);
+    if(old && old.getAttribute('data-sig')===sig) return;
+    // елемент із номером ТТН: це посилання <a> (перевірено), тож спершу лише <a>;
+    // повний перебір span/div — тільки якщо раптом не знайшлося
+    function findByText(sel){
+      var all=document.querySelectorAll(sel);
+      for(var i=0;i<all.length;i++){
+        var el=all[i];
+        if(el.children.length) continue;
+        if(String(el.textContent||'').trim()===s.ttn) return el;
+      }
+      return null;
+    }
+    var host=findByText('a')||findByText('span,div');
+    if(!host){ if(old) old.remove(); return; }
     var b=old;
     if(!b){ b=document.createElement('span'); b.className='lk-ttnp'; }
+    b.setAttribute('data-sig', sig);
     b.className='lk-ttnp '+(was?'was':'new');
     if(was){
       var n=rec&&rec.n?rec.n:null;
@@ -6143,6 +6164,16 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   }
 
   function sync(){
+    // швидкий шлях: пункти вже в DOM — лише оновити видимість, без XPath-пошуку меню
+    var first=document.getElementById(ITEMS[0].id);
+    if(first && first.parentElement){
+      ITEMS.forEach(function(it){
+        var el=document.getElementById(it.id);
+        if(el) el.style.display = document.getElementById(it.btn) ? '' : 'none';
+      });
+      document.documentElement.classList.add('lk-side-on');
+      return;
+    }
     var entry=findMenuEntry();
     if(!entry){ document.documentElement.classList.remove('lk-side-on'); return; }
     var box=entry.parentElement;
