@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      2.30
+// @version      2.42
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -32,6 +32,9 @@
      • lkChatFailWarn  — ⛔ чат: повідомлення НЕ доставлено (нема Viber/Telegram на номері)
      • lkPayRequired   — ⛔ заборона зберігати заявку без «Способу оплати»
      • lkArrivalCount  — 📦 к-ть позицій та одиниць біля заголовка «Надходження товарів»
+     • lkArrivalOpt    — 💰 опт-ціни товарів (×1.2/×1.25/×1.3↑5) із собівартості накладної
+     • lkRoundPickup   — 🔟 заокруглення суми самовивозу вгору до 10 ₴ (99→100, 108→110)
+     • lkTtnPrintGuard — 🖨 попередження про повторний друк ТТН Укрпошти
      • lkCashRegister  — 💰 Каса самовивозу
      • lkPickList      — 📋 зведений лист комплектації (сума товарів по заявках статусу)
      • lkUkrPromList   — 📮 лист «Пром-оплата + Укрпошта» (відправник/отримувач/індекс/ТТН, друк)
@@ -2179,6 +2182,229 @@ function __sdPageMain() {
     }
   });
 
+  // ---------- ОПТ-ЦІНИ З ПРИХІДНОЇ НАКЛАДНОЇ ----------
+  // Кнопка модуля lkArrivalOpt шле подію sdArrivalOpt: для кожного рядка накладної
+  // беремо собівартість (ціну закупки рядка) і пишемо в картку товару ціни
+  // Великий опт (pt2) = ×1.2 (до цілого), середній опт (pt5) = ×1.25 (до цілого),
+  // майстри (pt7) = ×1.3 (вгору до кратного 5) — правила Василя.
+  // Запис — тим самим PUT /products/{id}/, що й сама СРМ (звірено з реальним
+  // запитом при збереженні картки товару; CSRF — через Angular CsrfService).
+  window.addEventListener("sdArrivalOpt", function () {
+    var token = document.documentElement.getAttribute("data-sd-arropt-token") || "";
+    // 'preview' — лише прочитати й порахувати (НІЧОГО не пише); 'apply' — записати
+    var mode = document.documentElement.getAttribute("data-sd-arropt-mode") || "preview";
+    function respond(o) {
+      o.token = token; o.mode = mode;
+      document.documentElement.setAttribute("data-sd-arropt-result", JSON.stringify(o));
+      window.dispatchEvent(new Event("sdArrivalOptResult"));
+    }
+    function num(v) { var n = parseFloat(String(v == null ? "" : v).replace(/\s/g, "").replace(",", ".")); return isNaN(n) ? 0 : n; }
+    function money(n) { n = Math.round(Number(n) * 100) / 100; return n.toFixed(2).replace(".", ","); }
+
+    // viewModel прихідної накладної
+    var vm = null;
+    try {
+      var els = document.querySelectorAll("[ng-click]");
+      for (var i = 0; i < els.length; i++) {
+        try {
+          var s = window.angular.element(els[i]).scope();
+          while (s && !s.viewModel) s = s.$parent;
+          if (s && s.viewModel && s.viewModel.item && s.viewModel.item.documentItems) { vm = s.viewModel; break; }
+        } catch (e) {}
+      }
+    } catch (e) {}
+    if (!vm) return respond({ ok: false, err: "накладну не знайдено (viewModel)" });
+
+    function csrfHead() {
+      var host = document.querySelector("[ng-app],[data-ng-app]") || document.querySelector(".ng-scope") || document.body;
+      var inj = window.angular.element(host).injector() || window.angular.element(document.documentElement).injector();
+      var cs = inj.get("CsrfService");
+      var H = { "Content-Type": "application/json;charset=utf-8", "Accept": "application/json" };
+      H[cs.getHeaderKey()] = cs.getCsrfToken();
+      return H;
+    }
+
+    // GET-item → форма, яку СРМ реально шле у PUT (звірено з перехопленим запитом)
+    function toPut(it) {
+      var o = JSON.parse(JSON.stringify(it));
+      delete o.restCount;
+      o.balances = Array.isArray(o.balances) ? o.balances : [];
+      if (o.price == null) o.price = "";
+      if (o.volume == null) o.volume = "";
+      else if (typeof o.volume === "number") o.volume = String(o.volume);
+      if (typeof o.discount === "number") o.discount = money(o.discount);
+      (o.priceTypes || []).forEach(function (p) {
+        p.priceTypeId = String(p.priceTypeId);
+        p.price = money(p.price);
+        if (typeof p.discount === "number") p.discount = money(p.discount);
+      });
+      return o;
+    }
+
+    // правила опту (lartek): 1.2 / 1.25 / 1.3-вгору-до-5
+    function tiers(b) {
+      return {
+        p2: Math.round(b * 1.2),
+        p5: Math.round(b * 1.25),
+        p7: Math.ceil((b * 1.3 - 1) / 5) * 5
+      };
+    }
+
+    // ВАЛЮТА накладної: ціна рядка може бути в €/$ — собівартість у грн = ціна × курс
+    // (vm.item.currencyRate; для гривневої накладної курсу нема → 1)
+    var rate = num(vm.item.currencyRate) || 1;
+    var items = (vm.item.documentItems || []).map(function (di) {
+      return {
+        pid: di.productId,
+        base: Math.round(num(di.price) * rate * 100) / 100,
+        name: String((di.product && (di.product.nameTranslate || di.product.name)) || di.productNewName || "").slice(0, 60),
+        sku: String((di.product && di.product.sku) || "")
+      };
+    }).filter(function (x) { return x.pid; });
+    if (!items.length) return respond({ ok: false, err: "у накладній нема товарів" });
+
+    function ptOf(item, id) {
+      var v = null;
+      (item.priceTypes || []).forEach(function (p) { if (Number(p.priceTypeId) === id) v = num(p.price); });
+      return v;   // null = типу ціни в картці немає
+    }
+
+    var results = [], idx = 0;
+    function progress() {
+      document.documentElement.setAttribute("data-sd-arropt-progress", idx + "/" + items.length);
+      window.dispatchEvent(new Event("sdArrivalOptProgress"));
+    }
+    function step() {
+      progress();
+      if (idx >= items.length) return respond({ ok: true, rate: rate, rows: results });
+      var x = items[idx++];
+      if (!(x.base > 0)) { results.push({ sku: x.sku, name: x.name, err: "ціна закупки порожня" }); return step(); }
+      var t = tiers(x.base);
+      fetch("/products/" + x.pid + "/?formId=1", { credentials: "include", headers: { "Accept": "application/json" } })
+        .then(function (r) { return r.json(); })
+        .then(function (j) {
+          var item = j.response && j.response.item;
+          if (!item) throw new Error("картка товару недоступна");
+          var row = { sku: x.sku || String(x.pid), name: x.name, base: x.base,
+                      o2: ptOf(item, 2), o5: ptOf(item, 5), o7: ptOf(item, 7),
+                      p2: t.p2, p5: t.p5, p7: t.p7 };
+          if (mode !== "apply") { results.push(row); return; }   // preview: тільки читаємо
+
+          var o = toPut(item), created = [];
+          [[2, t.p2], [5, t.p5], [7, t.p7]].forEach(function (pair) {
+            var pr = null;
+            (o.priceTypes || []).forEach(function (p) { if (Number(p.priceTypeId) === pair[0]) pr = p; });
+            if (pr) { pr.price = money(pair[1]); pr.defaultPrice = pair[1]; }
+            else {
+              // типу ціни в картці нема — створюємо рядок (без id, як робить сама СРМ для нових)
+              if (!o.priceTypes) o.priceTypes = [];
+              o.priceTypes.push({ productId: o.id, priceTypeId: String(pair[0]), price: money(pair[1]),
+                                  currencyId: 0, discount: "0,00", percentDiscount: 0, defaultPrice: pair[1] });
+              created.push(pair[0]);
+            }
+          });
+          return fetch("/products/" + o.id + "/?formId=" + o.formId,
+            { method: "PUT", credentials: "include", headers: csrfHead(), body: JSON.stringify(o) })
+            .then(function (pr) {
+              if (pr.status !== 200) throw new Error("HTTP " + pr.status);
+              row.created = created;
+              results.push(row);
+            });
+        })
+        .catch(function (e) {
+          results.push({ sku: x.sku || String(x.pid), name: x.name, base: x.base, err: String((e && e.message) || e) });
+        })
+        .then(function () { setTimeout(step, mode === "apply" ? 250 : 120); });   // не гатимо сервер
+    }
+    step();
+  });
+
+  // ---------- ЗАОКРУГЛЕННЯ СУМИ САМОВИВОЗУ (вгору до кратного 10) ----------
+  // Кнопка модуля lkRoundPickup шле подію sdRoundPickup: суму заявки доводимо до
+  // круглої (99→100, 108→110) корекцією ціни ОДНОГО рядка: беремо рядок із к-тю 1
+  // (найдорожчий), інакше — де різниця ділиться на к-ть без копійок, інакше —
+  // найдорожчий (можлива похибка в копійки — чесно скажемо).
+  window.addEventListener("sdRoundPickup", function () {
+    var token = document.documentElement.getAttribute("data-sd-round-token") || "";
+    function respond(o) {
+      o.token = token;
+      document.documentElement.setAttribute("data-sd-round-result", JSON.stringify(o));
+      window.dispatchEvent(new Event("sdRoundPickupResult"));
+    }
+    function num(v) { var n = parseFloat(String(v == null ? "" : v).replace(/\s/g, "").replace(",", ".")); return isNaN(n) ? 0 : n; }
+    function r2(n) { return Math.round(n * 100) / 100; }
+    function qty(x) { var q = num(x.count != null ? x.count : (x.amount != null ? x.amount : x.quantity)); return q > 0 ? q : 1; }
+
+    var got = getVMcached();
+    if (!got || !got.vm) return respond({ ok: false, err: "no-viewModel" });
+    var vm = got.vm, scope = got.scope, items = vm.items || [];
+    if (!items.length) return respond({ ok: false, err: "нема товарів" });
+    // самовивіз = спосіб доставки 43 (якщо поле є)
+    try {
+      var sm = vm.order && vm.order.shipping_method;
+      if (sm != null && Number(sm) !== 43) return respond({ ok: false, err: "не самовивіз" });
+    } catch (e) {}
+
+    var total = 0;
+    items.forEach(function (x) { total += num(x.price) * qty(x) - num(x.discount); });
+    total = r2(total);
+
+    // режим 'calc' — лише порахувати суму (для меню вибору цілі), нічого не міняти
+    var tgtAttr = document.documentElement.getAttribute("data-sd-round-target") || "";
+    if (tgtAttr === "calc") return respond({ ok: true, calc: true, total: total });
+
+    // ціль: задана користувачем або (за замовчуванням) вгору до кратного 10
+    var target = num(tgtAttr);
+    if (!(target > 0)) target = Math.ceil(total / 10) * 10;
+    var delta = r2(target - total);   // може бути й відʼємною (заокруглення вниз)
+    if (delta === 0) return respond({ ok: true, same: true, total: total });
+
+    // вибір рядка для корекції
+    var pick = null, cents = Math.round(delta * 100);
+    function best(f) {
+      var b = null;
+      items.forEach(function (x) { if (f(x) && (!b || num(x.price) > num(b.price))) b = x; });
+      return b;
+    }
+    pick = best(function (x) { return qty(x) === 1; });
+    if (!pick) pick = best(function (x) { return cents % qty(x) === 0; });
+    if (!pick) pick = best(function () { return true; });
+    if (!pick) return respond({ ok: false, err: "нема рядка для корекції" });
+
+    var q = qty(pick), add = r2(delta / q);
+    var newPrice = r2(num(pick.price) + add);
+    if (!(newPrice > 0)) return respond({ ok: false, err: "нова ціна рядка ≤ 0 — обери більшу ціль" });
+    try {
+      // ШТАТНИЙ шлях зміни ціни рядка (інакше «Зберегти» не фіксує зміну!):
+      // editComment(рядок) → item.newDefaultPrice → updateComment(рядок)
+      var fakeEvt = { preventDefault: function () {}, stopPropagation: function () {} };
+      safeApply(scope, function () {
+        var s = newPrice.toFixed(2).replace(".", ",");
+        if (typeof vm.editComment === "function" && typeof vm.updateComment === "function") {
+          vm.editComment(pick, pick.index, fakeEvt);
+          pick.newDefaultPrice = s;
+          vm.updateComment(pick, pick.index);
+        } else {
+          // фолбек — старий прямий спосіб
+          pick.defaultPrice = newPrice;
+          pick.price = s;
+          pick.newDefaultPrice = s;
+          try { if (typeof vm.itemChange === "function") vm.itemChange(pick, pick.index); } catch (e) {}
+          try { if (typeof vm.updateItems === "function") vm.updateItems(); } catch (e) {}
+        }
+      });
+      var total2 = 0;
+      items.forEach(function (x) { total2 += num(x.price) * qty(x) - num(x.discount); });
+      total2 = r2(total2);
+      respond({ ok: true, from: total, to: total2, target: target,
+                exact: Math.abs(total2 - target) < 0.005,
+                row: { name: String(pick.name || pick.documentName || "").slice(0, 50),
+                       sku: String(pick.sku || ""), newPrice: newPrice } });
+    } catch (e) {
+      respond({ ok: false, err: String(e) });
+    }
+  });
+
   // ---------- МАЛЕНЬКІ КАРТИНКИ ТОВАРІВ У ВИПАДНОМУ СПИСКУ ----------
   function imgToUrl(s) {
     if (typeof s !== "string") return null;
@@ -3798,26 +4024,33 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     +'  border-radius:8px;padding:9px 11px;box-shadow:0 4px 14px rgba(0,0,0,.25);'
     +'  font:13px/1.45 Arial,sans-serif;color:#7a1f1f}'
     +'.sd-cf-toast .t{font-weight:800;color:#c0392b;margin-bottom:2px}'
-    +'.sd-cf-toast .a{margin-top:6px;display:flex;gap:8px;align-items:center}'
-    +'.sd-cf-toast .a a{display:inline-block;background:#c0392b;color:#fff;font-weight:700;'
-    +'  padding:4px 12px;border-radius:5px;text-decoration:none;font-size:12px}'
+    // кнопки великі — щоб легко влучити мишею
+    +'.sd-cf-toast .a{margin-top:10px;display:flex;gap:10px;align-items:stretch}'
+    +'.sd-cf-toast .a a{flex:1 1 auto;display:flex;align-items:center;justify-content:center;'
+    +'  min-height:42px;background:#c0392b;color:#fff;font-weight:800;'
+    +'  padding:10px 16px;border-radius:7px;text-decoration:none;font-size:14px;text-align:center}'
     +'.sd-cf-toast .a a:hover{background:#a93226}'
-    +'.sd-cf-toast .a button{border:1px solid #c0392b;background:#fff;color:#c0392b;font-weight:700;'
-    +'  padding:3px 12px;border-radius:5px;cursor:pointer;font-size:12px}'
+    +'.sd-cf-toast .a button{flex:1 1 auto;min-height:42px;border:2px solid #c0392b;background:#fff;'
+    +'  color:#c0392b;font-weight:800;padding:10px 16px;border-radius:7px;cursor:pointer;font-size:14px}'
     +'.sd-cf-toast .a button:hover{background:#fde9e7}'
+    +'.sd-cf-toast .a button:active{transform:translateY(1px)}'
     // зведення ЗВЕРХУ на сторінці списку заявок (будь-який фільтр менеджера)
     +'#sd-cf-topbar{position:fixed;top:56px;left:50%;transform:translateX(-50%);z-index:2147483599;'
     +'  background:#fdf3f3;border:1px solid #e0b4b4;border-left:5px solid #c0392b;border-radius:8px;'
     +'  padding:8px 12px;box-shadow:0 4px 14px rgba(0,0,0,.28);font:13px/1.5 Arial,sans-serif;'
     +'  color:#7a1f1f;max-width:min(920px,94vw);display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center}'
     +'#sd-cf-topbar .lb{font-weight:800;color:#c0392b}'
-    +'#sd-cf-topbar .chip{display:inline-flex;align-items:center;gap:4px;background:#fff;'
-    +'  border:1px solid #e0b4b4;border-radius:14px;padding:2px 4px 2px 10px}'
-    +'#sd-cf-topbar .chip a{color:#c0392b;font-weight:800;text-decoration:none}'
-    +'#sd-cf-topbar .chip a:hover{text-decoration:underline}'
-    +'#sd-cf-topbar .chip button{border:none;background:transparent;color:#c0392b;font-weight:700;'
-    +'  cursor:pointer;padding:0 6px;font-size:13px}'
-    +'#sd-cf-topbar .chip button:hover{color:#7a1f1f}';
+    +'#sd-cf-topbar .chip{display:inline-flex;align-items:stretch;gap:0;background:#fff;'
+    +'  border:1px solid #e0b4b4;border-radius:8px;overflow:hidden}'
+    +'#sd-cf-topbar .chip a{display:flex;align-items:center;color:#c0392b;font-weight:800;'
+    +'  text-decoration:none;padding:9px 14px;font-size:14px}'
+    +'#sd-cf-topbar .chip a:hover{background:#fdf3f3;text-decoration:underline}'
+    // «OK» — велика кнопка з підписом, а не крихітний хрестик
+    +'#sd-cf-topbar .chip button{border:none;border-left:1px solid #e0b4b4;background:#f7eceb;'
+    +'  color:#c0392b;font-weight:800;cursor:pointer;padding:9px 14px;font-size:13px;'
+    +'  min-width:74px;white-space:nowrap}'
+    +'#sd-cf-topbar .chip button:hover{background:#c0392b;color:#fff}'
+    +'#sd-cf-topbar .chip button:active{transform:translateY(1px)}';
   var st=document.createElement('style'); st.textContent=css;
   (document.head||document.documentElement).appendChild(st);
 
@@ -3949,8 +4182,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
         var a=document.createElement('a'); a.href=r.url||'#';
         a.textContent='#'+r.num;
         a.title=(r.reason||'повідомлення не доставлено')+' — відкрити заявку';
-        var x=document.createElement('button'); x.type='button'; x.textContent='✕';
-        x.title='OK, зрозумів — прибрати';
+        var x=document.createElement('button'); x.type='button'; x.textContent='✓ OK';
+        x.title='OK, зрозумів — прибрати з переліку';
         x.addEventListener('click',function(e){ e.preventDefault(); e.stopPropagation(); ackKey(k); });
         c.appendChild(a); c.appendChild(x); bar.appendChild(c);
       });
@@ -4222,6 +4455,553 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 })();
 }catch(e){ try{ console.warn("[SD] модуль «lkArrivalCount» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkArrivalCount ▲▲▲ */
+
+/* ▼▼▼ МОДУЛЬ-START • lkArrivalOpt — 💰 опт-ціни товарів із собівартості накладної ▼▼▼ */
+/* ===== Кнопка на «Надходженні товарів»: рахує з собівартості (ціна закупки × курс
+   валюти накладної) ціни Великий опт (×1.2), середній опт (×1.25), майстри (×1.3
+   вгору до 5) і показує їх КОЛОНКОЮ прямо біля кожного товару (нові жирним, «було»
+   дрібним). Запис у картки товарів — лише після «✅ Записати». Core: sdArrivalOpt. ===== */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
+(function lkArrivalOpt(){
+  'use strict';
+  var PAGE=(typeof unsafeWindow!=='undefined'&&unsafeWindow)||window;
+
+  var css=''
+    +'.lk-arropt-btn{display:inline-block;margin-left:10px;padding:4px 14px;border:none;border-radius:14px;'
+    +'  background:#00897B;color:#fff;font:700 13px/1.5 Arial,sans-serif;cursor:pointer;vertical-align:middle;white-space:nowrap}'
+    +'.lk-arropt-btn:hover{background:#00695c}'
+    +'.lk-arropt-btn[disabled]{background:#9e9e9e;cursor:default}'
+    // компактна панель дій над таблицею
+    +'#lk-arropt-res{margin:8px 0;padding:9px 12px;border:1px solid #7bb3a9;border-left:4px solid #00897B;'
+    +'  background:#eef8f6;border-radius:6px;font:13px/1.6 Arial,sans-serif;color:#0f3d39;'
+    +'  max-width:980px;box-sizing:border-box;position:relative}'
+    +'#lk-arropt-res .h{font-weight:700;color:#00695c;margin-bottom:4px}'
+    +'#lk-arropt-res .er{color:#B71C1C;font-weight:700;font-size:12px}'
+    +'#lk-arropt-res .x{position:absolute;top:5px;right:9px;border:none;background:none;cursor:pointer;'
+    +'  font-size:17px;color:#00695c}'
+    // колонка «Опт» у таблиці накладної — великий читабельний шрифт
+    +'td.lk-arropt-td{font:14px/1.5 ui-monospace,Menlo,Consolas,monospace;color:#0f3d39;white-space:nowrap;'
+    +'  padding:8px 16px;border-left:3px solid #00897B;background:#f2fbfa;vertical-align:middle}'
+    +'td.lk-arropt-td .nw{font-weight:800;color:#00695c;font-size:17px;letter-spacing:.3px}'
+    +'td.lk-arropt-td .od{color:#7d8f8c;font-size:12.5px;margin-top:2px}'
+    +'td.lk-arropt-td.er{color:#B71C1C;font-weight:700;font-size:13px;white-space:normal}'
+    +'td.lk-arropt-td.blank{background:transparent;border-left:none}'
+    +'th.lk-arropt-td{font:700 13px/1.5 Arial,sans-serif;background:#e3f4f2;color:#00695c;'
+    +'  padding:8px 16px;border-left:3px solid #00897B;white-space:nowrap}';
+  var st=document.createElement('style'); st.textContent=css;
+  (document.head||document.documentElement).appendChild(st);
+
+  function onPage(){ return /#\/document\/arrival-product\/update\//.test(location.hash||''); }
+  function rowsCount(){ return document.querySelectorAll('tr[ng-repeat^="invoiceItem"]').length; }
+  var fmtN=function(n){ return String(n==null?'—':n).replace('.',','); };
+
+  // поточний прогноз/результат: {list, bySku, applied, rate}
+  var view=null;
+
+  function skuOfRow(tr){
+    var m=String((tr.cells&&tr.cells[1]?tr.cells[1].textContent:'')||'').match(/\(([\w\-]+)\)/g);
+    return m?m[m.length-1].replace(/[()]/g,''):null;
+  }
+
+  // домалювати колонку «Опт» у таблицю (перемальовується на кожен lkdom-пульс, поки view активний)
+  function renderColumn(){
+    if(!view) return;
+    var t=document.querySelector('table.document-invoice-products'); if(!t) return;
+    var headRow=t.querySelector('thead tr')||t.querySelector('tr');
+    if(headRow && !headRow.querySelector('th.lk-arropt-td')){
+      var th=document.createElement('th'); th.className='lk-arropt-td';
+      th.textContent='Опт: Вел / Сер / Май';
+      headRow.appendChild(th);
+    }
+    var i=0;
+    [].forEach.call(t.querySelectorAll('tr[ng-repeat^="invoiceItem"]'),function(tr){
+      var sku=skuOfRow(tr);
+      var r=(sku&&view.bySku[sku])||view.list[i]; i++;
+      var td=tr.querySelector('td.lk-arropt-td');
+      if(!td){ td=document.createElement('td'); td.className='lk-arropt-td'; tr.appendChild(td); }
+      td.classList.remove('er');
+      if(!r){ td.textContent=''; return; }
+      if(r.err){ td.classList.add('er'); td.textContent='✗ '+r.err; td.title=r.name||''; return; }
+      var changed=(Number(r.o2)!==Number(r.p2))||(Number(r.o5)!==Number(r.p5))||(Number(r.o7)!==Number(r.p7));
+      td.innerHTML='';
+      var l1=document.createElement('div'); l1.className='nw';
+      l1.textContent=(view.applied?'✓ ':'')+r.p2+' / '+r.p5+' / '+r.p7;
+      var l2=document.createElement('div'); l2.className='od';
+      l2.textContent=r.o2==null&&r.o5==null&&r.o7==null
+        ? 'типів цін не було — нові'
+        : (changed?('було: '+fmtN(r.o2)+' / '+fmtN(r.o5)+' / '+fmtN(r.o7)):'без змін');
+      td.appendChild(l1); td.appendChild(l2);
+      td.title=(r.name||'')+(r.created&&r.created.length?(' · створено типи: '+r.created.join(',')):'');
+    });
+    // не-товарні рядки (підсумок тощо) — порожня клітинка, щоб сітка не зʼїхала
+    [].forEach.call(t.querySelectorAll('tr'),function(tr){
+      if(tr.getAttribute('ng-repeat')) return;
+      if(tr.querySelector('.lk-arropt-td')) return;
+      if(tr.querySelector('th')) return;
+      if(!tr.cells || tr.cells.length<3) return;
+      var td=document.createElement('td'); td.className='lk-arropt-td blank';
+      tr.appendChild(td);
+    });
+  }
+  function clearView(){
+    view=null;
+    [].forEach.call(document.querySelectorAll('.lk-arropt-td'),function(n){ n.remove(); });
+    var r=document.getElementById('lk-arropt-res'); if(r) r.remove();
+  }
+  function setView(rows, applied, rate){
+    var bySku={};
+    (rows||[]).forEach(function(r){ if(r.sku) bySku[r.sku]=r; });
+    view={ list:rows||[], bySku:bySku, applied:!!applied, rate:rate };
+    renderColumn();
+  }
+
+  // запуск core-обробника: mode='preview' (лише читає) або 'apply' (пише)
+  function invoke(mode, onDone, onProgTxt){
+    var token=String(Date.now())+'_'+Math.random().toString(36).slice(2);
+    var tm=null;
+    function onProg(){
+      if(onProgTxt) onProgTxt(document.documentElement.getAttribute('data-sd-arropt-progress')||'');
+    }
+    function cleanup(){
+      PAGE.removeEventListener('sdArrivalOptResult', onRes);
+      PAGE.removeEventListener('sdArrivalOptProgress', onProg);
+      clearTimeout(tm);
+    }
+    function onRes(){
+      var raw=document.documentElement.getAttribute('data-sd-arropt-result');
+      if(!raw) return;
+      var d; try{ d=JSON.parse(raw); }catch(e){ return; }
+      if(!d || d.token!==token) return;
+      cleanup(); onDone(d);
+    }
+    PAGE.addEventListener('sdArrivalOptResult', onRes);
+    PAGE.addEventListener('sdArrivalOptProgress', onProg);
+    document.documentElement.setAttribute('data-sd-arropt-token', token);
+    document.documentElement.setAttribute('data-sd-arropt-mode', mode);
+    document.documentElement.removeAttribute('data-sd-arropt-result');
+    PAGE.dispatchEvent(new Event('sdArrivalOpt'));
+    tm=setTimeout(function(){ cleanup(); onDone(null); }, 180000);
+  }
+
+  function bar(){
+    var old=document.getElementById('lk-arropt-res'); if(old) old.remove();
+    var box=document.createElement('div'); box.id='lk-arropt-res';
+    var x=document.createElement('button'); x.className='x'; x.textContent='✕';
+    x.addEventListener('click',function(){ clearView(); });
+    box.appendChild(x);
+    var t=document.querySelector('table.document-invoice-products');
+    if(t&&t.parentElement) t.parentElement.insertBefore(box,t);
+    else document.body.appendChild(box);
+    return box;
+  }
+  function errLines(box, rows){
+    (rows||[]).forEach(function(r){
+      if(!r.err) return;
+      var e=document.createElement('div'); e.className='er';
+      e.textContent='✗ '+(r.name||r.sku||'')+' — '+r.err;
+      box.appendChild(e);
+    });
+  }
+
+  // крок 1: ПЕРЕГЛЯД — нічого не пише; ціни зʼявляються колонкою біля товарів
+  function run(btn){
+    if(!rowsCount()) return;
+    btn.disabled=true; var orig=btn.textContent; btn.textContent='💰 Читаю…';
+    invoke('preview', function(d){
+      btn.disabled=false; btn.textContent=orig;
+      if(!d || !d.ok){
+        var b0=bar(); var h0=document.createElement('div'); h0.className='h';
+        h0.textContent='✗ Не вийшло: '+((d&&d.err)||'нема відповіді'); b0.appendChild(h0); return;
+      }
+      var rows=d.rows||[], chg=0, erN=0;
+      rows.forEach(function(r){
+        if(r.err){ erN++; return; }
+        if(Number(r.o2)!==Number(r.p2)||Number(r.o5)!==Number(r.p5)||Number(r.o7)!==Number(r.p7)) chg++;
+      });
+      setView(rows, false, d.rate);
+      var box=bar();
+      var h=document.createElement('div'); h.className='h';
+      h.textContent='👀 ПЕРЕГЛЯД: нові ціни — у колонці «Опт» біля товарів (нічого ще не записано). '
+        +'Курс: '+fmtN(d.rate)+' · зміниться: '+chg+' із '+rows.length+(erN?(' · помилок: '+erN):'');
+      box.appendChild(h);
+      errLines(box, rows);
+      var ap=document.createElement('button'); ap.className='lk-arropt-btn'; ap.style.marginLeft='0';
+      ap.textContent='✅ Записати ці ціни у товари';
+      ap.addEventListener('click',function(){
+        if(!confirm('Записати нові опт-ціни у картки товарів ('+rows.length+' позицій)?')) return;
+        ap.disabled=true;
+        invoke('apply', function(d2){
+          if(!d2 || !d2.ok){
+            ap.disabled=false; ap.textContent='✗ не вдалось — ще раз';
+            return;
+          }
+          var ok2=0, er2=0;
+          (d2.rows||[]).forEach(function(r){ if(r.err) er2++; else ok2++; });
+          setView(d2.rows, true, d2.rate);
+          var box2=bar();
+          var h2=document.createElement('div'); h2.className='h';
+          h2.textContent='💰 ЗАПИСАНО: '+ok2+' товарів'+(er2?(' · помилок: '+er2):'')+'. Колонка «Опт» — що тепер у картках.';
+          box2.appendChild(h2);
+          errLines(box2, d2.rows);
+        }, function(p){ ap.textContent='✅ Пишу '+p+'…'; });
+      });
+      var cl=document.createElement('button'); cl.className='lk-arropt-btn';
+      cl.style.background='#9e9e9e'; cl.textContent='✕ Прибрати';
+      cl.addEventListener('click',function(){ clearView(); });
+      box.appendChild(ap); box.appendChild(cl);
+    }, function(p){ btn.textContent='💰 Читаю '+p+'…'; });
+  }
+
+  function sync(){
+    var btn=document.querySelector('.lk-arropt-btn-main');
+    if(!onPage()){ if(btn) btn.remove(); clearViewIfAny(); return; }
+    if(view) renderColumn();   // Angular перемалював рядки — повертаємо колонку
+    if(!rowsCount()){ if(btn) btn.remove(); return; }
+    if(btn) return;
+    var host=null, hs=document.querySelectorAll('h1,h2,h3');
+    for(var i=0;i<hs.length;i++){ if(/^Надходження товарів №/.test((hs[i].textContent||'').trim())){ host=hs[i]; break; } }
+    btn=document.createElement('button'); btn.type='button'; btn.className='lk-arropt-btn lk-arropt-btn-main';
+    btn.textContent='💰 Опт-ціни з собівартості';
+    btn.title='Показати нові ціни (Великий ×1.2, середній ×1.25, майстри ×1.3↑5) колонкою біля товарів; запис — окремою кнопкою';
+    btn.addEventListener('click',function(e){ e.preventDefault(); e.stopPropagation(); run(btn); });
+    if(host) host.appendChild(btn);
+    else{ var t=document.querySelector('table.document-invoice-products'); if(t&&t.parentElement) t.parentElement.insertBefore(btn,t); }
+  }
+  function clearViewIfAny(){ if(view||document.getElementById('lk-arropt-res')) clearView(); }
+
+  var t=null;
+  function syncSoon(){ clearTimeout(t); t=setTimeout(sync,300); }
+  sync();
+  window.addEventListener('lkdom', syncSoon);
+  window.addEventListener('hashchange', syncSoon);
+})();
+}catch(e){ try{ console.warn("[SD] модуль «lkArrivalOpt» не запустився:", e); }catch(_){} }
+/* ▲▲▲ МОДУЛЬ-END • lkArrivalOpt ▲▲▲ */
+
+/* ▼▼▼ МОДУЛЬ-START • lkRoundPickup — 🔟 заокруглення суми самовивозу вгору до 10 ₴ ▼▼▼ */
+/* ===== На картці заявки з доставкою «Самовивіз»: кнопка під таблицею товарів доводить
+   суму до круглої (99→100, 108→110) корекцією ціни одного рядка. Core: sdRoundPickup. ===== */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
+(function lkRoundPickup(){
+  'use strict';
+  var PAGE=(typeof unsafeWindow!=='undefined'&&unsafeWindow)||window;
+
+  var css=''
+    +'#lk-round-btn{display:inline-block;margin:6px 0 2px;padding:6px 16px;border:none;border-radius:7px;'
+    +'  background:#1565C0;color:#fff;font:700 13px/1.5 Arial,sans-serif;cursor:pointer;white-space:nowrap}'
+    +'#lk-round-btn:hover{background:#0D47A1}'
+    +'#lk-round-btn[disabled]{background:#9e9e9e;cursor:default}'
+    +'#lk-round-res{display:inline-block;margin-left:10px;font:700 13px/1.5 Arial,sans-serif;vertical-align:middle}'
+    +'#lk-round-res.ok{color:#1B5E20}'
+    +'#lk-round-res.er{color:#B71C1C}'
+    +'.lk-round-opt{margin-left:6px;padding:5px 13px;border:none;border-radius:6px;background:#1565C0;'
+    +'  color:#fff;font:700 13px/1.4 Arial,sans-serif;cursor:pointer}'
+    +'.lk-round-opt:hover{background:#0D47A1}'
+    +'.lk-round-inp{margin-left:10px;width:64px;padding:4px 8px;border:1px solid #90a4ae;border-radius:6px;'
+    +'  font:700 13px/1.4 Arial,sans-serif;text-align:center}';
+  var st=document.createElement('style'); st.textContent=css;
+  (document.head||document.documentElement).appendChild(st);
+
+  function onOrderPage(){ return /#\/order\/(update|create)/.test(location.hash||''); }
+
+  // самовивіз? — кілька способів, від точних до загального:
+  // 1) поле [attr-field-name="shipping_method"] (як у lkQuickPickup);
+  // 2) селект/select2 (значення 43 або текст);
+  // 3) рядок «Спосіб доставки: …» у «Даних заявки» (текст містить «самовив»)
+  function isPickup(){
+    var f=document.querySelector('[attr-field-name="shipping_method"]');
+    if(f && /самовив/i.test((f.textContent||''))) return true;
+    var sel=document.getElementById('shipping_method-wk');
+    if(sel && 'value' in sel && /\d/.test(String(sel.value||''))){
+      if(/(^|:)43$/.test(String(sel.value))||/\b43\b/.test(String(sel.value))) return true;
+    }
+    var c=document.querySelector('[id^="select2-shipping_method"][id$="-container"]');
+    if(c && /самовив/i.test(c.getAttribute('title')||c.textContent||'')) return true;
+    // фолбек: підпис «Спосіб доставки» → його рядок/контейнер
+    var els=document.querySelectorAll('label,td,div,span');
+    for(var i=0;i<els.length;i++){
+      var t=(els[i].textContent||'').replace(/\s+/g,' ').trim();
+      if(!/^Спосіб\s*доставки$/i.test(t)) continue;
+      var row=els[i].closest('tr')||els[i].parentElement;
+      for(var up=0; row && up<3; up++){
+        var rt=(row.textContent||'');
+        if(rt.length<200 && /самовив/i.test(rt)) return true;
+        row=row.parentElement;
+      }
+    }
+    return false;
+  }
+
+  // діагностика: чому кнопки нема (видно у консолі F12 як [SD-Округлення])
+  var lastDbg='';
+  function dbg(m){
+    if(m===lastDbg) return;
+    lastDbg=m;
+    try{
+      var v=(typeof GM_info!=='undefined'&&GM_info.script)?GM_info.script.version:'?';
+      console.debug('[SD-Округлення v'+v+']', m);
+    }catch(e){}
+  }
+
+  // місце: одразу ПІСЛЯ таблиці товарів (якір — кнопка «+ Додати»)
+  function findSpot(){
+    var btn=null, all=document.querySelectorAll('[ng-click]');
+    for(var i=0;i<all.length;i++){
+      if((all[i].getAttribute('ng-click')||'').replace(/\s+/g,'')==='viewModel.addOption()'){ btn=all[i]; break; }
+    }
+    if(!btn) btn=document.getElementById('addCompleteProduct');
+    if(!btn) return null;
+    var tbl=btn.closest('table');
+    return (tbl && tbl.parentElement) ? tbl : null;
+  }
+
+  var fN=function(n){ return String(Number(n).toFixed(2)).replace('.',','); };
+
+  // виклик core-обробника: target = 'calc' (лише сума) або число (ціль)
+  function invoke(target, cb){
+    var token=String(Date.now())+'_'+Math.random().toString(36).slice(2);
+    var tm=null;
+    function done(){ PAGE.removeEventListener('sdRoundPickupResult', onRes); clearTimeout(tm); }
+    function onRes(){
+      var raw=document.documentElement.getAttribute('data-sd-round-result');
+      if(!raw) return;
+      var d; try{ d=JSON.parse(raw); }catch(e){ return; }
+      if(!d || d.token!==token) return;
+      done(); cb(d);
+    }
+    PAGE.addEventListener('sdRoundPickupResult', onRes);
+    document.documentElement.setAttribute('data-sd-round-token', token);
+    document.documentElement.setAttribute('data-sd-round-target', String(target));
+    document.documentElement.removeAttribute('data-sd-round-result');
+    PAGE.dispatchEvent(new Event('sdRoundPickup'));
+    tm=setTimeout(function(){ done(); cb(null); },8000);
+  }
+
+  // видима кнопка «Зберегти» самої заявки (не в модалці)
+  function orderSaveBtn(){
+    var bs=document.querySelectorAll('button,a,input[type=submit]');
+    for(var i=0;i<bs.length;i++){
+      var b=bs[i];
+      if(!b.offsetParent) continue;
+      if(b.closest('.modal')) continue;
+      if(/^зберегти$/i.test((b.textContent||b.value||'').trim())) return b;
+    }
+    return null;
+  }
+
+  function applyTarget(v, btn, res){
+    btn.disabled=true; res.className=''; res.textContent='…';
+    invoke(v, function(d){
+      btn.disabled=false;
+      if(!d || !d.ok){ res.className='er'; res.textContent='✗ '+((d&&d.err)||'нема відповіді'); return; }
+      if(d.same){ res.className='ok'; res.textContent='✓ сума вже '+fN(d.total); return; }
+      var base='✓ '+fN(d.from)+' → '+fN(d.to)
+        +' ('+(d.row&&d.row.name?d.row.name:'')+': нова ціна '+fN(d.row.newPrice)+')'
+        +(d.exact?'':' ⚠ не рівно '+d.target+' — перевір');
+      res.className=d.exact?'ok':'er';
+      res.textContent=base+' · зберігаю…';
+      // авто-«Зберегти» через паузу (дати Angular домалювати суму)
+      setTimeout(function(){
+        var sb=orderSaveBtn();
+        if(!sb){ res.textContent=base+' ⚠ кнопку «Зберегти» не знайшов — збережи вручну'; return; }
+        sb.click();
+        setTimeout(function(){ res.textContent=base+' · ✓ збережено'; },1500);
+      },400);
+    });
+  }
+
+  // крок 1: порахувати суму й показати ВИБІР цілі: [вниз до 10] [вгору до 5] [вгору до 10] [своя]
+  function run(btn,res){
+    btn.disabled=true; res.className=''; res.textContent='…';
+    invoke('calc', function(d){
+      btn.disabled=false;
+      if(!d || !d.ok){ res.className='er'; res.textContent='✗ '+((d&&d.err)||'нема відповіді'); return; }
+      var total=d.total;
+      res.textContent=''; res.className='';
+      var lbl=document.createElement('span'); lbl.textContent='Зараз '+fN(total)+' → ';
+      res.appendChild(lbl);
+      var f10=Math.floor(total/10)*10, c5=Math.ceil(total/5)*5, c10=Math.ceil(total/10)*10;
+      var opts=[];
+      if(f10>0 && f10<total) opts.push(f10);
+      if(c5>total) opts.push(c5);
+      if(c10>total && opts.indexOf(c10)<0) opts.push(c10);
+      if(!opts.length){ res.className='ok'; res.textContent='✓ сума вже кругла: '+fN(total); return; }
+      opts.forEach(function(v){
+        var b=document.createElement('button'); b.type='button'; b.className='lk-round-opt';
+        b.textContent=String(v);
+        b.title=(v<total?'заокруглити ВНИЗ':'заокруглити вгору');
+        b.addEventListener('click',function(e){ e.preventDefault(); e.stopPropagation(); applyTarget(v,btn,res); });
+        res.appendChild(b);
+      });
+      var inp=document.createElement('input'); inp.type='text'; inp.className='lk-round-inp';
+      inp.placeholder='своя'; inp.title='введи власну суму і натисни OK';
+      var ok=document.createElement('button'); ok.type='button'; ok.className='lk-round-opt'; ok.textContent='OK';
+      function go(){
+        var v=parseFloat(String(inp.value).replace(/\s/g,'').replace(',','.'));
+        if(!(v>0)){ inp.style.borderColor='#c0392b'; return; }
+        applyTarget(v,btn,res);
+      }
+      ok.addEventListener('click',function(e){ e.preventDefault(); e.stopPropagation(); go(); });
+      inp.addEventListener('keydown',function(e){ if(e.key==='Enter'){ e.preventDefault(); go(); } });
+      res.appendChild(inp); res.appendChild(ok);
+    });
+  }
+
+  function sync(){
+    var btn=document.getElementById('lk-round-btn');
+    if(!onOrderPage()){ if(btn){ btn.remove(); var r1=document.getElementById('lk-round-res'); if(r1) r1.remove(); } return; }
+    if(!isPickup()){
+      dbg('кнопки нема: самовивіз не визначено на цій сторінці');
+      if(btn){ btn.remove(); var r0=document.getElementById('lk-round-res'); if(r0) r0.remove(); }
+      return;
+    }
+    var tbl=findSpot();
+    if(!tbl){ dbg('кнопки нема: не знайдено таблицю товарів (режим перегляду?)'); if(btn) btn.remove(); return; }
+    dbg('кнопка показана');
+    if(btn) return;
+    btn=document.createElement('button'); btn.type='button'; btn.id='lk-round-btn';
+    btn.textContent='🔟 Заокруглити суму (вгору до 10 ₴)';
+    btn.title='99 → 100, 108 → 110: корекція ціни одного рядка, потім «Зберегти»';
+    var res=document.createElement('span'); res.id='lk-round-res';
+    btn.addEventListener('click',function(e){ e.preventDefault(); e.stopPropagation(); run(btn,res); });
+    tbl.insertAdjacentElement('afterend', btn);
+    btn.insertAdjacentElement('afterend', res);
+  }
+
+  var t=null;
+  function syncSoon(){ clearTimeout(t); t=setTimeout(sync,400); }
+  sync();
+  window.addEventListener('lkdom', syncSoon);
+  window.addEventListener('hashchange', syncSoon);
+})();
+}catch(e){ try{ console.warn("[SD] модуль «lkRoundPickup» не запустився:", e); }catch(_){} }
+/* ▲▲▲ МОДУЛЬ-END • lkRoundPickup ▲▲▲ */
+
+/* ▼▼▼ МОДУЛЬ-START • lkTtnPrintGuard — 🖨 попередження про ПОВТОРНИЙ друк ТТН Укрпошти ▼▼▼ */
+/* ===== СРМ має серверний прапорець isPrinted (спільний для всіх менеджерів) — якщо ТТН
+   уже друкували, попереджаємо перед повторним друком і показуємо бейдж біля ТТН.
+   Додатково рахуємо друки на цьому ПК (точна кількість разів). ===== */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
+(function lkTtnPrintGuard(){
+  'use strict';
+  var API_KEY='9yC3JYj4MlYitQ8J3KUf-uy_qPDYkFzwoITQSUeiWEDMZntbQ4uj0NxNcHrqAg8VAB6wDmkdXJZ1LMFgnQbuivTSrzutQbVB66wN';
+  var LKEY='lk_ttnprint_v1';
+
+  var css=''
+    +'.lk-ttnp{display:inline-block;margin-left:8px;padding:2px 10px;border-radius:12px;'
+    +'  font:700 11.5px/1.6 Arial,sans-serif;vertical-align:middle;white-space:nowrap}'
+    +'.lk-ttnp.was{background:#fdecea;color:#b71c1c;border:1px solid #f5b7b1}'
+    +'.lk-ttnp.new{background:#E6F4EA;color:#1B5E20;border:1px solid #A5D6A7}';
+  var st=document.createElement('style'); st.textContent=css;
+  (document.head||document.documentElement).appendChild(st);
+
+  function orderId(){ var m=(location.hash||'').match(/#\/order\/update\/(\d+)/); return m?m[1]:null; }
+  function load(){ try{ return JSON.parse(localStorage.getItem(LKEY))||{}; }catch(e){ return {}; } }
+  function save(o){ try{ localStorage.setItem(LKEY, JSON.stringify(o)); }catch(e){} }
+  function fmtDate(t){
+    try{ var d=new Date(t), p=function(n){ return (n<10?'0':'')+n; };
+      return p(d.getDate())+'.'+p(d.getMonth()+1)+'.'+d.getFullYear()+' '+p(d.getHours())+':'+p(d.getMinutes());
+    }catch(e){ return ''; }
+  }
+
+  // стан заявки з API: чи Укрпошта, ТТН, серверний прапорець друку
+  var state={};   // orderId -> {ready, ukr, ttn, srvPrinted}
+  function fetchState(id){
+    if(state[id]) return;
+    state[id]={ready:false};
+    fetch('/api/order/list/?filter%5Bid%5D%5B%5D='+encodeURIComponent(id),
+          {headers:{'Form-Api-Key':API_KEY,'Accept':'application/json'}})
+      .then(function(r){ return r.json(); })
+      .then(function(j){
+        var o=(j.data||[])[0]||{}, d=(o.ord_delivery_data||[])[0]||{};
+        state[id]={ ready:true,
+          ukr: (String(d.provider||'')==='ukrposhta' || Number(o.shipping_method)===30),
+          ttn: String(d.trackingNumber||''),
+          srvPrinted: !!Number(d.isPrinted) };
+        badge();
+      })
+      .catch(function(){ state[id]={ready:true, ukr:false, ttn:'', srvPrinted:false}; });
+  }
+
+  function localRec(ttn){ return ttn ? (load()[ttn]||null) : null; }
+
+  // бейдж біля номера ТТН у картці заявки
+  function badge(){
+    var id=orderId(); if(!id) return;
+    var s=state[id];
+    var old=document.querySelector('.lk-ttnp');
+    if(!s || !s.ready || !s.ukr || !s.ttn){ if(old) old.remove(); return; }
+    // елемент із номером ТТН (посилання з 13 цифрами)
+    var host=null, all=document.querySelectorAll('a,span,div');
+    for(var i=0;i<all.length;i++){
+      var el=all[i];
+      if(el.children.length) continue;
+      if(String(el.textContent||'').trim()===s.ttn){ host=el; break; }
+    }
+    if(!host){ if(old) old.remove(); return; }
+    var rec=localRec(s.ttn);
+    var was=s.srvPrinted || !!rec;
+    var b=old;
+    if(!b){ b=document.createElement('span'); b.className='lk-ttnp'; }
+    b.className='lk-ttnp '+(was?'was':'new');
+    if(was){
+      var n=rec&&rec.n?rec.n:null;
+      b.textContent='🖨 ТТН уже друкували'+(n?(' · '+n+'× на цьому ПК'):'');
+      b.title=(rec&&rec.t)?('останній друк тут: '+fmtDate(rec.t)):'позначено в СРМ як роздрукована';
+    }else{
+      b.textContent='🖨 ще не друкована';
+      b.title='за даними СРМ цю ТТН ще не друкували';
+    }
+    if(b.parentElement!==host.parentElement || b.previousSibling!==host){
+      try{ host.insertAdjacentElement('afterend', b); }catch(e){}
+    }
+  }
+
+  // перехоплення кліку по кнопках друку ТТН (у СРМ: ng-click="viewModel.setIsPrinted(viewModel.ukrposhta)")
+  document.addEventListener('click', function(e){
+    try{
+      var id=orderId(); if(!id) return;
+      var t=e.target&&e.target.closest?e.target.closest('[ng-click]'):null;
+      if(!t) return;
+      var ng=t.getAttribute('ng-click')||'';
+      if(!/setIsPrinted/i.test(ng)) return;
+      if(!/ukrposhta/i.test(ng)) return;            // сторожа лише для Укрпошти
+      var s=state[id];
+      if(!s || !s.ready || !s.ttn) return;          // стан невідомий — не заважаємо
+      var rec=localRec(s.ttn);
+      if(s.srvPrinted || rec){
+        var msg='⚠ ПОВТОРНИЙ ДРУК ТТН!\n\nТТН '+s.ttn+' (заявка №'+id+') уже друкували';
+        if(rec) msg+='\n• на цьому ПК: '+rec.n+'× , останній раз '+fmtDate(rec.t);
+        if(s.srvPrinted) msg+='\n• у СРМ позначена як роздрукована (міг друкувати інший менеджер)';
+        msg+='\n\nДрукувати ще раз?';
+        if(!confirm(msg)){ e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation(); return; }
+      }
+      var m=load(), now=Date.now();
+      var cur=m[s.ttn]||{n:0};
+      cur.n=(cur.n||0)+1; cur.t=now; cur.id=id;
+      m[s.ttn]=cur;
+      var lim=now-120*24*3600*1000;                 // чистка старших за 120 днів
+      Object.keys(m).forEach(function(k){ if((m[k].t||0)<lim) delete m[k]; });
+      save(m);
+      s.srvPrinted=true;
+      setTimeout(badge, 300);
+    }catch(err){}
+  }, true);
+
+  var t=null;
+  function sync(){
+    var id=orderId();
+    if(!id){ var o=document.querySelector('.lk-ttnp'); if(o) o.remove(); return; }
+    fetchState(id);
+    badge();
+  }
+  function syncSoon(){ clearTimeout(t); t=setTimeout(sync,400); }
+  sync();
+  window.addEventListener('lkdom', syncSoon);
+  window.addEventListener('hashchange', syncSoon);
+})();
+}catch(e){ try{ console.warn("[SD] модуль «lkTtnPrintGuard» не запустився:", e); }catch(_){} }
+/* ▲▲▲ МОДУЛЬ-END • lkTtnPrintGuard ▲▲▲ */
 
 /* ▼▼▼ МОДУЛЬ-START • lkCashRegister — 💰 Каса самовивозу (день/тиждень/місяць/період) ▼▼▼ */
 /* ===== 💰 Каса самовивозу — день / тиждень / місяць / період ===== */
