@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.45
+// @version      2.46
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -34,6 +34,7 @@
      • lkArrivalCount  — 📦 к-ть позицій та одиниць біля заголовка «Надходження товарів»
      • lkArrivalOpt    — 💰 опт-ціни товарів (×1.2/×1.25/×1.3↑5) із собівартості накладної
      • lkRoundPickup   — 🔟 заокруглення суми самовивозу вгору до 10 ₴ (99→100, 108→110)
+     • lkStockWhere    — 🔎 «Де товар»: у яких заявках висить код (з урахуванням комплектів)
      • lkTtnPrintGuard — 🖨 попередження про повторний друк ТТН Укрпошти
      • lkCashRegister  — 💰 Каса самовивозу
      • lkPickList      — 📋 зведений лист комплектації (сума товарів по заявках статусу)
@@ -4943,6 +4944,210 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 }catch(e){ try{ console.warn("[SD] модуль «lkRoundPickup» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkRoundPickup ▲▲▲ */
 
+/* ▼▼▼ МОДУЛЬ-START • lkStockWhere — 🔎 «Де товар»: у яких заявках висить код ▼▼▼ */
+/* ===== Вставляєш код товару — показує, у яких заявках він «висить» у робочих
+   (не кінцевих) статусах і по скільки штук. Враховує комплекти: код може входити
+   складовою в набір (напр. 122 → набір 069), такі заявки теж показуються. ===== */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
+(function lkStockWhere(){
+  'use strict';
+  var API_KEY='9yC3JYj4MlYitQ8J3KUf-uy_qPDYkFzwoITQSUeiWEDMZntbQ4uj0NxNcHrqAg8VAB6wDmkdXJZ1LMFgnQbuivTSrzutQbVB66wN';
+  var KITS_URL='https://barcode-printer-production-2b32.up.railway.app/api/kits?token=nab_8Kx2pQ7mLr4tW9vZ';
+  // робочі статуси = товар ще «висить» за заявкою (не кінцевий продаж, не відмова)
+  var WORK=[1,2,9,15,21,36];
+  var TTL=3*60*1000, KITS_TTL=6*60*60*1000;
+
+  var css=''
+    +'#lk-where-btn{position:fixed;left:18px;bottom:204px;z-index:99998;width:52px;height:52px;border-radius:50%;'
+    +'  background:#5E35B1;color:#fff;border:none;font-size:22px;cursor:pointer;box-shadow:0 3px 10px rgba(0,0,0,.3)}'
+    +'#lk-where-btn:hover{filter:brightness(1.1)}'
+    +'#lk-where-ov{position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.4);display:flex;'
+    +'  align-items:flex-start;justify-content:center}'
+    +'#lk-where-box{background:#fff;border-radius:10px;margin-top:60px;width:820px;max-width:94vw;'
+    +'  max-height:80vh;display:flex;flex-direction:column;overflow:hidden;'
+    +'  font:14px/1.5 -apple-system,"Segoe UI",Roboto,Arial,sans-serif;box-shadow:0 10px 40px rgba(0,0,0,.35)}'
+    +'#lk-where-box .h{display:flex;align-items:center;justify-content:space-between;gap:10px;'
+    +'  padding:12px 16px;background:#5E35B1;color:#fff;font-weight:700}'
+    +'#lk-where-box .h .x{border:none;background:none;color:#fff;font-size:24px;line-height:1;cursor:pointer}'
+    +'#lk-where-box .f{display:flex;gap:8px;padding:12px 16px;border-bottom:1px solid #e6e6e6;align-items:center}'
+    +'#lk-where-box .f input{flex:1 1 auto;padding:9px 12px;border:1px solid #cfcfcf;border-radius:7px;font-size:15px}'
+    +'#lk-where-box .f button{padding:9px 18px;border:none;border-radius:7px;background:#5E35B1;color:#fff;'
+    +'  font-weight:700;font-size:14px;cursor:pointer}'
+    +'#lk-where-box .f button[disabled]{background:#9e9e9e;cursor:default}'
+    +'#lk-where-box .c{flex:1 1 auto;overflow-y:auto;padding:12px 16px}'
+    +'#lk-where-box .sum{font-weight:800;font-size:15px;color:#311B92;margin-bottom:4px}'
+    +'#lk-where-box .sub{color:#666;font-size:12.5px;margin-bottom:10px}'
+    +'#lk-where-box table{width:100%;border-collapse:collapse}'
+    +'#lk-where-box th{text-align:left;font-size:12px;color:#5E35B1;border-bottom:2px solid #d1c4e9;padding:5px 7px}'
+    +'#lk-where-box td{border-bottom:1px solid #eee;padding:6px 7px;font-size:13.5px;vertical-align:top}'
+    +'#lk-where-box td.q{font-weight:800;white-space:nowrap;text-align:right}'
+    +'#lk-where-box td.st{white-space:nowrap}'
+    +'#lk-where-box .kit{display:inline-block;margin-left:6px;padding:1px 7px;border-radius:9px;'
+    +'  background:#ede7f6;color:#4527A0;font-size:11px;font-weight:700;white-space:nowrap}'
+    +'#lk-where-box .msg{color:#666;padding:14px 2px}'
+    +'#lk-where-box .err{color:#b00020;font-weight:700}';
+  var st=document.createElement('style'); st.textContent=css;
+  (document.head||document.documentElement).appendChild(st);
+
+  function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
+  function gGet(k){ try{ var s=GM_getValue(k,null); return s?((typeof s==='string')?JSON.parse(s):s):null; }catch(e){ return null; } }
+  function gSet(k,v){ try{ GM_setValue(k, JSON.stringify(v)); }catch(e){} }
+
+  // ---- комплекти: код-складова -> [{kit, qty, name}] (кеш спільний із модулем наборів)
+  var comp2kits=null;
+  function buildComp(kits){
+    var m={};
+    Object.keys(kits||{}).forEach(function(kitSku){
+      var info=kits[kitSku]||{};
+      (info.comps||[]).forEach(function(c){
+        var cs=String(c.sku==null?'':c.sku).trim();
+        if(!cs) return;
+        (m[cs]=m[cs]||[]).push({ kit:String(kitSku), qty:Number(c.qty)||1, name:info.name||'' });
+      });
+    });
+    return m;
+  }
+  function loadKits(){
+    if(comp2kits) return Promise.resolve(comp2kits);
+    var c=gGet('lknb_cache2');
+    if(c && c.kits && Date.now()-c.ts<KITS_TTL){ comp2kits=buildComp(c.kits); return Promise.resolve(comp2kits); }
+    return new Promise(function(resolve){
+      function done(txt){
+        try{ var d=JSON.parse(txt); if(d.ok&&d.kits){ gSet('lknb_cache2',{ts:Date.now(),kits:d.kits}); comp2kits=buildComp(d.kits); } }catch(e){}
+        resolve(comp2kits||{});
+      }
+      try{
+        if(typeof GM_xmlhttpRequest!=='undefined'){
+          GM_xmlhttpRequest({ method:'GET', url:KITS_URL,
+            onload:function(r){ done(r.responseText); }, onerror:function(){ resolve(comp2kits||{}); } });
+        } else { fetch(KITS_URL).then(function(r){return r.text();}).then(done).catch(function(){ resolve(comp2kits||{}); }); }
+      }catch(e){ resolve(comp2kits||{}); }
+    });
+  }
+
+  // ---- заявки в робочих статусах (кеш 3 хв)
+  var cache=null, statusMap={};
+  function loadOrders(onProg){
+    if(cache && Date.now()-cache.t<TTL) return Promise.resolve(cache.rows);
+    var q=WORK.map(function(s){ return 'filter%5BstatusId%5D%5B%5D='+s; }).join('&');
+    var all=[], page=1, pages=1;
+    function next(){
+      if(onProg) onProg(page, pages);
+      return fetch('/api/order/list/?page='+page+'&limit=100&'+q,
+                   { headers:{'Form-Api-Key':API_KEY,'Accept':'application/json'} })
+        .then(function(r){ return r.json(); })
+        .then(function(j){
+          (j.data||[]).forEach(function(o){
+            all.push({ id:o.id, st:o.statusId, prods:(o.products||[]).map(function(p){
+              return { sku:String(p.sku==null?'':p.sku).trim(), amt:Number(p.amount)||0,
+                       name:String(p.documentName||'').slice(0,70) };
+            }) });
+          });
+          try{
+            var opts=(((j.meta||{}).fields||{}).statusId||{}).options||[];
+            opts.forEach(function(o){ statusMap[o.value]=String(o.text||'').replace(/\s+/g,' ').trim(); });
+          }catch(e){}
+          pages=((j.pagination||{}).pageCount)||1;
+          page++;
+          if(page<=pages && page<=12) return next();
+          cache={ t:Date.now(), rows:all };
+          return all;
+        });
+    }
+    return next();
+  }
+
+  function search(rows, sku){
+    sku=String(sku).trim();
+    var kitsOf=(comp2kits||{})[sku]||[];
+    var kitMap={}; kitsOf.forEach(function(k){ kitMap[k.kit]={qty:k.qty, name:k.name}; });
+    var hits=[];
+    rows.forEach(function(o){
+      o.prods.forEach(function(p){
+        if(p.sku===sku) hits.push({ id:o.id, st:o.st, qty:p.amt, name:p.name, via:null });
+        else if(kitMap[p.sku]) hits.push({ id:o.id, st:o.st, qty:p.amt*kitMap[p.sku].qty, name:p.name, via:p.sku });
+      });
+    });
+    hits.sort(function(a,b){ return (a.st-b.st)||(b.id-a.id); });
+    return { hits:hits, kits:kitsOf };
+  }
+
+  function render(box, sku, res){
+    var c=box.querySelector('.c');
+    var total=0, byStatus={};
+    res.hits.forEach(function(h){
+      total+=h.qty;
+      byStatus[h.st]=(byStatus[h.st]||0)+h.qty;
+    });
+    if(!res.hits.length){
+      c.innerHTML='<div class="msg">Код <b>'+esc(sku)+'</b> у жодній заявці в роботі не знайдено.<br>'
+        +'Отже, залишок не «висить» у заявках — причина в чомусь іншому (не оприбутковано, списання, помилка обліку).</div>';
+      return;
+    }
+    var head='<div class="sum">Код '+esc(sku)+': у роботі '+total+' шт (позицій: '+res.hits.length+')</div>';
+    var byTxt=Object.keys(byStatus).map(function(s){ return (statusMap[s]||('статус '+s))+' — '+byStatus[s]+' шт'; }).join(' · ');
+    head+='<div class="sub">'+esc(byTxt)+'</div>';
+    if(res.kits.length){
+      head+='<div class="sub">Входить у комплекти: '
+        +res.kits.map(function(k){ return esc(k.kit)+' ('+esc(k.name)+', ×'+k.qty+')'; }).join(', ')
+        +' — заявки з ними теж враховано.</div>';
+    }
+    var rows=res.hits.map(function(h){
+      return '<tr>'
+        +'<td><a href="/ua/index.html?formId=1#/order/update/'+h.id+'" target="_blank" rel="noopener">№'+h.id+'</a></td>'
+        +'<td class="st">'+esc(statusMap[h.st]||('статус '+h.st))+'</td>'
+        +'<td>'+esc(h.name||'')+(h.via?('<span class="kit">у складі '+esc(h.via)+'</span>'):'')+'</td>'
+        +'<td class="q">'+h.qty+' шт</td>'
+      +'</tr>';
+    }).join('');
+    c.innerHTML=head+'<table><thead><tr><th>Заявка</th><th>Статус</th><th>Позиція</th><th style="text-align:right">К-ть</th></tr></thead><tbody>'+rows+'</tbody></table>';
+  }
+
+  function doSearch(box){
+    var inp=box.querySelector('input'), btn=box.querySelector('.f button'), c=box.querySelector('.c');
+    var sku=String(inp.value||'').trim();
+    if(!sku){ inp.focus(); return; }
+    btn.disabled=true; c.innerHTML='<div class="msg">Шукаю…</div>';
+    loadKits()
+      .then(function(){ return loadOrders(function(p,t){ c.innerHTML='<div class="msg">Читаю заявки… сторінка '+p+(t>1?(' з '+t):'')+'</div>'; }); })
+      .then(function(rows){ render(box, sku, search(rows, sku)); })
+      .catch(function(e){ c.innerHTML='<div class="msg err">Не вдалося: '+esc(String(e&&e.message||e))+'</div>'; })
+      .then(function(){ btn.disabled=false; });
+  }
+
+  function open(){
+    if(document.getElementById('lk-where-ov')) return;
+    var ov=document.createElement('div'); ov.id='lk-where-ov';
+    ov.addEventListener('click',function(e){ if(e.target===ov) ov.remove(); });
+    var box=document.createElement('div'); box.id='lk-where-box';
+    box.innerHTML=''
+      +'<div class="h"><span>🔎 Де товар: у яких заявках висить</span><button class="x" title="Закрити">&times;</button></div>'
+      +'<div class="f"><input type="text" placeholder="код товару (напр. 122)" autocomplete="off"><button type="button">Шукати</button></div>'
+      +'<div class="c"><div class="msg">Введи код товару і натисни «Шукати».<br>'
+      +'Дивимось заявки в робочих статусах (Новий, Прийнято, На відправку, СПАКОВАНО, Предзамовлення, Сплата в інтернеті) — '
+      +'тобто там, де товар ще не проданий остаточно. Комплекти враховуються.</div></div>';
+    ov.appendChild(box); document.body.appendChild(ov);
+    box.querySelector('.x').addEventListener('click',function(){ ov.remove(); });
+    box.querySelector('.f button').addEventListener('click',function(){ doSearch(box); });
+    var inp=box.querySelector('input');
+    inp.addEventListener('keydown',function(e){ if(e.key==='Enter'){ e.preventDefault(); doSearch(box); } });
+    setTimeout(function(){ try{ inp.focus(); }catch(e){} },50);
+  }
+
+  function addBtn(){
+    if(document.getElementById('lk-where-btn')) return;
+    var b=document.createElement('button'); b.id='lk-where-btn'; b.type='button';
+    b.textContent='🔎'; b.title='Де товар: у яких заявках висить код';
+    b.addEventListener('click',function(e){ e.preventDefault(); e.stopPropagation(); open(); });
+    document.body.appendChild(b);
+  }
+
+  addBtn();
+  window.addEventListener('lkdom', addBtn);
+})();
+}catch(e){ try{ console.warn("[SD] модуль «lkStockWhere» не запустився:", e); }catch(_){} }
+/* ▲▲▲ МОДУЛЬ-END • lkStockWhere ▲▲▲ */
+
 /* ▼▼▼ МОДУЛЬ-START • lkTtnPrintGuard — 🖨 попередження про ПОВТОРНИЙ друк ТТН Укрпошти ▼▼▼ */
 /* ===== СРМ має серверний прапорець isPrinted (спільний для всіх менеджерів) — якщо ТТН
    уже друкували, попереджаємо перед повторним друком і показуємо бейдж біля ТТН.
@@ -6165,7 +6370,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   var ITEMS = [
     { id:'lk-side-cash', btn:'lk-cash-btn', ico:'💰', lab:'Каса',                      title:'Каса самовивозу' },
     { id:'lk-side-pick', btn:'lk-pick-btn', ico:'📋', lab:'Лист комплектації',         title:'Зведений лист комплектації' },
-    { id:'lk-side-ukp',  btn:'lk-ukp-btn',  ico:'📮', lab:'Друк пром-оплата + Укрпошта', title:'Друк: пром-оплата + Укрпошта (лист відправлень)' }
+    { id:'lk-side-ukp',  btn:'lk-ukp-btn',  ico:'📮', lab:'Друк пром-оплата + Укрпошта', title:'Друк: пром-оплата + Укрпошта (лист відправлень)' },
+    { id:'lk-side-where',btn:'lk-where-btn',ico:'🔎', lab:'Де товар',                    title:'Де товар: у яких заявках висить код (з комплектами)' }
   ];
 
   var css = ''
@@ -6180,6 +6386,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     // кружечки ховаємо: і поки шукаємо меню на старті (lk-side-boot), і коли вже вбудовано
     // (lk-side-on) — щоб на завантаженні вони не блимали перед перенесенням у меню
     +'html.lk-side-boot #lk-cash-btn,html.lk-side-boot #lk-pick-btn,html.lk-side-boot #lk-ukp-btn,'
+    +'html.lk-side-boot #lk-where-btn,html.lk-side-on #lk-where-btn,'
     +'html.lk-side-on #lk-cash-btn,html.lk-side-on #lk-pick-btn,html.lk-side-on #lk-ukp-btn{display:none!important}';
   var st=document.createElement('style'); st.textContent=css;
   (document.head||document.documentElement).appendChild(st);
