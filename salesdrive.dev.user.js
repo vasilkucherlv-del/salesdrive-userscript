@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.44
+// @version      2.45
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -2269,6 +2269,14 @@ function __sdPageMain() {
       return v;   // null = типу ціни в картці немає
     }
 
+    // товари БЕЗ галочки (pid-и), які при записі треба пропустити
+    var skip = {};
+    try {
+      var rawSkip = document.documentElement.getAttribute("data-sd-arropt-skip");
+      document.documentElement.removeAttribute("data-sd-arropt-skip");
+      (JSON.parse(rawSkip || "[]") || []).forEach(function (p) { skip[String(p)] = 1; });
+    } catch (e) {}
+
     var results = [], idx = 0;
     function progress() {
       document.documentElement.setAttribute("data-sd-arropt-progress", idx + "/" + items.length);
@@ -2278,6 +2286,10 @@ function __sdPageMain() {
       progress();
       if (idx >= items.length) return respond({ ok: true, rate: rate, rows: results });
       var x = items[idx++];
+      if (mode === "apply" && skip[String(x.pid)]) {
+        results.push({ pid: x.pid, sku: x.sku || String(x.pid), name: x.name, base: x.base, skipped: true });
+        return step();
+      }
       if (!(x.base > 0)) { results.push({ sku: x.sku, name: x.name, err: "ціна закупки порожня" }); return step(); }
       var t = tiers(x.base);
       fetch("/products/" + x.pid + "/?formId=1", { credentials: "include", headers: { "Accept": "application/json" } })
@@ -2285,7 +2297,7 @@ function __sdPageMain() {
         .then(function (j) {
           var item = j.response && j.response.item;
           if (!item) throw new Error("картка товару недоступна");
-          var row = { sku: x.sku || String(x.pid), name: x.name, base: x.base,
+          var row = { pid: x.pid, sku: x.sku || String(x.pid), name: x.name, base: x.base,
                       o2: ptOf(item, 2), o5: ptOf(item, 5), o7: ptOf(item, 7),
                       p2: t.p2, p5: t.p5, p7: t.p7 };
           if (mode !== "apply") { results.push(row); return; }   // preview: тільки читаємо
@@ -2312,7 +2324,7 @@ function __sdPageMain() {
             });
         })
         .catch(function (e) {
-          results.push({ sku: x.sku || String(x.pid), name: x.name, base: x.base, err: String((e && e.message) || e) });
+          results.push({ pid: x.pid, sku: x.sku || String(x.pid), name: x.name, base: x.base, err: String((e && e.message) || e) });
         })
         .then(function () { setTimeout(step, mode === "apply" ? 250 : 120); });   // не гатимо сервер
     }
@@ -4499,7 +4511,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     +'td.lk-arropt-td.er{color:#B71C1C;font-weight:700;font-size:13px;white-space:normal}'
     +'td.lk-arropt-td.blank{background:transparent;border-left:none}'
     +'th.lk-arropt-td{font:700 13px/1.5 Arial,sans-serif;background:#e3f4f2;color:#00695c;'
-    +'  padding:8px 16px;border-left:3px solid #00897B;white-space:nowrap}';
+    +'  padding:8px 16px;border-left:3px solid #00897B;white-space:nowrap}'
+    +'td.lk-arropt-td .nw{display:flex;align-items:center}'
+    +'.lk-arropt-chk{width:17px;height:17px;margin-right:9px;cursor:pointer;accent-color:#00897B;flex:0 0 auto}';
   var st=document.createElement('style'); st.textContent=css;
   (document.head||document.documentElement).appendChild(st);
 
@@ -4534,10 +4548,29 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       td.classList.remove('er');
       if(!r){ td.textContent=''; return; }
       if(r.err){ td.classList.add('er'); td.textContent='✗ '+r.err; td.title=r.name||''; return; }
-      var changed=(Number(r.o2)!==Number(r.p2))||(Number(r.o5)!==Number(r.p5))||(Number(r.o7)!==Number(r.p7));
       td.innerHTML='';
+      if(r.skipped){
+        var sk=document.createElement('div'); sk.className='od'; sk.textContent='⏭ пропущено (без галочки)';
+        td.appendChild(sk); td.title=r.name||''; return;
+      }
+      var changed=(Number(r.o2)!==Number(r.p2))||(Number(r.o5)!==Number(r.p5))||(Number(r.o7)!==Number(r.p7));
       var l1=document.createElement('div'); l1.className='nw';
-      l1.textContent=(view.applied?'✓ ':'')+r.p2+' / '+r.p5+' / '+r.p7;
+      // галочка «оновлювати цей товар» (за замовчуванням увімкнена) — лише в перегляді
+      if(!view.applied){
+        var cb=document.createElement('input'); cb.type='checkbox'; cb.className='lk-arropt-chk';
+        cb.checked=!r.skip;
+        cb.title='Оновлювати опт-ціни цього товару (зніми, щоб пропустити)';
+        cb.addEventListener('change',function(){
+          r.skip=!cb.checked;
+          td.style.opacity=r.skip?'0.45':'';
+          updateApplyLabel();
+        });
+        l1.appendChild(cb);
+        td.style.opacity=r.skip?'0.45':'';
+      }
+      var l1t=document.createElement('span');
+      l1t.textContent=(view.applied?'✓ ':'')+r.p2+' / '+r.p5+' / '+r.p7;
+      l1.appendChild(l1t);
       var l2=document.createElement('div'); l2.className='od';
       l2.textContent=r.o2==null&&r.o5==null&&r.o7==null
         ? 'типів цін не було — нові'
@@ -4595,6 +4628,15 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     tm=setTimeout(function(){ cleanup(); onDone(null); }, 180000);
   }
 
+  function updateApplyLabel(){
+    var b=document.getElementById('lk-arropt-apply');
+    if(!b || !view) return;
+    var total=0, sel=0;
+    view.list.forEach(function(r){ if(r.err) return; total++; if(!r.skip) sel++; });
+    b.textContent='✅ Записати вибрані ('+sel+' із '+total+')';
+    b.disabled=(sel===0);
+  }
+
   function bar(){
     var old=document.getElementById('lk-arropt-res'); if(old) old.remove();
     var box=document.createElement('div'); box.id='lk-arropt-res';
@@ -4638,21 +4680,32 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       box.appendChild(h);
       errLines(box, rows);
       var ap=document.createElement('button'); ap.className='lk-arropt-btn'; ap.style.marginLeft='0';
-      ap.textContent='✅ Записати ці ціни у товари';
+      ap.id='lk-arropt-apply';
+      ap.textContent='✅ Записати вибрані';
       ap.addEventListener('click',function(){
-        if(!confirm('Записати нові опт-ціни у картки товарів ('+rows.length+' позицій)?')) return;
+        var sel=0, skips=[];
+        view.list.forEach(function(r){
+          if(r.err) return;
+          if(r.skip){ if(r.pid!=null) skips.push(r.pid); }
+          else sel++;
+        });
+        if(!sel) return;
+        if(!confirm('Записати нові опт-ціни у '+sel+' товарів'
+          +(skips.length?(' (пропустити без галочки: '+skips.length+')'):'')+'?')) return;
+        document.documentElement.setAttribute('data-sd-arropt-skip', JSON.stringify(skips));
         ap.disabled=true;
         invoke('apply', function(d2){
           if(!d2 || !d2.ok){
             ap.disabled=false; ap.textContent='✗ не вдалось — ще раз';
             return;
           }
-          var ok2=0, er2=0;
-          (d2.rows||[]).forEach(function(r){ if(r.err) er2++; else ok2++; });
+          var ok2=0, er2=0, sk2=0;
+          (d2.rows||[]).forEach(function(r){ if(r.err) er2++; else if(r.skipped) sk2++; else ok2++; });
           setView(d2.rows, true, d2.rate);
           var box2=bar();
           var h2=document.createElement('div'); h2.className='h';
-          h2.textContent='💰 ЗАПИСАНО: '+ok2+' товарів'+(er2?(' · помилок: '+er2):'')+'. Колонка «Опт» — що тепер у картках.';
+          h2.textContent='💰 ЗАПИСАНО: '+ok2+' товарів'+(sk2?(' · пропущено: '+sk2):'')
+            +(er2?(' · помилок: '+er2):'')+'. Колонка «Опт» — що тепер у картках.';
           box2.appendChild(h2);
           errLines(box2, d2.rows);
         }, function(p){ ap.textContent='✅ Пишу '+p+'…'; });
@@ -4661,6 +4714,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       cl.style.background='#9e9e9e'; cl.textContent='✕ Прибрати';
       cl.addEventListener('click',function(){ clearView(); });
       box.appendChild(ap); box.appendChild(cl);
+      updateApplyLabel();
     }, function(p){ btn.textContent='💰 Читаю '+p+'…'; });
   }
 
