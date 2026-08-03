@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.43
+// @version      2.44
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -6115,10 +6115,13 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   ];
 
   var css = ''
-    +'.lk-side-item{display:block;cursor:pointer;text-align:center;padding:9px 5px 10px;user-select:none;list-style:none}'
+    // метрики як у штатних пунктів меню (висота ~70px, іконка 22px, підпис 11px)
+    +'.lk-side-item{display:flex;flex-direction:column;justify-content:center;align-items:center;'
+    +'  min-height:70px;box-sizing:border-box;cursor:pointer;text-align:center;'
+    +'  padding:10px 5px;user-select:none;list-style:none}'
     +'.lk-side-item:hover{background:rgba(255,255,255,.09)}'
-    +'.lk-side-item .ico{display:block;font-size:20px;line-height:1.2}'
-    +'.lk-side-item .lab{display:block;font-size:10.5px;line-height:1.25;color:#cfd8dc;margin-top:2px}'
+    +'.lk-side-item .ico{display:block;font-size:22px;line-height:1.25}'
+    +'.lk-side-item .lab{display:block;font-size:11px;line-height:1.3;color:#cfd8dc;margin-top:4px}'
     +'.lk-side-item:hover .lab{color:#fff}'
     // кружечки ховаємо: і поки шукаємо меню на старті (lk-side-boot), і коли вже вбудовано
     // (lk-side-on) — щоб на завантаженні вони не блимали перед перенесенням у меню
