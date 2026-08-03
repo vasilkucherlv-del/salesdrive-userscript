@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.47
+// @version      2.48
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -35,6 +35,7 @@
      • lkArrivalOpt    — 💰 опт-ціни товарів (×1.2/×1.25/×1.3↑5) із собівартості накладної
      • lkRoundPickup   — 🔟 заокруглення суми самовивозу вгору до 10 ₴ (99→100, 108→110)
      • lkStockWhere    — 🔎 «Де товар»: у яких заявках висить код (з урахуванням комплектів)
+     • lkCatalogKits   — позначка «входить у набори» в каталозі Товари/Послуги
      • lkTtnPrintGuard — 🖨 попередження про повторний друк ТТН Укрпошти
      • lkCashRegister  — 💰 Каса самовивозу
      • lkPickList      — 📋 зведений лист комплектації (сума товарів по заявках статусу)
@@ -5182,6 +5183,149 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 })();
 }catch(e){ try{ console.warn("[SD] модуль «lkStockWhere» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkStockWhere ▲▲▲ */
+
+/* ▼▼▼ МОДУЛЬ-START • lkCatalogKits — Набори: позначка в каталозі «Товари» ▼▼▼ */
+/* ===== У списку Товари/Послуги біля SKU показуємо, що товар входить у набори
+   (у рядках заявки та в картці це вже було, у каталозі — бракувало). ===== */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
+(function lkCatalogKits(){
+  'use strict';
+  var PAGE=(typeof unsafeWindow!=='undefined'&&unsafeWindow)||window;
+  var KITS_URL='https://barcode-printer-production-2b32.up.railway.app/api/kits?token=nab_8Kx2pQ7mLr4tW9vZ';
+  var CACHE='lknb_cache2', HARD=6*60*60*1000, SOFT=30*60*1000;
+  var CAT=function(sku){ return '/ua/index.html?formId=1#/product/index?filter%5Bsku%5D='+encodeURIComponent(sku); };
+
+  var css=''
+    +'.lkck-plus{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;'
+    +'  margin-left:6px;border-radius:50%;background:#ef8a1f;color:#fff;font:700 12px/1 sans-serif;'
+    +'  cursor:pointer;vertical-align:middle;user-select:none}'
+    +'.lkck-plus:hover{background:#d97a12}'
+    +'.lkck-exp{margin:4px 0 2px;padding:6px 9px;border-left:3px solid #ef8a1f;background:#fff7ec;'
+    +'  border-radius:4px;font:12px/1.45 -apple-system,Segoe UI,Roboto,sans-serif;color:#333;'
+    +'  white-space:normal;min-width:230px}'
+    +'.lkck-exp .h{color:#8a5a12;font-weight:600;margin-bottom:3px}'
+    +'.lkck-exp .r{padding:1px 0;font-family:ui-monospace,Menlo,Consolas,monospace}'
+    +'.lkck-exp .r a{color:#0a58ca;text-decoration:underline;font-weight:700}'
+    +'.lkck-exp .r .nm{color:#888;font-family:-apple-system,Segoe UI,Roboto,sans-serif}';
+  var st=document.createElement('style'); st.textContent=css;
+  (document.head||document.documentElement).appendChild(st);
+
+  function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
+  function gGet(k){ try{ var v=GM_getValue(k,null); return v?((typeof v==='string')?JSON.parse(v):v):null; }catch(e){ return null; } }
+  function gSet(k,v){ try{ GM_setValue(k, JSON.stringify(v)); }catch(e){} }
+
+  var comp2kits=null, loading=false;
+  function build(kits){
+    var m={};
+    Object.keys(kits||{}).forEach(function(kitSku){
+      var info=kits[kitSku]||{};
+      (info.comps||[]).forEach(function(c){
+        var cs=String(c.sku==null?'':c.sku).trim();
+        if(!cs) return;
+        (m[cs]=m[cs]||[]).push({ kit:String(kitSku), qty:Number(c.qty)||1, name:info.name||'' });
+      });
+    });
+    return m;
+  }
+  function fetchKits(){
+    return new Promise(function(resolve,reject){
+      function done(t){ try{ var d=JSON.parse(t); d.ok&&d.kits?resolve(d.kits):reject(new Error('no')); }catch(e){ reject(e); } }
+      try{
+        if(typeof GM_xmlhttpRequest!=='undefined'){
+          GM_xmlhttpRequest({ method:'GET', url:KITS_URL,
+            onload:function(r){ (r.status>=200&&r.status<300)?done(r.responseText):reject(new Error('HTTP '+r.status)); },
+            onerror:function(){ reject(new Error('net')); } });
+        } else { fetch(KITS_URL).then(function(r){return r.text();}).then(done).catch(reject); }
+      }catch(e){ reject(e); }
+    });
+  }
+  function refreshBg(){
+    if(loading) return;
+    loading=true;
+    fetchKits().then(function(kits){
+      comp2kits=build(kits); gSet(CACHE,{ts:Date.now(),kits:kits});
+      try{ scan(); }catch(e){}
+    }).catch(function(){}).then(function(){ loading=false; });
+  }
+  function ensureData(){
+    if(comp2kits||loading) return;
+    var c=gGet(CACHE), ts=0;
+    if(c && c.kits && Date.now()-c.ts<HARD){ comp2kits=build(c.kits); ts=c.ts; }
+    if(comp2kits){ if(Date.now()-ts>SOFT) refreshBg(); return; }
+    refreshBg();
+  }
+
+  function onPage(){ return /#\/product\/index/.test(location.hash||''); }
+
+  // код товару рядка — з Angular-scope (надійніше за вгадування колонки)
+  function rowSku(tr){
+    try{
+      var ng=PAGE.angular||window.angular;
+      var sc=ng&&ng.element(tr).scope();
+      var o=sc&&(sc.option||sc.item||sc.product);
+      if(o&&o.sku!=null) return String(o.sku).trim();
+    }catch(e){}
+    return null;
+  }
+  // комірка, де надрукований цей код
+  function skuCell(tr,sku){
+    for(var i=0;i<tr.cells.length;i++){
+      if(String(tr.cells[i].textContent||'').trim()===sku) return tr.cells[i];
+    }
+    return null;
+  }
+
+  function inject(cell,sku,list){
+    var plus=document.createElement('span');
+    plus.className='lkck-plus'; plus.textContent='+';
+    plus.title='Входить у набори ('+list.length+')';
+    var exp=document.createElement('div');
+    exp.className='lkck-exp'; exp.style.display='none';
+    exp.innerHTML='<div class="h">Входить у набори:</div>'+list.map(function(k){
+      return '<div class="r"><a href="'+CAT(k.kit)+'" target="_blank" rel="noopener">'+esc(k.kit)+'</a>'
+        +' · <span class="nm">'+esc(k.name)+'</span> ×'+k.qty+'</div>';
+    }).join('');
+    plus.addEventListener('click',function(e){
+      e.preventDefault(); e.stopPropagation();
+      var open=exp.style.display!=='none';
+      exp.style.display=open?'none':'block';
+      plus.textContent=open?'+':'–';
+    });
+    exp.addEventListener('click',function(e){ e.stopPropagation(); });
+    cell.appendChild(plus); cell.appendChild(exp);
+  }
+
+  function scan(){
+    if(!comp2kits || !onPage()) return;
+    var trs=document.querySelectorAll('tr');
+    for(var i=0;i<trs.length;i++){
+      var tr=trs[i];
+      if(!tr.cells || tr.cells.length<3) continue;
+      var sku=rowSku(tr);
+      if(sku==null) continue;
+      var list=comp2kits[sku];
+      var should=!!(list&&list.length);
+      var prev=tr.getAttribute('data-lkck');
+      var has=!!tr.querySelector('.lkck-plus');
+      if(prev===(sku||'') && has===should) continue;
+      var old=tr.querySelectorAll('.lkck-plus,.lkck-exp');
+      for(var k=0;k<old.length;k++) old[k].remove();
+      tr.setAttribute('data-lkck', sku||'');
+      if(should){
+        var cell=skuCell(tr,sku);
+        if(cell) inject(cell,sku,list);
+      }
+    }
+  }
+
+  var t=null;
+  function scanSoon(){ clearTimeout(t); t=setTimeout(function(){ ensureData(); scan(); },300); }
+  ensureData(); scanSoon();
+  window.addEventListener('lkdom', scanSoon);
+  window.addEventListener('hashchange', scanSoon);
+})();
+}catch(e){ try{ console.warn("[SD] модуль «lkCatalogKits» не запустився:", e); }catch(_){} }
+/* ▲▲▲ МОДУЛЬ-END • lkCatalogKits ▲▲▲ */
 
 /* ▼▼▼ МОДУЛЬ-START • lkTtnPrintGuard — 🖨 попередження про ПОВТОРНИЙ друк ТТН Укрпошти ▼▼▼ */
 /* ===== СРМ має серверний прапорець isPrinted (спільний для всіх менеджерів) — якщо ТТН
