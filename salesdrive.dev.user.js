@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.49
+// @version      2.50
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -35,7 +35,7 @@
      • lkArrivalOpt    — 💰 опт-ціни товарів (×1.2/×1.25/×1.3↑5) із собівартості накладної
      • lkRoundPickup   — 🔟 заокруглення суми самовивозу вгору до 10 ₴ (99→100, 108→110)
      • lkStockWhere    — 🔎 «Де товар»: у яких заявках висить код (з урахуванням комплектів)
-     • lkCatalogKits   — позначка «входить у набори» в каталозі Товари/Послуги
+     • lkCatalogKits   — позначка «входить у набори» в каталозі Товари/Послуги + на сторінці товару
      • lkTtnPrintGuard — 🖨 попередження про повторний друк ТТН Укрпошти
      • lkCashRegister  — 💰 Каса самовивозу
      • lkPickList      — 📋 зведений лист комплектації (сума товарів по заявках статусу)
@@ -5274,6 +5274,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   }
 
   function onPage(){ return /#\/product\/index/.test(location.hash||''); }
+  function onProductPage(){ return /#\/product\/update\/\d+/.test(location.hash||''); }
 
   // код товару рядка — з Angular-scope (надійніше за вгадування колонки)
   function rowSku(tr){
@@ -5313,7 +5314,27 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     cell.appendChild(plus); cell.appendChild(exp);
   }
 
+  // окрема СТОРІНКА товару (#/product/update/ID): позначка одразу біля поля SKU
+  function scanProductPage(){
+    if(!comp2kits || !onProductPage()) return;
+    var inp=document.querySelector('input[ng-model="viewModel.item.sku"]')
+         || document.querySelector('input[ng-model$=".sku"]');
+    if(!inp) return;
+    var sku=String(inp.value==null?'':inp.value).trim();
+    var host=inp.parentElement; if(!host) return;
+    var list=comp2kits[sku];
+    var should=!!(list&&list.length);
+    var prev=host.getAttribute('data-lkck');
+    var has=!!host.querySelector('.lkck-plus');
+    if(prev===(sku||'') && has===should) return;
+    var old=host.querySelectorAll('.lkck-plus,.lkck-exp');
+    for(var i=0;i<old.length;i++) old[i].remove();
+    host.setAttribute('data-lkck', sku||'');
+    if(should) inject(host, sku, list);
+  }
+
   function scan(){
+    scanProductPage();
     if(!comp2kits || !onPage()) return;
     var trs=document.querySelectorAll('tr');
     for(var i=0;i<trs.length;i++){
