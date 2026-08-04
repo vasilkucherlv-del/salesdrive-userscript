@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.48
+// @version      2.49
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -3559,17 +3559,23 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   let id2kits = null, loading = false;
 
   // мапа: ID складової -> [набори, в які вона входить]
+  // індексуємо І за внутрішнім id, І за кодом (sku): у даних наборів id не завжди
+  // збігається з ID у СРМ — через це в частини товарів рядок не зʼявлявся
+  let sku2kits = new Map();
   function build(kitsObj) {
     const m = new Map();
+    const ms = new Map();
     for (const kitSku of Object.keys(kitsObj || {})) {
       const info = kitsObj[kitSku] || {};
       for (const c of (info.comps || [])) {
+        const rec = { code: kitSku, name: info.name || '', id: info.id || '' };
         const cid = norm(c.id);
-        if (!cid) continue;
-        if (!m.has(cid)) m.set(cid, []);
-        m.get(cid).push({ code: kitSku, name: info.name || '', id: info.id || '' });
+        if (cid) { if (!m.has(cid)) m.set(cid, []); m.get(cid).push(rec); }
+        const cs = norm(c.sku);
+        if (cs) { if (!ms.has(cs)) ms.set(cs, []); ms.get(cs).push(rec); }
       }
     }
+    sku2kits = ms;
     return m;
   }
 
@@ -3725,7 +3731,19 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     if (existing && existing.getAttribute('data-id') === id) return; // вже стоїть для цього товару
     root.querySelectorAll('.lkmk-row').forEach(n => n.remove());     // інший товар / дубль — прибрати
 
-    const kits = id2kits.get(id) || [];
+    let kits = id2kits.get(id) || [];
+    if (!kits.length) {
+      // фолбек за кодом: беремо значення рядка «SKU» у картці
+      let sku = '';
+      root.querySelectorAll('label').forEach(l => {
+        if (sku) return;
+        if (/^SKU$/i.test(norm(l.textContent))) {
+          const outer = l.parentElement;
+          if (outer) sku = norm(String(outer.textContent || '').replace(norm(l.textContent), ''));
+        }
+      });
+      if (sku) kits = sku2kits.get(sku) || [];
+    }
     if (!kits.length) return;                                        // не входить у жоден набір — рядка немає
 
     idRow.outer.insertAdjacentElement('afterend', buildRow(kits, id));
