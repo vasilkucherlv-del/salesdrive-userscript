@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.52
+// @version      2.53
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -5206,6 +5206,10 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 
   addBtn();
   window.addEventListener('lkdom', addBtn);
+  // при переході на іншу сторінку панель має закриватись, а не висіти поверх вмісту
+  window.addEventListener('hashchange', function(){
+    var ov=document.getElementById('lk-where-ov'); if(ov) ov.remove();
+  });
 })();
 }catch(e){ try{ console.warn("[SD] модуль «lkStockWhere» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkStockWhere ▲▲▲ */
