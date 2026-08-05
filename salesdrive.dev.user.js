@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.50
+// @version      2.51
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4598,6 +4598,12 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       var r=(sku&&view.bySku[sku])||view.list[i]; i++;
       var td=tr.querySelector('td.lk-arropt-td');
       if(!td){ td=document.createElement('td'); td.className='lk-arropt-td'; tr.appendChild(td); }
+      // перемальовуємо ЛИШЕ коли дані клітинки справді змінились — інакше колонка
+      // мигтіла: рендер ішов на кожен пульс DOM (~сотні разів на хвилину)
+      var sig=[view.applied?1:0, (r&&r.err)||'', (r&&r.skipped)?1:0, (r&&r.skip)?1:0,
+               r?r.p2:'', r?r.p5:'', r?r.p7:'', r?r.o2:'', r?r.o5:'', r?r.o7:''].join('|');
+      if(td.getAttribute('data-sig')===sig) return;
+      td.setAttribute('data-sig', sig);
       td.classList.remove('er');
       if(!r){ td.textContent=''; return; }
       if(r.err){ td.classList.add('er'); td.textContent='✗ '+r.err; td.title=r.name||''; return; }
