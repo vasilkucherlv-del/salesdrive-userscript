@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.57
+// @version      2.58
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -35,6 +35,7 @@
      • lkArrivalOpt    — 💰 опт-ціни товарів (×1.2/×1.25/×1.3↑5) із собівартості накладної
      • lkRoundPickup   — 🔟 заокруглення суми самовивозу вгору до 10 ₴ (99→100, 108→110)
      • lkStockWhere    — 🔎 «Де товар»: у яких заявках висить код (з урахуванням комплектів)
+     • lkRozCommission — ⚖ комісія Rozetka для товарів, дописаних менеджером
      • lkCatalogKits   — позначка «входить у набори» в каталозі Товари/Послуги + на сторінці товару
      • lkTtnPrintGuard — 🖨 попередження про повторний друк ТТН Укрпошти
      • lkCashRegister  — 💰 Каса самовивозу
@@ -2331,6 +2332,68 @@ function __sdPageMain() {
         .then(function () { setTimeout(step, mode === "apply" ? 250 : 120); });   // не гатимо сервер
     }
     step();
+  });
+
+  // ---------- КОМІСІЯ ROZETKA для дописаних товарів ----------
+  // У Rozetka-замовленні комісія лежить у полі рядка як ВІДСОТОК (commission=14.04,
+  // percentCommission=1; у полі редагування — «14,04%»). Товари, які менеджер додає
+  // руками, приходять із нульовою комісією → підсумок комісії занижується.
+  // Обробник бере відсоток із рядків, що приїхали з Rozetka, і проставляє його
+  // рядкам без комісії — штатним шляхом (editComment → newCommission → updateComment),
+  // інакше «Зберегти» не зафіксує зміну.
+  window.addEventListener("sdRozCommission", function () {
+    var token = document.documentElement.getAttribute("data-sd-rozcomm-token") || "";
+    function respond(o) {
+      o.token = token;
+      document.documentElement.setAttribute("data-sd-rozcomm-result", JSON.stringify(o));
+      window.dispatchEvent(new Event("sdRozCommissionResult"));
+    }
+    function num(v) { var n = parseFloat(String(v == null ? "" : v).replace(/\s|%/g, "").replace(",", ".")); return isNaN(n) ? 0 : n; }
+
+    var got = getVMcached();
+    if (!got || !got.vm) return respond({ ok: false, err: "no-viewModel" });
+    var vm = got.vm, scope = got.scope, items = vm.items || [];
+    if (!isRozetkaOrder(vm)) return respond({ ok: false, err: "не Rozetka" });
+    if (!items.length) return respond({ ok: false, err: "нема товарів" });
+
+    // еталонний відсоток: найчастіший ненульовий серед рядків із відсотковою комісією
+    var counts = {}, ref = 0;
+    items.forEach(function (x) {
+      var c = num(x.commission);
+      if (c > 0 && Number(x.percentCommission) === 1) counts[c] = (counts[c] || 0) + 1;
+    });
+    Object.keys(counts).forEach(function (c) {
+      if (!ref || counts[c] > counts[ref] || (counts[c] === counts[ref] && Number(c) > ref)) ref = Number(c);
+    });
+    if (!(ref > 0)) return respond({ ok: false, err: "у замовленні нема товару з комісією Rozetka" });
+
+    var targets = items.filter(function (x) { return !(num(x.commission) > 0); });
+    if (!targets.length) return respond({ ok: true, none: true, ref: ref });
+
+    var txt = String(ref).replace(".", ",") + "%";
+    var done = [];
+    try {
+      var fakeEvt = { preventDefault: function () {}, stopPropagation: function () {} };
+      safeApply(scope, function () {
+        targets.forEach(function (it) {
+          try {
+            if (typeof vm.editComment === "function" && typeof vm.updateComment === "function") {
+              vm.editComment(it, it.index, fakeEvt);
+              it.percentCommission = 1;
+              it.newCommission = txt;
+              vm.updateComment(it, it.index);
+            } else {
+              it.commission = ref; it.percentCommission = 1;
+            }
+            done.push(String(it.name || it.documentName || "").slice(0, 40));
+          } catch (e) {}
+        });
+        try { if (typeof vm.updateItems === "function") vm.updateItems(); } catch (e) {}
+      });
+      respond({ ok: true, ref: ref, n: done.length, names: done });
+    } catch (e) {
+      respond({ ok: false, err: String(e) });
+    }
   });
 
   // ---------- ЗАОКРУГЛЕННЯ СУМИ САМОВИВОЗУ (вгору до кратного 10) ----------
@@ -5070,6 +5133,94 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 })();
 }catch(e){ try{ console.warn("[SD] модуль «lkRoundPickup» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkRoundPickup ▲▲▲ */
+
+/* ▼▼▼ МОДУЛЬ-START • lkRozCommission — ⚖ комісія Rozetka для дописаних товарів ▼▼▼ */
+/* ===== У Rozetka-замовленні товар, доданий менеджером, приходить із нульовою
+   комісією. Модуль помічає появу нових рядків і проставляє їм той самий відсоток
+   комісії, що був у товарів, які приїхали в замовленні спочатку. Core: sdRozCommission. ===== */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
+(function lkRozCommission(){
+  'use strict';
+  var PAGE=(typeof unsafeWindow!=='undefined'&&unsafeWindow)||window;
+
+  var css=''
+    +'#lk-rozcomm{margin:6px 0 2px;padding:8px 12px;border:1px solid #BBD3F5;border-left:4px solid #1565C0;'
+    +'  background:#E8F0FE;border-radius:6px;font:13px/1.5 Arial,sans-serif;color:#14418f;'
+    +'  max-width:980px;box-sizing:border-box;position:relative}'
+    +'#lk-rozcomm b{font-weight:800}'
+    +'#lk-rozcomm .x{position:absolute;top:4px;right:8px;border:none;background:none;cursor:pointer;'
+    +'  font-size:16px;color:#14418f;opacity:.6}'
+    +'#lk-rozcomm .x:hover{opacity:1}';
+  var st=document.createElement('style'); st.textContent=css;
+  (document.head||document.documentElement).appendChild(st);
+
+  function onOrderPage(){ return /#\/order\/(update|create)/.test(location.hash||''); }
+  function orderKey(){ var m=(location.hash||'').match(/#\/order\/\w+\/(\d+)/); return m?m[1]:''; }
+  function rows(){ return document.querySelectorAll('tr[ng-repeat^="item in viewModel.items"]').length; }
+  function itemsTable(){
+    var btn=null, all=document.querySelectorAll('[ng-click]');
+    for(var i=0;i<all.length;i++){
+      if((all[i].getAttribute('ng-click')||'').replace(/\s+/g,'')==='viewModel.addOption()'){ btn=all[i]; break; }
+    }
+    return btn?btn.closest('table'):null;
+  }
+
+  function notice(text){
+    var old=document.getElementById('lk-rozcomm'); if(old) old.remove();
+    var tbl=itemsTable(); if(!tbl||!tbl.parentElement) return;
+    var box=document.createElement('div'); box.id='lk-rozcomm';
+    box.innerHTML='<b>⚖ '+text+'</b>';
+    var x=document.createElement('button'); x.className='x'; x.textContent='×';
+    x.addEventListener('click',function(){ box.remove(); });
+    box.appendChild(x);
+    tbl.insertAdjacentElement('afterend', box);
+    setTimeout(function(){ try{ box.remove(); }catch(e){} }, 25000);
+  }
+
+  var busy=false;
+  function fill(){
+    if(busy) return;
+    busy=true;
+    var token=String(Date.now())+'_'+Math.random().toString(36).slice(2);
+    var tm=null;
+    function done(){ PAGE.removeEventListener('sdRozCommissionResult', onRes); clearTimeout(tm); busy=false; }
+    function onRes(){
+      var raw=document.documentElement.getAttribute('data-sd-rozcomm-result');
+      if(!raw) return;
+      var d; try{ d=JSON.parse(raw); }catch(e){ return; }
+      if(!d || d.token!==token) return;
+      done();
+      if(!d.ok || d.none) return;                       // не Rozetka / нема чого робити — мовчимо
+      var pct=String(d.ref).replace('.',',')+'%';
+      notice('Комісія Rozetka '+pct+' проставлена '+d.n+' '+(d.n===1?'товару':'товарам')
+        +' без комісії. Перевір і натисни «Зберегти».');
+    }
+    PAGE.addEventListener('sdRozCommissionResult', onRes);
+    document.documentElement.setAttribute('data-sd-rozcomm-token', token);
+    document.documentElement.removeAttribute('data-sd-rozcomm-result');
+    PAGE.dispatchEvent(new Event('sdRozCommission'));
+    tm=setTimeout(done, 8000);
+  }
+
+  // стежимо за появою нових рядків товарів; спрацьовуємо із затримкою,
+  // щоб не лізти, поки менеджер ще друкує в рядку
+  var lastKey='', lastRows=-1, t=null;
+  function check(){
+    if(!onOrderPage()){ lastKey=''; lastRows=-1; return; }
+    var key=orderKey(), n=rows();
+    if(!n) return;
+    if(key!==lastKey){ lastKey=key; lastRows=n; clearTimeout(t); t=setTimeout(fill, 2500); return; }
+    if(n!==lastRows){ lastRows=n; clearTimeout(t); t=setTimeout(fill, 2500); }
+  }
+
+  var ct=null;
+  function checkSoon(){ clearTimeout(ct); ct=setTimeout(check,400); }
+  checkSoon();
+  window.addEventListener('lkdom', checkSoon);
+  window.addEventListener('hashchange', checkSoon);
+})();
+}catch(e){ try{ console.warn("[SD] модуль «lkRozCommission» не запустився:", e); }catch(_){} }
+/* ▲▲▲ МОДУЛЬ-END • lkRozCommission ▲▲▲ */
 
 /* ▼▼▼ МОДУЛЬ-START • lkStockWhere — 🔎 «Де товар»: у яких заявках висить код ▼▼▼ */
 /* ===== Вставляєш код товару — показує, у яких заявках він «висить» у робочих
