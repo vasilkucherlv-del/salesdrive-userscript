@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.58
+// @version      2.59
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -2365,10 +2365,13 @@ function __sdPageMain() {
     Object.keys(counts).forEach(function (c) {
       if (!ref || counts[c] > counts[ref] || (counts[c] === counts[ref] && Number(c) > ref)) ref = Number(c);
     });
-    if (!(ref > 0)) return respond({ ok: false, err: "у замовленні нема товару з комісією Rozetka" });
+    // якщо жодного оригінального рядка з комісією немає (усе дописано вручну) —
+    // беремо запасний відсоток 19,44% (домовленість Василя)
+    var fallback = false;
+    if (!(ref > 0)) { ref = 19.44; fallback = true; }
 
     var targets = items.filter(function (x) { return !(num(x.commission) > 0); });
-    if (!targets.length) return respond({ ok: true, none: true, ref: ref });
+    if (!targets.length) return respond({ ok: true, none: true, ref: ref, fallback: fallback });
 
     var txt = String(ref).replace(".", ",") + "%";
     var done = [];
@@ -2390,7 +2393,7 @@ function __sdPageMain() {
         });
         try { if (typeof vm.updateItems === "function") vm.updateItems(); } catch (e) {}
       });
-      respond({ ok: true, ref: ref, n: done.length, names: done });
+      respond({ ok: true, ref: ref, n: done.length, names: done, fallback: fallback });
     } catch (e) {
       respond({ ok: false, err: String(e) });
     }
@@ -5192,7 +5195,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       done();
       if(!d.ok || d.none) return;                       // не Rozetka / нема чого робити — мовчимо
       var pct=String(d.ref).replace('.',',')+'%';
-      notice('Комісія Rozetka '+pct+' проставлена '+d.n+' '+(d.n===1?'товару':'товарам')
+      notice('Комісія Rozetka '+pct+(d.fallback?' (за замовчуванням — у замовленні не було товару з комісією)':'')
+        +' проставлена '+d.n+' '+(d.n===1?'товару':'товарам')
         +' без комісії. Перевір і натисни «Зберегти».');
     }
     PAGE.addEventListener('sdRozCommissionResult', onRes);
