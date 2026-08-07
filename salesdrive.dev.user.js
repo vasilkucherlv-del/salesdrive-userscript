@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.56
+// @version      2.57
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4326,7 +4326,10 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
         c.appendChild(a); c.appendChild(x); bar.appendChild(c);
       });
     }
-    addGroup('⛔ Клієнт НЕ отримав повідомлення:', keys);
+    addGroup('⛔ Клієнт НЕ отримав повідомлення:',
+      keys.filter(function(k){ return (all[k].kind||'alert')==='alert'; }));
+    addGroup('🖨 ТТН друковано повторно:',
+      keys.filter(function(k){ return all[k].kind==='ttn'; }));
   }
 
   function renderToasts(){
@@ -4335,14 +4338,19 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       if(now-(all[k].t||0)>5*24*3600*1000){ delete all[k]; changed=true; }  // чистка старших за 5 днів
     });
     if(changed) saveAll(all);
-    var keys=Object.keys(all).filter(function(k){ return !all[k].ack && (all[k].kind||'alert')==='alert'; });
+    var keys=Object.keys(all).filter(function(k){
+      var kd=(all[k].kind||'alert');
+      return !all[k].ack && (kd==='alert' || kd==='ttn');
+    });
     var box=document.getElementById('sd-cf-toasts');
     var bar=document.getElementById('sd-cf-topbar');
     var onList=/\/order\/index/.test(location.hash||'');   // список заявок (будь-які фільтри менеджера)
 
     if(!onList && keys.length){
-      var cur=curOrderNum();   // на сторінці самої заявки не дублюємо (там банер над чатом)
-      keys=keys.filter(function(k){ return all[k].num!==cur; });
+      var cur=curOrderNum();   // чат-алерт на своїй заявці не дублюємо (там банер над чатом),
+      keys=keys.filter(function(k){        // а ТТН-повідомлення показуємо і тут — банера немає
+        return !((all[k].kind||'alert')==='alert' && all[k].num===cur);
+      });
     }
     if(!keys.length){ if(box) box.remove(); if(bar) bar.remove(); return; }
 
@@ -4358,9 +4366,14 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       if(box.querySelector('[data-k="'+k+'"]')) return;
       var d=document.createElement('div'); d.className='sd-cf-toast'; d.setAttribute('data-k',k);
       var t=document.createElement('div'); t.className='t';
-      t.textContent='⛔ Заявка #'+r.num+': повідомлення НЕ доставлено';
+      var isTtn=(r.kind==='ttn');
+      t.textContent=isTtn
+        ? '🖨 Заявка #'+r.num+': ТТН друковано ПОВТОРНО'
+        : '⛔ Заявка #'+r.num+': повідомлення НЕ доставлено';
       var w=document.createElement('div');
-      w.textContent=(r.reason||'')+'. Клієнт його не бачив — подзвони або SMS.';
+      w.textContent=isTtn
+        ? ('ТТН '+(r.ttn||'')+' — '+(r.reason||'')+'. Перевір, чи не наклеїли дві етикетки.')
+        : ((r.reason||'')+'. Клієнт його не бачив — подзвони або SMS.');
       var a=document.createElement('div'); a.className='a';
       var op=document.createElement('a'); op.textContent='Відкрити заявку'; op.href=r.url||'#';
       var ok=document.createElement('button'); ok.type='button'; ok.textContent='OK, зрозумів';
@@ -5442,13 +5455,6 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   var API_KEY='9yC3JYj4MlYitQ8J3KUf-uy_qPDYkFzwoITQSUeiWEDMZntbQ4uj0NxNcHrqAg8VAB6wDmkdXJZ1LMFgnQbuivTSrzutQbVB66wN';
   var LKEY='lk_ttnprint_v1';
 
-  var css=''
-    +'.lk-ttnp{display:inline-block;margin-left:8px;padding:2px 10px;border-radius:12px;'
-    +'  font:700 11.5px/1.6 Arial,sans-serif;vertical-align:middle;white-space:nowrap}'
-    +'.lk-ttnp.was{background:#fdecea;color:#b71c1c;border:1px solid #f5b7b1}'
-    +'.lk-ttnp.new{background:#E6F4EA;color:#1B5E20;border:1px solid #A5D6A7}';
-  var st=document.createElement('style'); st.textContent=css;
-  (document.head||document.documentElement).appendChild(st);
 
   function orderId(){ var m=(location.hash||'').match(/#\/order\/update\/(\d+)/); return m?m[1]:null; }
   function load(){ try{ return JSON.parse(localStorage.getItem(LKEY))||{}; }catch(e){ return {}; } }
@@ -5473,52 +5479,22 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
           ukr: (String(d.provider||'')==='ukrposhta' || Number(o.shipping_method)===30),
           ttn: String(d.trackingNumber||''),
           srvPrinted: !!Number(d.isPrinted) };
-        badge();
       })
       .catch(function(){ state[id]={ready:true, ukr:false, ttn:'', srvPrinted:false}; });
   }
 
   function localRec(ttn){ return ttn ? (load()[ttn]||null) : null; }
 
-  // бейдж біля номера ТТН у картці заявки
-  function badge(){
-    var id=orderId(); if(!id) return;
-    var s=state[id];
-    var old=document.querySelector('.lk-ttnp');
-    if(!s || !s.ready || !s.ukr || !s.ttn){ if(old) old.remove(); return; }
-    var rec=localRec(s.ttn);
-    var was=s.srvPrinted || !!rec;
-    // якщо бейдж уже намальовано для цього стану — нічого не робимо (без сканувань DOM)
-    var sig=s.ttn+'|'+(was?1:0)+'|'+((rec&&rec.n)||0);
-    if(old && old.getAttribute('data-sig')===sig) return;
-    // елемент із номером ТТН: це посилання <a> (перевірено), тож спершу лише <a>;
-    // повний перебір span/div — тільки якщо раптом не знайшлося
-    function findByText(sel){
-      var all=document.querySelectorAll(sel);
-      for(var i=0;i<all.length;i++){
-        var el=all[i];
-        if(el.children.length) continue;
-        if(String(el.textContent||'').trim()===s.ttn) return el;
-      }
-      return null;
-    }
-    var host=findByText('a')||findByText('span,div');
-    if(!host){ if(old) old.remove(); return; }
-    var b=old;
-    if(!b){ b=document.createElement('span'); b.className='lk-ttnp'; }
-    b.setAttribute('data-sig', sig);
-    b.className='lk-ttnp '+(was?'was':'new');
-    if(was){
-      var n=rec&&rec.n?rec.n:null;
-      b.textContent='🖨 ТТН уже друкували'+(n?(' · '+n+'× на цьому ПК'):'');
-      b.title=(rec&&rec.t)?('останній друк тут: '+fmtDate(rec.t)):'позначено в СРМ як роздрукована';
-    }else{
-      b.textContent='🖨 ще не друкована';
-      b.title='за даними СРМ цю ТТН ще не друкували';
-    }
-    if(b.parentElement!==host.parentElement || b.previousSibling!==host){
-      try{ host.insertAdjacentElement('afterend', b); }catch(e){}
-    }
+  // повідомлення про ПОВТОРНИЙ друк — у спільне зведення зверху (як недоставлені чати)
+  function notifyRepeat(id, ttn, n){
+    try{
+      var LS='lk_chatfail_v1', all={};
+      try{ all=JSON.parse(localStorage.getItem(LS))||{}; }catch(e){}
+      all['ttn:'+ttn]={ num:String(id), ttn:String(ttn), kind:'ttn', n:n,
+        sig:'ttn:'+ttn+':'+n, url:location.href, t:Date.now(), ack:0,
+        reason:(n>1?('друковано '+n+'× на цьому ПК'):'у СРМ уже позначена як роздрукована') };
+      localStorage.setItem(LS, JSON.stringify(all));
+    }catch(e){}
   }
 
   // перехоплення кліку по кнопках друку ТТН (у СРМ: ng-click="viewModel.setIsPrinted(viewModel.ukrposhta)")
@@ -5533,7 +5509,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       var s=state[id];
       if(!s || !s.ready || !s.ttn) return;          // стан невідомий — не заважаємо
       var rec=localRec(s.ttn);
-      if(s.srvPrinted || rec){
+      var wasPrinted=!!(s.srvPrinted || rec);
+      if(wasPrinted){
         var msg='⚠ ПОВТОРНИЙ ДРУК ТТН!\n\nТТН '+s.ttn+' (заявка №'+id+') уже друкували';
         if(rec) msg+='\n• на цьому ПК: '+rec.n+'× , останній раз '+fmtDate(rec.t);
         if(s.srvPrinted) msg+='\n• у СРМ позначена як роздрукована (міг друкувати інший менеджер)';
@@ -5548,16 +5525,15 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       Object.keys(m).forEach(function(k){ if((m[k].t||0)<lim) delete m[k]; });
       save(m);
       s.srvPrinted=true;
-      setTimeout(badge, 300);
+      if(wasPrinted) notifyRepeat(id, s.ttn, cur.n);   // зверху зʼявиться «ТТН друковано повторно»
     }catch(err){}
   }, true);
 
   var t=null;
   function sync(){
     var id=orderId();
-    if(!id){ var o=document.querySelector('.lk-ttnp'); if(o) o.remove(); return; }
-    fetchState(id);
-    badge();
+    if(!id) return;
+    fetchState(id);   // стан потрібен, щоб зловити повторний друк (бейдж більше не малюємо)
   }
   function syncSoon(){ clearTimeout(t); t=setTimeout(sync,400); }
   sync();
