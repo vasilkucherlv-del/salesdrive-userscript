@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.53
+// @version      2.54
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4201,9 +4201,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       if(num){
         var all=loadAll(), rec=all[num];
         // не перекриваємо активний ⛔; інакше — ставимо/оновлюємо ⏳
-        if(!rec || rec.ack || rec.kind==='pending'){
-          all[num]={num:num, sig:'p:'+s, url:location.href, t:now, kind:'pending',
-                    reason:'доставка повідомлення не підтверджена', ack:0};
+        if(!rec || rec.ack || rec.kind==='watch'){
+          all[num]={num:num, sig:'p:'+s, url:location.href, t:now, kind:'watch',
+                    reason:'', ack:0};
           saveAll(all);
         }
       }
@@ -4217,25 +4217,87 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       if(isFailCell(found)){
         delete watch[s];
         // прибрати ⏳ — alert-логіка нижче одразу запише ⛔ по цій заявці
-        if(num){ all=loadAll(); if(all[num]&&all[num].kind==='pending'){ delete all[num]; saveAll(all); } }
+        if(num){ all=loadAll(); if(all[num]&&all[num].kind==='watch'){ delete all[num]; saveAll(all); } }
       } else if(Date.now()-watch[s].first>8000){
         delete watch[s];                  // 8с без failed → доставлено, знімаємо ⏳
         if(num){ all=loadAll();
-          if(all[num]&&all[num].kind==='pending'&&all[num].sig==='p:'+s){ delete all[num]; saveAll(all); } }
+          if(all[num]&&all[num].kind==='watch'&&all[num].sig==='p:'+s){ delete all[num]; saveAll(all); } }
       }
     });
   }
 
-  // відкрили заявку зі старим ⏳ (закрив зарано минулого разу): чат видно →
-  // або тут є failed (alert-логіка запише ⛔), або все ок — ⏳ знімаємо
-  function resolvePendingIfViewing(){
-    var num=curOrderNum(); if(!num) return;
-    var all=loadAll(), rec=all[num];
-    if(!rec || rec.kind!=='pending') return;
-    if(Date.now()-(rec.t||0)<30000) return;   // свіжий ⏳ цієї ж сесії — ним керує trackNewSends
-    if(!cellsAll().length) return;            // чат ще не домальований
-    delete all[num]; saveAll(all);            // failed є? — alert-логіка нижче знову запише ⛔
+  // ---- ФОНОВА перевірка доставки через дані СРМ ----
+  // Замість плашки «⏳ перевір доставку» (менеджери скаржились: спрацьовує майже
+  // завжди, бо вони одразу йдуть із заявки) — тихо перевіряємо статус самі:
+  // /comments/?orderId=N дає messages[].direction + .status ('failed') + errorDescription.
+  var WATCH_MAX=2*60*60*1000;    // довше 2 год не тримаємо
+  var WATCH_OK=15*60*1000;       // за 15 хв без невдачі — знімаємо тихо, нічого не показуючи
+  var vwBusy=false;
+
+  function reasonFromApi(m, chat){
+    var d=String((m&&m.errorDescription)||'');
+    if(/viber/i.test(d)) return 'на номері немає Viber';
+    if(/telegram/i.test(d)) return 'на номері немає Telegram';
+    var tp=String(((chat||{}).messenger||{}).type||'');
+    if(/viber/i.test(tp)) return 'не доставлено у Viber';
+    if(/telegram/i.test(tp)) return 'не доставлено у Telegram';
+    return d||'повідомлення не доставлено';
   }
+
+  function verifyWatch(){
+    if(vwBusy) return;
+    var all=loadAll();
+    var keys=Object.keys(all).filter(function(k){ return all[k] && all[k].kind==='watch' && !all[k].ack; });
+    if(!keys.length) return;
+    vwBusy=true;
+    var i=0;
+    function next(){
+      if(i>=keys.length){ vwBusy=false; renderToasts(); return; }
+      var k=keys[i++], cur=loadAll()[k];
+      if(!cur || cur.kind!=='watch'){ return next(); }
+      var age=Date.now()-(cur.t||0);
+      if(age>WATCH_MAX){ var m0=loadAll(); delete m0[k]; saveAll(m0); return next(); }
+      fetch('/comments/?formId=1&orderId='+encodeURIComponent(cur.num),
+            { credentials:'include', headers:{'Accept':'application/json'} })
+        .then(function(r){ return r.ok?r.json():null; })
+        .then(function(j){
+          if(!j) return;
+          var arr=((j.response||j).data)||[], fail=null;
+          arr.forEach(function(c){
+            (c.messages||[]).forEach(function(m){
+              if(!m || m.direction!=='outcoming' || String(m.status)!=='failed') return;
+              var t=Date.parse(String(m.date||'').replace(' ','T')+'Z')||0;
+              if(t >= (cur.t||0)-10*60*1000) fail={ m:m, chat:c.chat };
+            });
+          });
+          var mm=loadAll();
+          if(!mm[k]) return;
+          if(fail){
+            mm[k].kind='alert';
+            mm[k].sig='api:'+fail.m.id;
+            mm[k].reason=reasonFromApi(fail.m, fail.chat);
+            mm[k].t=Date.now();
+            saveAll(mm);
+          } else if(age>WATCH_OK){
+            delete mm[k]; saveAll(mm);      // доставлено — прибираємо мовчки
+          }
+        })
+        .catch(function(){})
+        .then(function(){ setTimeout(next, 200); });
+    }
+    next();
+  }
+
+  // міграція: старі видимі ⏳ стають невидимими watch-записами
+  (function migratePending(){
+    try{
+      var all=loadAll(), ch=false;
+      Object.keys(all).forEach(function(k){
+        if(all[k] && all[k].kind==='pending'){ all[k].kind='watch'; all[k].reason=''; ch=true; }
+      });
+      if(ch) saveAll(all);
+    }catch(e){}
+  })();
   function ackKey(k){
     var m=loadAll(); if(m[k]){ m[k].ack=1; saveAll(m); }
     renderToasts();
@@ -4265,10 +4327,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
         c.appendChild(a); c.appendChild(x); bar.appendChild(c);
       });
     }
-    addGroup('⛔ Клієнт НЕ отримав повідомлення:',
-      keys.filter(function(k){ return (all[k].kind||'alert')==='alert'; }));
-    addGroup('⏳ Перевір доставку (заявку закрито зарано):',
-      keys.filter(function(k){ return all[k].kind==='pending'; }));
+    addGroup('⛔ Клієнт НЕ отримав повідомлення:', keys);
   }
 
   function renderToasts(){
@@ -4277,7 +4336,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       if(now-(all[k].t||0)>5*24*3600*1000){ delete all[k]; changed=true; }  // чистка старших за 5 днів
     });
     if(changed) saveAll(all);
-    var keys=Object.keys(all).filter(function(k){ return !all[k].ack; });
+    var keys=Object.keys(all).filter(function(k){ return !all[k].ack && (all[k].kind||'alert')==='alert'; });
     var box=document.getElementById('sd-cf-toasts');
     var bar=document.getElementById('sd-cf-topbar');
     var onList=/\/order\/index/.test(location.hash||'');   // список заявок (будь-які фільтри менеджера)
@@ -4300,14 +4359,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       if(box.querySelector('[data-k="'+k+'"]')) return;
       var d=document.createElement('div'); d.className='sd-cf-toast'; d.setAttribute('data-k',k);
       var t=document.createElement('div'); t.className='t';
-      var pend=(r.kind==='pending');
-      t.textContent=pend
-        ? '⏳ Заявка #'+r.num+': доставка не підтверджена'
-        : '⛔ Заявка #'+r.num+': повідомлення НЕ доставлено';
+      t.textContent='⛔ Заявка #'+r.num+': повідомлення НЕ доставлено';
       var w=document.createElement('div');
-      w.textContent=pend
-        ? 'Заявку закрито одразу після відправки. Відкрий і перевір чат.'
-        : (r.reason||'')+'. Клієнт його не бачив — подзвони або SMS.';
+      w.textContent=(r.reason||'')+'. Клієнт його не бачив — подзвони або SMS.';
       var a=document.createElement('div'); a.className='a';
       var op=document.createElement('a'); op.textContent='Відкрити заявку'; op.href=r.url||'#';
       var ok=document.createElement('button'); ok.type='button'; ok.textContent='OK, зрозумів';
@@ -4325,7 +4379,6 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 
   function sync(){
     trackNewSends();
-    resolvePendingIfViewing();
     var rows=document.querySelectorAll('tr.message-status-failed');
     var old=document.getElementById('sd-chatfail-warn');
     if(!rows.length){ if(old) old.remove(); renderToasts(); return; }
@@ -4365,7 +4418,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     var num=curOrderNum();
     if(num){
       var all=loadAll(), sig=sigOf(rows), rec=all[num];
-      if(!rec || rec.sig!==sig || rec.kind==='pending'){
+      if(!rec || rec.sig!==sig || rec.kind==='watch'){
         all[num]={ num:num, sig:sig, url:location.href, t:Date.now(), kind:'alert',
                    reason:Object.keys(reasons).join('; '), ack:0 };
         saveAll(all);
@@ -4379,6 +4432,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   sync();
   window.addEventListener('lkdom', syncSoon);
   window.addEventListener('hashchange', syncSoon);   // перехід список↔заявка в SPA
+  setTimeout(verifyWatch, 15000);
+  setInterval(verifyWatch, 90000);
 
   // МИТТЄВА реакція на появу нового повідомлення в чаті (не чекаємо lkdom-пульс ~0.4-1с):
   // щойно СРМ домальовує відправлене повідомлення — одразу пишемо ⏳ у память,
