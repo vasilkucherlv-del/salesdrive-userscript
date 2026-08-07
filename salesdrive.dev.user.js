@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.54
+// @version      2.56
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4137,26 +4137,17 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   var LS='lk_chatfail_v1';
   function loadAll(){ try{ return JSON.parse(localStorage.getItem(LS))||{}; }catch(e){ return {}; } }
   function saveAll(o){ try{ localStorage.setItem(LS, JSON.stringify(o)); }catch(e){} }
-  // номер заявки; результат кешується на hash (важкий фолбек по innerText —
-  // не частіше ніж раз на 3с, поки номер не знайдено)
-  var _ocHash=null,_ocNum=null,_ocT=0;
+  // номер заявки — БЕЗ сканування тексту сторінки!
+  // Раніше фолбек по body.innerText ловив номер із НАШОЇ Ж плашки («Заявка #N: …»),
+  // через це плашка ховалась → текст зникав → плашка поверталась → миготіння.
   function curOrderNum(){
-    var h=location.hash||'';
-    if(_ocHash===h && (_ocNum!=null || Date.now()-_ocT<3000)) return _ocNum;
-    var num=null;
-    var m=(document.title||'').match(/#\s*(\d{4,})/);
-    if(m) num=m[1];
-    if(!num){
-      var el=document.querySelector('h1,h2,.page-title,.page-header');
-      m=el && el.textContent.match(/Заявка\s*#\s*(\d+)/);
-      if(m) num=m[1];
-    }
-    if(!num){
-      try{ m=(document.body.innerText||'').match(/Заявка\s*#\s*(\d+)/); }catch(e){ m=null; }
-      if(m) num=m[1];
-    }
-    _ocHash=h; _ocNum=num; _ocT=Date.now();
-    return num;
+    var m=(location.hash||'').match(/#\/order\/(?:update|create)\/(\d+)/);
+    if(m) return m[1];
+    m=(document.title||'').match(/#\s*(\d{4,})/);
+    if(m) return m[1];
+    var el=document.querySelector('h1,h2,.page-title,.page-header');
+    m=el && String(el.textContent||'').match(/Заявка\s*#\s*(\d+)/);
+    return m?m[1]:null;
   }
   function sigOf(rows){
     var last=rows[rows.length-1], t=last.querySelector('span[title]');
@@ -4306,10 +4297,18 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   // зведення зверху на списку заявок: ⛔ не доставлено + ⏳ доставка не підтверджена
   function renderTopbar(all, keys){
     var bar=document.getElementById('sd-cf-topbar');
+    // перемальовуємо ЛИШЕ коли перелік/причини змінились — інакше зведення мигтіло:
+    // rebuild ішов на кожен пульс DOM (~3 рази на секунду)
+    var sig=keys.map(function(k){
+      var r=all[k]||{};
+      return k+':'+(r.kind||'alert')+':'+(r.reason||'');
+    }).join('|');
+    if(bar && bar.getAttribute('data-sig')===sig) return;
     if(!bar){
       bar=document.createElement('div'); bar.id='sd-cf-topbar';
       document.body.appendChild(bar);
     }
+    bar.setAttribute('data-sig', sig);
     bar.innerHTML='';
     function addGroup(label, ks){
       if(!ks.length) return;
