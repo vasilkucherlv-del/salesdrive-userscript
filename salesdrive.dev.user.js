@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.60
+// @version      2.61
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -70,6 +70,72 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 })();
 }catch(e){ try{ console.warn("[SD] модуль «lkDomTick» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkDomTick ▲▲▲ */
+
+/* ▼▼▼ МОДУЛЬ-START • lkApiBudget — спільний облік і захист ліміту API SalesDrive ▼▼▼ */
+/* СРМ дає лише 100 запитів НА ГОДИНУ до /api/order/list/ — і цей ліміт СПІЛЬНИЙ
+   на весь акаунт (усі менеджери, усі вкладки). Перевищення → HTTP 400
+   {"status":"error","message":"API limit reached ... API period: 1 hour. API limit: 100."}
+   Тут один шлюз для всіх модулів:
+     • лічильник витрат за годину (спільний через localStorage — видно з усіх вкладок);
+     • «стоп-кран»: після відмови ніхто не стукає ще 10 хв (раніше кожен модуль
+       повторював запит щохвилини й тримав ліміт вичерпаним постійно);
+     • резерв: останні 15 запитів години лишаємо для ручних дій (кнопки),
+       фонові оновлення туди не лізуть.
+   Використання: window.sdApi.fetch(url, {headers:…, bg:true}) → Promise(Response),
+   відмова = Error з .limit=true і .waitMs. */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
+(function lkApiBudget(){
+  'use strict';
+  var LIMIT=100, RESERVE=15, BLOCK_MS=10*60*1000;
+  var KS='lk_api_stat_v1', KB='lk_api_block_v1';
+
+  function hourKey(){ return Math.floor(Date.now()/3600000); }
+  function stat(){
+    var s=null; try{ s=JSON.parse(localStorage.getItem(KS)); }catch(e){}
+    if(!s || s.h!==hourKey()) s={h:hourKey(), n:0};
+    return s;
+  }
+  function bump(){ var s=stat(); s.n++; try{ localStorage.setItem(KS, JSON.stringify(s)); }catch(e){} return s.n; }
+  function blockedUntil(){ var v=0; try{ v=Number(localStorage.getItem(KB))||0; }catch(e){} return v; }
+  function block(ms){ try{ localStorage.setItem(KB, String(Date.now()+ms)); }catch(e){} }
+
+  function err(msg, waitMs){ var e=new Error(msg); e.limit=true; e.waitMs=waitMs||0; return e; }
+
+  var api={
+    LIMIT: LIMIT,
+    used: function(){ return stat().n; },
+    left: function(){ return Math.max(0, LIMIT-stat().n); },
+    // скільки ще чекати (мс), 0 — можна
+    waitMs: function(){ return Math.max(0, blockedUntil()-Date.now()); },
+    // людський текст для плашок
+    note: function(){
+      var w=api.waitMs();
+      if(w>0) return 'Ліміт API SalesDrive вичерпано (100 запитів на годину на весь акаунт). '
+                    +'Спробуйте через '+Math.ceil(w/60000)+' хв.';
+      return 'Витрачено '+api.used()+' зі 100 запитів API за цю годину.';
+    },
+    fetch: function(url, opts){
+      opts=opts||{};
+      var w=api.waitMs();
+      if(w>0) return Promise.reject(err('api-limit', w));
+      if(opts.bg && api.left()<=RESERVE) return Promise.reject(err('api-reserve', 60000));
+      if(api.left()<=0){ block(BLOCK_MS); return Promise.reject(err('api-limit', BLOCK_MS)); }
+      bump();
+      return fetch(url, opts).then(function(r){
+        if(r.status!==400) return r;
+        // 400 буває і не через ліміт — дивимось текст помилки, щоб не блокувати дарма
+        return r.clone().text().then(function(t){ return t; }, function(){ return ''; })
+          .then(function(t){
+            if(/limit/i.test(t||'')){ block(BLOCK_MS); throw err('api-limit', BLOCK_MS); }
+            return r;
+          });
+      });
+    }
+  };
+  try{ window.sdApi=api; }catch(e){}
+})();
+}catch(e){ try{ console.warn("[SD] модуль «lkApiBudget» не запустився:", e); }catch(_){} }
+/* ▲▲▲ МОДУЛЬ-END • lkApiBudget ▲▲▲ */
 
 try{ // SD-ізоляція: помилка цього модуля не зупинить решту
 (function () {
@@ -2862,14 +2928,46 @@ function __sdPageMain() {
     window.dispatchEvent(new Event("sdPriceWarn"));
   }
 
-  setInterval(function () { pushOrder(); pushWarn(); }, 2000);
-  setTimeout(function () { pushOrder(); pushWarn(); }, 800);
+  /* ---- Укрпошта: ТТН + прапорець друку ПРЯМО зі сторінки (без запитів до API) ----
+     Дані вже є в scope доставки: viewModel.ukrposhta.barcode / .isPrinted.
+     Раніше сторож повторного друку тягнув їх через /api/order/list/ на КОЖНУ відкриту
+     заявку — це зʼїдало годинний ліміт API (100 запитів/год на весь акаунт). */
+  var lastUkrSig = "";
+  var UKR_SEL = '[ng-model^="viewModel.ukrposhta"],[ng-click*="ukrposhta"],[ng-if*="ukrposhta"],[ng-show*="ukrposhta"],[ng-class*="ukrposhta"]';
+  function ukrInfo() {
+    try {
+      if (!window.angular) return null;
+      var els = document.querySelectorAll(UKR_SEL);
+      for (var i = 0; i < els.length; i++) {
+        var sc; try { sc = window.angular.element(els[i]).scope(); } catch (e) { continue; }
+        var vm = sc && (sc.viewModel || sc.vm), u = vm && vm.ukrposhta;
+        if (u && (u.barcode != null || u.isPrinted != null))
+          return { ttn: String(u.barcode == null ? "" : u.barcode), printed: !!Number(u.isPrinted) };
+      }
+    } catch (e) {}
+    return null;
+  }
+  function pushUkr() {
+    if (!onOrderPage()) { lastUkrSig = ""; return; }
+    var m = (location.hash || "").match(/#\/order\/(?:update|create)\/(\d+)/);
+    var u = ukrInfo();
+    if (!m || !u) return;
+    var sig = JSON.stringify({ id: m[1], ttn: u.ttn, printed: u.printed });
+    if (sig === lastUkrSig) return;
+    lastUkrSig = sig;
+    document.documentElement.setAttribute("data-sd-ukr", sig);
+    window.dispatchEvent(new Event("sdUkrInfo"));
+  }
+
+  setInterval(function () { pushOrder(); pushWarn(); pushUkr(); }, 2000);
+  setTimeout(function () { pushOrder(); pushWarn(); pushUkr(); }, 800);
   window.addEventListener("hashchange", function () {
     _vmCache = null;        // інша заявка — viewModel може бути інший
     lastOrderSig = "";      // примусово переоцінити склад заявки
     lastWarnSig = "";
-    setTimeout(function () { pushOrder(); pushWarn(); }, 500);
-    setTimeout(function () { pushOrder(); pushWarn(); }, 1200);
+    lastUkrSig = "";
+    setTimeout(function () { pushOrder(); pushWarn(); pushUkr(); }, 500);
+    setTimeout(function () { pushOrder(); pushWarn(); pushUkr(); }, 1200);
   });
 
   log("page-міст активний (angular:", !!window.angular, ")");
@@ -5237,7 +5335,10 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   var KITS_URL='https://barcode-printer-production-2b32.up.railway.app/api/kits?token=nab_8Kx2pQ7mLr4tW9vZ';
   // робочі статуси = товар ще «висить» за заявкою (не кінцевий продаж, не відмова)
   var WORK=[1,2,9,15,21,36];
-  var TTL=3*60*1000, KITS_TTL=6*60*60*1000;
+  var TTL=10*60*1000, KITS_TTL=6*60*60*1000;
+  // спільний шлюз ліміту API (модуль lkApiBudget)
+  function sdApiFetch(u,o){ return (window.sdApi? window.sdApi.fetch(u,o) : fetch(u,o)); }
+  function apiNote(){ return window.sdApi? window.sdApi.note() : 'Ліміт API SalesDrive вичерпано.'; }
 
   var css=''
     +'#lk-where-btn{position:fixed;left:18px;bottom:204px;z-index:99998;width:52px;height:52px;border-radius:50%;'
@@ -5309,15 +5410,30 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     });
   }
 
-  // ---- заявки в робочих статусах (кеш 3 хв)
-  var cache=null, statusMap={};
+  // ---- заявки в робочих статусах (кеш 10 хв, СПІЛЬНИЙ для всіх вкладок) ----
+  // Кеш у localStorage: друга вкладка/повторний пошук не витрачають годинний ліміт API.
+  var CKEY='lksw_cache_v1';
+  var cache=null, statusMap={}, staleNote='';
+  function readCache(){
+    if(cache) return cache;
+    try{
+      var c=JSON.parse(localStorage.getItem(CKEY));
+      if(c && c.rows){ cache=c; if(c.st) statusMap=c.st; }
+    }catch(e){}
+    return cache;
+  }
+  function saveCache(rows){
+    cache={ t:Date.now(), rows:rows, st:statusMap };
+    try{ localStorage.setItem(CKEY, JSON.stringify(cache)); }catch(e){}
+  }
   function loadOrders(onProg){
-    if(cache && Date.now()-cache.t<TTL) return Promise.resolve(cache.rows);
+    var old=readCache();
+    if(old && Date.now()-old.t<TTL){ staleNote=''; return Promise.resolve(old.rows); }
     var q=WORK.map(function(s){ return 'filter%5BstatusId%5D%5B%5D='+s; }).join('&');
     var all=[], page=1, pages=1;
     function next(){
       if(onProg) onProg(page, pages);
-      return fetch('/api/order/list/?page='+page+'&limit=100&'+q,
+      return sdApiFetch('/api/order/list/?page='+page+'&limit=100&'+q,
                    { headers:{'Form-Api-Key':API_KEY,'Accept':'application/json'} })
         .then(function(r){ return r.json(); })
         .then(function(j){
@@ -5334,11 +5450,18 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
           pages=((j.pagination||{}).pageCount)||1;
           page++;
           if(page<=pages && page<=12) return next();
-          cache={ t:Date.now(), rows:all };
+          saveCache(all); staleNote='';
           return all;
         });
     }
-    return next();
+    return next().catch(function(e){
+      // ліміт API вичерпано — краще показати трохи застарілі дані, ніж нічого
+      if(e && e.limit && old && old.rows){
+        staleNote='Дані з кешу ('+Math.round((Date.now()-old.t)/60000)+' хв тому): '+apiNote();
+        return old.rows;
+      }
+      throw e;
+    });
   }
 
   function search(rows, sku){
@@ -5363,12 +5486,13 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       total+=h.qty;
       byStatus[h.st]=(byStatus[h.st]||0)+h.qty;
     });
+    var stale=staleNote?('<div class="sub">⏳ '+esc(staleNote)+'</div>'):'';
     if(!res.hits.length){
       c.innerHTML='<div class="msg">Код <b>'+esc(sku)+'</b> у жодній заявці в роботі не знайдено.<br>'
-        +'Отже, залишок не «висить» у заявках — причина в чомусь іншому (не оприбутковано, списання, помилка обліку).</div>';
+        +'Отже, залишок не «висить» у заявках — причина в чомусь іншому (не оприбутковано, списання, помилка обліку).</div>'+stale;
       return;
     }
-    var head='<div class="sum">Код '+esc(sku)+': у роботі '+total+' шт (позицій: '+res.hits.length+')</div>';
+    var head='<div class="sum">Код '+esc(sku)+': у роботі '+total+' шт (позицій: '+res.hits.length+')</div>'+stale;
     var byTxt=Object.keys(byStatus).map(function(s){ return (statusMap[s]||('статус '+s))+' — '+byStatus[s]+' шт'; }).join(' · ');
     head+='<div class="sub">'+esc(byTxt)+'</div>';
     if(res.kits.length){
@@ -5395,7 +5519,11 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     loadKits()
       .then(function(){ return loadOrders(function(p,t){ c.innerHTML='<div class="msg">Читаю заявки… сторінка '+p+(t>1?(' з '+t):'')+'</div>'; }); })
       .then(function(rows){ render(box, sku, search(rows, sku)); })
-      .catch(function(e){ c.innerHTML='<div class="msg err">Не вдалося: '+esc(String(e&&e.message||e))+'</div>'; })
+      .catch(function(e){
+        c.innerHTML='<div class="msg err">'
+          + (e&&e.limit ? '⏳ '+esc(apiNote()) : 'Не вдалося: '+esc(String(e&&e.message||e)))
+          + '</div>';
+      })
       .then(function(){ btn.disabled=false; });
   }
 
@@ -5607,7 +5735,6 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 try{ // SD-ізоляція: помилка цього модуля не зупинить решту
 (function lkTtnPrintGuard(){
   'use strict';
-  var API_KEY='9yC3JYj4MlYitQ8J3KUf-uy_qPDYkFzwoITQSUeiWEDMZntbQ4uj0NxNcHrqAg8VAB6wDmkdXJZ1LMFgnQbuivTSrzutQbVB66wN';
   var LKEY='lk_ttnprint_v1';
 
 
@@ -5620,22 +5747,18 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     }catch(e){ return ''; }
   }
 
-  // стан заявки з API: чи Укрпошта, ТТН, серверний прапорець друку
-  var state={};   // orderId -> {ready, ukr, ttn, srvPrinted}
-  function fetchState(id){
-    if(state[id]) return;
-    state[id]={ready:false};
-    fetch('/api/order/list/?filter%5Bid%5D%5B%5D='+encodeURIComponent(id),
-          {headers:{'Form-Api-Key':API_KEY,'Accept':'application/json'}})
-      .then(function(r){ return r.json(); })
-      .then(function(j){
-        var o=(j.data||[])[0]||{}, d=(o.ord_delivery_data||[])[0]||{};
-        state[id]={ ready:true,
-          ukr: (String(d.provider||'')==='ukrposhta' || Number(o.shipping_method)===30),
-          ttn: String(d.trackingNumber||''),
-          srvPrinted: !!Number(d.isPrinted) };
-      })
-      .catch(function(){ state[id]={ready:true, ukr:false, ttn:'', srvPrinted:false}; });
+  // Стан заявки БЕЗ запитів до API: ядро кладе ТТН і прапорець друку Укрпошти
+  // в data-sd-ukr (читає viewModel.ukrposhta прямо зі сторінки).
+  var state={};   // orderId -> {ready, ttn, srvPrinted}
+  function readState(){
+    try{
+      var raw=document.documentElement.getAttribute('data-sd-ukr'); if(!raw) return;
+      var u=JSON.parse(raw); if(!u || !u.id) return;
+      var prev=state[u.id];
+      // локальну позначку «щойно надрукував» не збиваємо назад у false
+      state[u.id]={ ready:true, ttn:String(u.ttn||''),
+                    srvPrinted: !!u.printed || !!(prev&&prev.srvPrinted) };
+    }catch(e){}
   }
 
   function localRec(ttn){ return ttn ? (load()[ttn]||null) : null; }
@@ -5684,16 +5807,10 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     }catch(err){}
   }, true);
 
-  var t=null;
-  function sync(){
-    var id=orderId();
-    if(!id) return;
-    fetchState(id);   // стан потрібен, щоб зловити повторний друк (бейдж більше не малюємо)
-  }
-  function syncSoon(){ clearTimeout(t); t=setTimeout(sync,400); }
-  sync();
-  window.addEventListener('lkdom', syncSoon);
-  window.addEventListener('hashchange', syncSoon);
+  readState();
+  window.addEventListener('sdUkrInfo', readState);   // ядро оновило дані Укрпошти
+  window.addEventListener('lkdom', readState);       // підстраховка, якщо подію проґавили
+  window.addEventListener('hashchange', function(){ state={}; setTimeout(readState, 600); });
 })();
 }catch(e){ try{ console.warn("[SD] модуль «lkTtnPrintGuard» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkTtnPrintGuard ▲▲▲ */
@@ -5726,6 +5843,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   function fmt(n){ return Number(n||0).toLocaleString('uk-UA',{minimumFractionDigits:2,maximumFractionDigits:2})+' ₴'; }
   function num(v){ var m=String(v==null?'':v).replace(',','.').match(/-?[\d.]+/); return m?parseFloat(m[0]):0; }
   function sleep(ms){ return new Promise(function(r){ setTimeout(r,ms); }); }
+  // спільний шлюз ліміту API (модуль lkApiBudget)
+  function sdApiFetch(u,o){ return (window.sdApi? window.sdApi.fetch(u,o) : fetch(u,o)); }
+  function apiNote(){ return window.sdApi? window.sdApi.note() : 'Ліміт API SalesDrive вичерпано.'; }
   function dstr(d){ return d.split('-').reverse().join('.'); }
   function startOfDay(d){ var x=new Date(d); x.setHours(0,0,0,0); return x; }
 
@@ -5922,8 +6042,13 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     while(guard++<40){
       var url=ORDERS+'?page='+page+'&limit=100&filter[statusId]='+STATUS_ID
         +'&filter[paymentDate][from]='+from+'&filter[paymentDate][to]='+to;
-      var r; try{ r=await fetch(url,{headers:{'Form-Api-Key':API_KEY,'Accept':'application/json'}}); }catch(e){ break; }
-      if(r.status===400){ cashNote('⏳ Забагато запитів до SalesDrive.<br>Зачекайте ~1 хв, рахунок продовжиться сам…'); await sleep(65000); cashNote('Рахую…'); continue; }
+      var r;
+      try{ r=await sdApiFetch(url,{headers:{'Form-Api-Key':API_KEY,'Accept':'application/json'}}); }
+      catch(e){
+        // ліміт API — НЕ довбимо щохвилини (вікно ліміту — година), чесно кажемо і виходимо
+        if(e && e.limit){ cashNote('⏳ '+apiNote()); var er=new Error('api-limit'); er.limit=true; throw er; }
+        break;
+      }
       var j=await r.json().catch(function(){return {};});
       var arr=j.data||j.orders||[]; all=all.concat(arr);
       if(arr.length<100) break; page++; await sleep(400);
@@ -5940,8 +6065,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       var url=CHECKS+'?page='+page+'&limit=100'
         +'&filter[date][from]='+encodeURIComponent(ff)
         +'&filter[date][to]='+encodeURIComponent(tt);
-      var r; try{ r=await fetch(url,{headers:{'X-Api-Key':CHECK_KEY,'Accept':'application/json'}}); }catch(e){ break; }
-      if(r.status===400){ await sleep(65000); continue; }
+      var r;
+      try{ r=await sdApiFetch(url,{headers:{'X-Api-Key':CHECK_KEY,'Accept':'application/json'}}); }
+      catch(e){ break; }   // ліміт — просто без чеків (сума каси від цього не залежить)
       var j=await r.json().catch(function(){return {};});
       var arr=j.data||[];
       arr.forEach(function(c){
@@ -5967,8 +6093,10 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   async function fetchUnpaidPickup(){
     var out=[];
     var url=ORDERS+'?page=1&limit=100&filter[statusId]='+STATUS_ID;
-    var r; try{ r=await fetch(url,{headers:{'Form-Api-Key':API_KEY,'Accept':'application/json'}}); }catch(e){ return out; }
-    if(r.status===400){ await sleep(65000); try{ r=await fetch(url,{headers:{'Form-Api-Key':API_KEY,'Accept':'application/json'}}); }catch(e2){ return out; } }
+    var r;
+    // фоновий блок — з резервом: якщо ліміту лишилось мало, пропускаємо (кнопки важливіші)
+    try{ r=await sdApiFetch(url,{headers:{'Form-Api-Key':API_KEY,'Accept':'application/json'},bg:true}); }
+    catch(e){ return out; }
     var j=await r.json().catch(function(){return {};});
     (j.data||[]).forEach(function(o){ if(payId(o)===null) out.push({id:o.id,amount:amount(o),date:payDate(o),name:clientName(o)}); });
     return out;
@@ -6149,7 +6277,16 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     if(_rangeCache && _rangeCache.key===okey && (Date.now()-_rangeCache.t)<90000){
       od=_rangeCache.data;
     } else {
-      od=await Promise.all([ fetchOrders(uFrom,uTo), fetchOutcoming(uFrom,uTo) ]);
+      try{ od=await Promise.all([ fetchOrders(uFrom,uTo), fetchOutcoming(uFrom,uTo) ]); }
+      catch(e){
+        if(!(e&&e.limit)) throw e;
+        if(myseq!==renderSeq) return;
+        box.querySelector('#lk-cash-body').innerHTML=
+          '<div style="padding:18px 16px;color:#8a4a00;font-size:14px;line-height:1.55">⏳ '+apiNote()
+          +'<br><span style="color:#999;font-size:12.5px">Ліміт спільний на весь акаунт — його міг вичерпати інший менеджер. '
+          +'Каса порахується, щойно ліміт відновиться.</span></div>';
+        return;
+      }
       if(myseq!==renderSeq) return;
       _rangeCache={key:okey, t:Date.now(), data:od};
     }
@@ -6267,6 +6404,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     }
     catch(e){
       if(/HTTP 403|bad pin/.test(e.message)) alert('Невірний PIN — залишок не змінено.');
+      else if(e && e.limit) alert('⏳ '+apiNote()+'\n\nЗалишок НЕ змінено — спробуйте пізніше.');
       else alert('Не вдалося зберегти: '+e.message);
       render();
     }
@@ -6345,6 +6483,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 
   function onListPage(){ return /#\/order\/index/.test(location.hash||''); }
   function sleep(ms){ return new Promise(function(r){ setTimeout(r,ms); }); }
+  // спільний шлюз ліміту API (модуль lkApiBudget)
+  function sdApiFetch(u,o){ return (window.sdApi? window.sdApi.fetch(u,o) : fetch(u,o)); }
+  function apiNote(){ return window.sdApi? window.sdApi.note() : 'Ліміт API SalesDrive вичерпано.'; }
   function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
   function gGet(k){ try{ var s=GM_getValue(k,null); return s?((typeof s==='string')?JSON.parse(s):s):null; }catch(e){ return null; } }
   function gSet(k,v){ try{ GM_setValue(k, JSON.stringify(v)); }catch(e){} }
@@ -6394,22 +6535,25 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       }).catch(function(){});
   }
 
-  // фетч заявок за статусами (пагінація + захист від rate-limit 400)
+  // фетч заявок за статусами (пагінація; ліміт API — через спільний шлюз)
   function fetchOrders(statusIds){
     var qs=statusIds.map(function(s){ return 'filter%5BstatusId%5D%5B%5D='+s; }).join('&');
     var page=1, all=[], guard=0;
     function next(){
       if(guard++>=40) return Promise.resolve(all);
       var url=ORDERS+'?page='+page+'&limit=100'+(qs?'&'+qs:'');
-      return fetch(url,{headers:{'Form-Api-Key':API_KEY,'Accept':'application/json'}})
+      return sdApiFetch(url,{headers:{'Form-Api-Key':API_KEY,'Accept':'application/json'}})
         .then(function(r){
-          if(r.status===400){ return sleep(65000).then(next); }
           return r.json().catch(function(){return {};}).then(function(j){
             var arr=j.data||[]; all=all.concat(arr);
             if(arr.length<100) return all;
             page++; return sleep(400).then(next);
           });
-        }).catch(function(){ return all; });
+        }).catch(function(e){
+          // ліміт API — краще чесно сказати, ніж віддати НЕПОВНИЙ лист комплектації
+          if(e && e.limit) throw e;
+          return all;
+        });
     }
     return next();
   }
@@ -6507,7 +6651,13 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       var rows=aggregate(pending);
       cache={key:key, t:Date.now(), rows:rows, ordersCount:pending.length, statuses:st};
       busy=false; render();
-    }).catch(function(){ busy=false; document.getElementById('lk-pick-content').innerHTML='<div id="lk-pick-msg">Не вдалося порахувати. Натисни 🔄.</div>'; });
+    }).catch(function(e){
+      busy=false;
+      document.getElementById('lk-pick-content').innerHTML='<div id="lk-pick-msg">'
+        + (e&&e.limit ? '⏳ '+apiNote()+'<br>Ліміт спільний на весь акаунт (усі менеджери разом).'
+                      : 'Не вдалося порахувати. Натисни 🔄.')
+        + '</div>';
+    });
   }
 
   function sortedRows(){
@@ -6597,6 +6747,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 
   function onListPage(){ return /#\/order\/index/.test(location.hash||''); }
   function sleep(ms){ return new Promise(function(r){ setTimeout(r,ms); }); }
+  // спільний шлюз ліміту API (модуль lkApiBudget)
+  function sdApiFetch(u,o){ return (window.sdApi? window.sdApi.fetch(u,o) : fetch(u,o)); }
+  function apiNote(){ return window.sdApi? window.sdApi.note() : 'Ліміт API SalesDrive вичерпано.'; }
   function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
 
   // Заявки у статусі «Спаковано» (серверний фільтр за статусом — бере лише ті,
@@ -6608,15 +6761,14 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     function next(){
       if(guard++>=40) return Promise.resolve({orders:all, limited:false});
       var url=ORDERS+'?page='+page+'&limit=100&filter%5BstatusId%5D%5B%5D='+PACKED_STATUS;
-      return fetch(url,{headers:{'Form-Api-Key':API_KEY,'Accept':'application/json'}})
+      return sdApiFetch(url,{headers:{'Form-Api-Key':API_KEY,'Accept':'application/json'}})
         .then(function(r){
-          if(r.status===400){ return {orders:all, limited:true}; }
           return r.json().catch(function(){return {};}).then(function(j){
             var arr=j.data||[]; all=all.concat(arr);
             if(arr.length<100) return {orders:all, limited:false};
             page++; return sleep(250).then(next);
           });
-        }).catch(function(){ return {orders:all, limited:false}; });
+        }).catch(function(e){ return {orders:all, limited:!!(e&&e.limit)}; });
     }
     return next();
   }
@@ -6705,8 +6857,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     fetchOrders().then(function(res){
       busy=false;
       if(res.limited){                                  // ліміт API — не оновлюємо частковим, лишаємо кеш
-        if(sub) sub.textContent='⚠️ Сервер обмежує запити (ліміт).'+(have?' Показано збережене.':'')+' Спробуй 🔄 за хвилину.';
-        if(!have) document.getElementById('lk-ukp-content').innerHTML='<div id="lk-ukp-msg">Сервер тимчасово обмежує запити. Зачекай хвилину й натисни 🔄.</div>';
+        if(sub) sub.textContent='⏳ '+apiNote()+(have?' Показано збережене.':'');
+        if(!have) document.getElementById('lk-ukp-content').innerHTML='<div id="lk-ukp-msg">⏳ '+apiNote()
+          +'<br>Ліміт спільний на весь акаунт (усі менеджери разом) — оновиться протягом години.</div>';
         return;
       }
       var rows=(res.orders||[]).filter(isTarget).map(mapRow).sort(function(a,b){ return b.id-a.id; });
