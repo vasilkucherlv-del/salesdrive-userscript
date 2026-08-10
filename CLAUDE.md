@@ -64,6 +64,16 @@ Userscript для SalesDrive CRM (komplektom.salesdrive.me). Два файли:
 `{"status":"error","message":"API limit reached. API method: \"/api/order/list/\". API period: 1 hour. API limit: 100."}`
 Ліміт СПІЛЬНИЙ: усі менеджери, усі вкладки, усі модулі — з одного відра.
 Правила (після інциденту 10.08.2026 «API постійно зайняте»):
+0. **Публічний API — останній засіб.** Той самий список заявок СРМ віддає своїм
+   внутрішнім запитом (cookie, без ключа, без ліміту):
+   `/orders/?formId=1&mobileMode=0&mode=orderList&page=N&filter[statusId][]=…`
+   (є `filter[paymentDate][from]/[to]`, пагінація `pagination.pageCount`, а в рядках —
+   `payment_method`, `paymentAmount`/`restPay`, `document_ord_check`, `contacts`,
+   `ord_delivery_data` з `isPrinted`, `meta.fields.statusId.options`).
+   Єдине, чого там НЕМАЄ, — `sku` товарів (лише `productId`); код товару → productId
+   перекладається внутрішнім `/products/data/?active=1&filter[sku]=КОД&formId=1`
+   (один код може мати кілька товарів: 069 = і товар, і комплект).
+   Обгортка — `window.sdApi.orders(qs, page)`.
 1. **Спершу шукай дані на сторінці.** Майже все вже є в Angular-скоупах
    (напр. ТТН і прапорець друку Укрпошти — `viewModel.ukrposhta.barcode/.isPrinted`).
    Запит до API на КОЖНУ відкриту заявку — гарантований злив квоти.

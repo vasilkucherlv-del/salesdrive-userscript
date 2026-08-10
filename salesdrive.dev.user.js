@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.61
+// @version      2.62
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -103,6 +103,20 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 
   var api={
     LIMIT: LIMIT,
+    // ── ВНУТРІШНІЙ список заявок СРМ (той самий запит, що робить сама СРМ на
+    //    сторінці списку) — cookie-авторизація, БЕЗ API-ключа і БЕЗ годинного ліміту.
+    //    Дає statusId, payment_method, paymentDate, paymentAmount/restPay,
+    //    document_ord_check, contacts, ord_delivery_data (з isPrinted) —
+    //    усе, крім sku товарів (там лише productId).
+    orders: function(qs, page){
+      var u='/orders/?formId=1&mobileMode=0&mode=orderList&page='+(page||1)+(qs?('&'+qs):'');
+      return fetch(u,{credentials:'include',headers:{'Accept':'application/json, text/plain, */*'}})
+        .then(function(r){ if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); })
+        .then(function(j){
+          var b=(j&&(j.response||j))||{};
+          return { rows: b.data||b.orders||[], pageCount: ((b.pagination||{}).pageCount)||1, meta: b.meta||{} };
+        });
+    },
     used: function(){ return stat().n; },
     left: function(){ return Math.max(0, LIMIT-stat().n); },
     // скільки ще чекати (мс), 0 — можна
@@ -5331,13 +5345,13 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 try{ // SD-ізоляція: помилка цього модуля не зупинить решту
 (function lkStockWhere(){
   'use strict';
-  var API_KEY='9yC3JYj4MlYitQ8J3KUf-uy_qPDYkFzwoITQSUeiWEDMZntbQ4uj0NxNcHrqAg8VAB6wDmkdXJZ1LMFgnQbuivTSrzutQbVB66wN';
   var KITS_URL='https://barcode-printer-production-2b32.up.railway.app/api/kits?token=nab_8Kx2pQ7mLr4tW9vZ';
   // робочі статуси = товар ще «висить» за заявкою (не кінцевий продаж, не відмова)
   var WORK=[1,2,9,15,21,36];
   var TTL=10*60*1000, KITS_TTL=6*60*60*1000;
-  // спільний шлюз ліміту API (модуль lkApiBudget)
+  // спільний шлюз ліміту API + внутрішній список заявок (модуль lkApiBudget)
   function sdApiFetch(u,o){ return (window.sdApi? window.sdApi.fetch(u,o) : fetch(u,o)); }
+  function sdOrders(qs,page){ return window.sdApi.orders(qs,page); }
   function apiNote(){ return window.sdApi? window.sdApi.note() : 'Ліміт API SalesDrive вичерпано.'; }
 
   var css=''
@@ -5426,53 +5440,73 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     cache={ t:Date.now(), rows:rows, st:statusMap };
     try{ localStorage.setItem(CKEY, JSON.stringify(cache)); }catch(e){}
   }
+  // Заявки тягнемо ВНУТРІШНІМ запитом СРМ (як сама СРМ на сторінці списку) —
+  // без API-ключа і без годинного ліміту. Там у товарах немає sku, лише productId,
+  // тому шуканий код спершу перекладаємо в productId (довідник — теж внутрішній).
   function loadOrders(onProg){
     var old=readCache();
     if(old && Date.now()-old.t<TTL){ staleNote=''; return Promise.resolve(old.rows); }
-    var q=WORK.map(function(s){ return 'filter%5BstatusId%5D%5B%5D='+s; }).join('&');
+    var q=WORK.map(function(s){ return 'filter[statusId][]='+s; }).join('&');
     var all=[], page=1, pages=1;
     function next(){
       if(onProg) onProg(page, pages);
-      return sdApiFetch('/api/order/list/?page='+page+'&limit=100&'+q,
-                   { headers:{'Form-Api-Key':API_KEY,'Accept':'application/json'} })
-        .then(function(r){ return r.json(); })
-        .then(function(j){
-          (j.data||[]).forEach(function(o){
-            all.push({ id:o.id, st:o.statusId, prods:(o.products||[]).map(function(p){
-              return { sku:String(p.sku==null?'':p.sku).trim(), amt:Number(p.amount)||0,
-                       name:String(p.documentName||'').slice(0,70) };
-            }) });
-          });
-          try{
-            var opts=(((j.meta||{}).fields||{}).statusId||{}).options||[];
-            opts.forEach(function(o){ statusMap[o.value]=String(o.text||'').replace(/\s+/g,' ').trim(); });
-          }catch(e){}
-          pages=((j.pagination||{}).pageCount)||1;
-          page++;
-          if(page<=pages && page<=12) return next();
-          saveCache(all); staleNote='';
-          return all;
+      return sdOrders(q, page).then(function(res){
+        (res.rows||[]).forEach(function(o){
+          all.push({ id:o.id, st:o.statusId, prods:(o.products||[]).map(function(p){
+            return { pid:Number(p.productId)||0, amt:Number(p.amount)||0 };
+          }) });
         });
+        try{
+          var opts=(((res.meta||{}).fields||{}).statusId||{}).options
+                 || (res.meta||{}).statuses || [];
+          opts.forEach(function(o){ statusMap[o.value]=String(o.text||'').replace(/\s+/g,' ').trim(); });
+        }catch(e){}
+        pages=res.pageCount||1;
+        page++;
+        if(page<=pages && page<=12) return next();
+        saveCache(all); staleNote='';
+        return all;
+      });
     }
     return next().catch(function(e){
-      // ліміт API вичерпано — краще показати трохи застарілі дані, ніж нічого
-      if(e && e.limit && old && old.rows){
-        staleNote='Дані з кешу ('+Math.round((Date.now()-old.t)/60000)+' хв тому): '+apiNote();
+      if(old && old.rows){                       // мережа впала — краще старе, ніж нічого
+        staleNote='Дані з кешу ('+Math.round((Date.now()-old.t)/60000)+' хв тому)';
         return old.rows;
       }
       throw e;
     });
   }
 
-  function search(rows, sku){
+  // ---- код товару → productId (внутрішній довідник, кеш 24 год) ----
+  // Один код може мати кілька товарів (напр. 069 — і окремий товар, і комплект).
+  var PKEY='lksw_pid_v1', PTTL=24*60*60*1000;
+  function pidCache(){ try{ return JSON.parse(localStorage.getItem(PKEY))||{}; }catch(e){ return {}; } }
+  function resolveSku(sku){
     sku=String(sku).trim();
-    var kitsOf=(comp2kits||{})[sku]||[];
-    var kitMap={}; kitsOf.forEach(function(k){ kitMap[k.kit]={qty:k.qty, name:k.name}; });
+    var c=pidCache(), rec=c[sku];
+    if(rec && Date.now()-rec.t<PTTL) return Promise.resolve(rec.v);
+    return fetch('/products/data/?active=1&filter[sku]='+encodeURIComponent(sku)+'&formId=1',
+                 {credentials:'include',headers:{'accept':'application/json, text/plain, */*','when':'product/index'}})
+      .then(function(r){ return r.ok?r.json():null; })
+      .then(function(j){
+        var arr=(((((j||{}).response||{}).meta||{}).option||{}).option)||[];
+        var v=arr.filter(function(x){ return String(x.sku).trim()===sku; })
+                 .map(function(x){ return { id:Number(x.id)||0, name:String(x.documentName||x.name||'').slice(0,70) }; });
+        var cc=pidCache(); cc[sku]={t:Date.now(), v:v};
+        try{ localStorage.setItem(PKEY, JSON.stringify(cc)); }catch(e){}
+        return v;
+      })
+      .catch(function(){ return (rec&&rec.v)||[]; });
+  }
+
+  // шукаємо за productId: сам товар + ті самі комплекти, у які він входить
+  function search(rows, sku, idMap){
+    var kitsOf=(comp2kits||{})[String(sku).trim()]||[];
     var hits=[];
     rows.forEach(function(o){
       o.prods.forEach(function(p){
-        if(p.sku===sku) hits.push({ id:o.id, st:o.st, qty:p.amt, name:p.name, via:null });
-        else if(kitMap[p.sku]) hits.push({ id:o.id, st:o.st, qty:p.amt*kitMap[p.sku].qty, name:p.name, via:p.sku });
+        var m=idMap[p.pid]; if(!m) return;
+        hits.push({ id:o.id, st:o.st, qty:p.amt*(m.qty||1), name:m.name||'', via:m.via||null });
       });
     });
     hits.sort(function(a,b){ return (a.st-b.st)||(b.id-a.id); });
@@ -5516,9 +5550,26 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     var sku=String(inp.value||'').trim();
     if(!sku){ inp.focus(); return; }
     btn.disabled=true; c.innerHTML='<div class="msg">Шукаю…</div>';
+    var idMap={};
     loadKits()
+      .then(function(){
+        // сам товар + комплекти, до складу яких він входить → усі їхні productId
+        var kitsOf=(comp2kits||{})[sku]||[];
+        var jobs=[ resolveSku(sku).then(function(list){
+          list.forEach(function(p){ idMap[p.id]={ qty:1, name:p.name, via:null }; });
+        }) ];
+        kitsOf.forEach(function(k){
+          jobs.push(resolveSku(k.kit).then(function(list){
+            list.forEach(function(p){
+              if(idMap[p.id]) return;                       // сам товар важливіший за комплект
+              idMap[p.id]={ qty:k.qty||1, name:p.name||k.name, via:k.kit };
+            });
+          }));
+        });
+        return Promise.all(jobs);
+      })
       .then(function(){ return loadOrders(function(p,t){ c.innerHTML='<div class="msg">Читаю заявки… сторінка '+p+(t>1?(' з '+t):'')+'</div>'; }); })
-      .then(function(rows){ render(box, sku, search(rows, sku)); })
+      .then(function(rows){ render(box, sku, search(rows, sku, idMap)); })
       .catch(function(e){
         c.innerHTML='<div class="msg err">'
           + (e&&e.limit ? '⏳ '+esc(apiNote()) : 'Не вдалося: '+esc(String(e&&e.message||e)))
@@ -5821,8 +5872,6 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 (function lkCashRegister(){
   'use strict';
 
-  var API_KEY   = '9yC3JYj4MlYitQ8J3KUf-uy_qPDYkFzwoITQSUeiWEDMZntbQ4uj0NxNcHrqAg8VAB6wDmkdXJZ1LMFgnQbuivTSrzutQbVB66wN';
-  var ORDERS    = '/api/order/list/';
   var CASHORD   = '/document-cash-order/index/';
   var STATUS_ID = 5;     // Оплачено САМОВИВІЗ
   var CASH_ID   = 44;    // Готівкою 💵
@@ -5843,8 +5892,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   function fmt(n){ return Number(n||0).toLocaleString('uk-UA',{minimumFractionDigits:2,maximumFractionDigits:2})+' ₴'; }
   function num(v){ var m=String(v==null?'':v).replace(',','.').match(/-?[\d.]+/); return m?parseFloat(m[0]):0; }
   function sleep(ms){ return new Promise(function(r){ setTimeout(r,ms); }); }
-  // спільний шлюз ліміту API (модуль lkApiBudget)
+  // спільний шлюз ліміту API + внутрішній список заявок (модуль lkApiBudget)
   function sdApiFetch(u,o){ return (window.sdApi? window.sdApi.fetch(u,o) : fetch(u,o)); }
+  function sdOrders(qs,page){ return window.sdApi.orders(qs,page); }
   function apiNote(){ return window.sdApi? window.sdApi.note() : 'Ліміт API SalesDrive вичерпано.'; }
   function dstr(d){ return d.split('-').reverse().join('.'); }
   function startOfDay(d){ var x=new Date(d); x.setHours(0,0,0,0); return x; }
@@ -6037,21 +6087,18 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   }
   var OUTC_URL='/ua/index.html?formId=1#/document/cash-order/outcoming';
 
+  // Заявки беремо ВНУТРІШНІМ запитом СРМ (як сама СРМ на сторінці списку) —
+  // без API-ключа й без годинного ліміту 100 запитів.
   async function fetchOrders(from,to){
-    var page=1,all=[],guard=0;
-    while(guard++<40){
-      var url=ORDERS+'?page='+page+'&limit=100&filter[statusId]='+STATUS_ID
-        +'&filter[paymentDate][from]='+from+'&filter[paymentDate][to]='+to;
-      var r;
-      try{ r=await sdApiFetch(url,{headers:{'Form-Api-Key':API_KEY,'Accept':'application/json'}}); }
-      catch(e){
-        // ліміт API — НЕ довбимо щохвилини (вікно ліміту — година), чесно кажемо і виходимо
-        if(e && e.limit){ cashNote('⏳ '+apiNote()); var er=new Error('api-limit'); er.limit=true; throw er; }
-        break;
-      }
-      var j=await r.json().catch(function(){return {};});
-      var arr=j.data||j.orders||[]; all=all.concat(arr);
-      if(arr.length<100) break; page++; await sleep(400);
+    var page=1, pages=1, all=[];
+    var qs='filter[statusId][]='+STATUS_ID
+      +'&filter[paymentDate][from]='+from+'&filter[paymentDate][to]='+to;
+    while(page<=pages && page<=40){
+      var res;
+      try{ res=await sdOrders(qs,page); }catch(e){ break; }
+      all=all.concat(res.rows||[]);
+      pages=res.pageCount||1; page++;
+      if(page<=pages) await sleep(200);
     }
     return all;
   }
@@ -6092,13 +6139,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   var unpaidCache=null, unpaidBusy=false;
   async function fetchUnpaidPickup(){
     var out=[];
-    var url=ORDERS+'?page=1&limit=100&filter[statusId]='+STATUS_ID;
-    var r;
-    // фоновий блок — з резервом: якщо ліміту лишилось мало, пропускаємо (кнопки важливіші)
-    try{ r=await sdApiFetch(url,{headers:{'Form-Api-Key':API_KEY,'Accept':'application/json'},bg:true}); }
-    catch(e){ return out; }
-    var j=await r.json().catch(function(){return {};});
-    (j.data||[]).forEach(function(o){ if(payId(o)===null) out.push({id:o.id,amount:amount(o),date:payDate(o),name:clientName(o)}); });
+    var res;
+    try{ res=await sdOrders('filter[statusId][]='+STATUS_ID, 1); }catch(e){ return out; }
+    (res.rows||[]).forEach(function(o){ if(payId(o)===null) out.push({id:o.id,amount:amount(o),date:payDate(o),name:clientName(o)}); });
     return out;
   }
   async function loadUnpaid(force){
@@ -6473,6 +6516,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 try{ // SD-ізоляція: помилка цього модуля не зупинить решту
 (function lkPickList(){
   'use strict';
+  // публічний API — єдине джерело, де в товарах заявки є sku (внутрішній список
+  // віддає лише productId, а лист комплектації агрегує саме за кодами)
   var API_KEY  = '9yC3JYj4MlYitQ8J3KUf-uy_qPDYkFzwoITQSUeiWEDMZntbQ4uj0NxNcHrqAg8VAB6wDmkdXJZ1LMFgnQbuivTSrzutQbVB66wN';
   var ORDERS   = '/api/order/list/';
   var APP_URL  = 'https://barcode-printer-production-2b32.up.railway.app';
@@ -6736,8 +6781,6 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 try{ // SD-ізоляція: помилка цього модуля не зупинить решту
 (function lkUkrPromList(){
   'use strict';
-  var API_KEY  = '9yC3JYj4MlYitQ8J3KUf-uy_qPDYkFzwoITQSUeiWEDMZntbQ4uj0NxNcHrqAg8VAB6wDmkdXJZ1LMFgnQbuivTSrzutQbVB66wN';
-  var ORDERS   = '/api/order/list/';
   var PROM_PM  = 20;   // спосіб оплати «Пром-оплата» (підтверджено на #305175)
   var UKR_SM   = 30;   // доставка Укрпошта
   var PACKED_STATUS = 15; // статус «Спаковано» (ті, що віддаються курʼєру) — підтверджено на #305175
@@ -6747,28 +6790,25 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 
   function onListPage(){ return /#\/order\/index/.test(location.hash||''); }
   function sleep(ms){ return new Promise(function(r){ setTimeout(r,ms); }); }
-  // спільний шлюз ліміту API (модуль lkApiBudget)
+  // спільний шлюз ліміту API + внутрішній список заявок (модуль lkApiBudget)
   function sdApiFetch(u,o){ return (window.sdApi? window.sdApi.fetch(u,o) : fetch(u,o)); }
+  function sdOrders(qs,page){ return window.sdApi.orders(qs,page); }
   function apiNote(){ return window.sdApi? window.sdApi.note() : 'Ліміт API SalesDrive вичерпано.'; }
   function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
 
-  // Заявки у статусі «Спаковано» (серверний фільтр за статусом — бере лише ті,
-  // що зараз віддаються курʼєру; далі клієнтом лишаємо пром+укрпошта).
-  // Ліміт API (HTTP 400) НЕ чекаємо по 65с — одразу віддаємо {limited:true},
-  // щоб не морозити вікно; показуємо збережений кеш і підказку оновити.
+  // Заявки у статусі «Спаковано» — ВНУТРІШНІМ запитом СРМ (без API-ключа
+  // й без годинного ліміту); далі клієнтом лишаємо пром+укрпошта.
   function fetchOrders(){
-    var page=1, all=[], guard=0;
+    var page=1, pages=1, all=[], guard=0;
     function next(){
-      if(guard++>=40) return Promise.resolve({orders:all, limited:false});
-      var url=ORDERS+'?page='+page+'&limit=100&filter%5BstatusId%5D%5B%5D='+PACKED_STATUS;
-      return sdApiFetch(url,{headers:{'Form-Api-Key':API_KEY,'Accept':'application/json'}})
-        .then(function(r){
-          return r.json().catch(function(){return {};}).then(function(j){
-            var arr=j.data||[]; all=all.concat(arr);
-            if(arr.length<100) return {orders:all, limited:false};
-            page++; return sleep(250).then(next);
-          });
-        }).catch(function(e){ return {orders:all, limited:!!(e&&e.limit)}; });
+      if(guard++>=40 || page>pages) return Promise.resolve({orders:all, limited:false});
+      return sdOrders('filter[statusId][]='+PACKED_STATUS, page)
+        .then(function(res){
+          all=all.concat(res.rows||[]); pages=res.pageCount||1; page++;
+          if(page>pages) return {orders:all, limited:false};
+          return sleep(200).then(next);
+        })
+        .catch(function(){ return {orders:all, limited:false}; });
     }
     return next();
   }
