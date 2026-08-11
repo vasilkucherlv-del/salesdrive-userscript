@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.63
+// @version      2.64
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -3378,9 +3378,109 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     clearTimeout(n._t); n._t=setTimeout(function(){ try{ n.remove(); }catch(e){} }, 6000);
   }
 
-  // ---- підстановка суми в ціну товару (через ядро: page-context + Angular) ----
+  // ---- підстановка суми в ціну товару ----
+  // ГОЛОВНИЙ шлях — прямо у поля форми (як це робить руками менеджер): працює
+  // й у пісочниці Tampermonkey, бо не залежить від містка «модуль ↔ сторінка».
+  // Якщо блок цін не знайдено — пробуємо міст до ядра (sdSetPrice).
   var PAGEW=(typeof unsafeWindow!=='undefined'&&unsafeWindow)||window;
-  function setPrice(tier, value, cb){
+  function money2(n){ return (Math.round(Number(n)*100)/100).toFixed(2).replace('.',','); }
+  // запис у поле так, щоб Angular побачив зміну
+  function setInput(inp, txt){
+    try{
+      var d=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(inp),'value');
+      if(d && d.set) d.set.call(inp, txt); else inp.value=txt;
+    }catch(e){ inp.value=txt; }
+    inp.dispatchEvent(new Event('input',{bubbles:true}));
+    inp.dispatchEvent(new Event('change',{bubbles:true}));
+  }
+  // Рядок ціни = контейнер ng-repeat="priceType in viewModel.item.priceTypes".
+  // Важливо брати саме його: у сусідніх обгортках лежать поля ІНШОГО рядка,
+  // і сума потрапляла не в той тип ціни.
+  function priceRows(){
+    var out=[];
+    [].forEach.call(document.querySelectorAll('[ng-repeat^="priceType in"]'), function(box){
+      var sel=box.querySelector('select[ng-model="priceType.priceTypeId"]');
+      var price=box.querySelector('input[ng-model="priceType.price"]');
+      if(sel && price) out.push({ sel:sel, box:box, price:price,
+                                  disc:box.querySelector('input[ng-model="priceType.discount"]') });
+    });
+    return out;
+  }
+  function tierOfSelect(sel){
+    var v=String(sel.value||'');                        // буває "string:2" або "2"
+    var m=v.match(/(\d+)\s*$/); return m?m[1]:'';
+  }
+  function optionFor(sel, tier){
+    for(var i=0;i<sel.options.length;i++){
+      var v=String(sel.options[i].value||''), m=v.match(/(\d+)\s*$/);
+      if(m && m[1]===String(tier)) return sel.options[i];
+    }
+    return null;
+  }
+  function tierNameOf(tier){ return (TIER_NAMES&&TIER_NAMES[tier])||('тип '+tier); }
+  // фактична ціна з урахуванням знижки рядка (щоб чесно попередити)
+  function effOf(row, val){
+    var d=parseFloat(String((row.disc&&row.disc.value)||'').replace(',','.'))||0;
+    return d>0 ? Math.round((val-d)*100)/100 : 0;
+  }
+
+  function setPriceDom(tier, val, cb){
+    // роздрібна ціна — окреме поле картки
+    if(String(tier)==='retail'){
+      var ri=document.querySelector('input[ng-model="viewModel.item.defaultPrice"]');
+      if(!ri) return cb(null);
+      setInput(ri, money2(val));
+      return cb({ ok:true, name:'Роздрібна', created:false, eff:0 });
+    }
+    // рядок потрібного типу шукаємо ЩОРАЗУ заново: ng-repeat перебудовує DOM,
+    // тож збережене посилання на поле може вказувати вже на інший рядок
+    function rowOf(t){
+      var rr=priceRows();
+      for(var i=0;i<rr.length;i++) if(tierOfSelect(rr[i].sel)===String(t)) return rr[i];
+      return null;
+    }
+    var have=rowOf(tier);
+    if(have){                                            // рядок уже є — переписуємо
+      setInput(have.price, money2(val));
+      var again=rowOf(tier)||have;
+      return cb({ ok:true, name:tierNameOf(tier), created:false, eff:effOf(again, val) });
+    }
+    // рядка немає — додаємо штатною кнопкою СРМ
+    var add=[].slice.call(document.querySelectorAll('[ng-click]')).filter(function(b){
+      return /addProductPrice/i.test(b.getAttribute('ng-click')||'') && b.offsetParent;
+    })[0];
+    if(!add) return cb(null);
+    var before=priceRows().length;
+    add.click();
+    var t0=Date.now();
+    (function wait(){
+      var now=priceRows();
+      if(now.length>before){
+        var fresh=rowOf(tier);                           // раптом новий рядок уже цього типу
+        if(!fresh){
+          var row=now[now.length-1];
+          var opt=optionFor(row.sel, tier);
+          if(!opt) return cb({ ok:false, err:'тип ціни «'+tierNameOf(tier)+'» недоступний' });
+          row.sel.value=opt.value;
+          row.sel.dispatchEvent(new Event('change',{bubbles:true}));
+        }
+        // після зміни типу даємо Angular перемалювати і ЗНОВУ шукаємо рядок
+        setTimeout(function(){
+          var r=rowOf(tier);
+          if(!r) return cb(null);
+          setInput(r.price, money2(val));
+          var r2=rowOf(tier)||r;
+          cb({ ok:true, name:tierNameOf(tier), created:true, eff:effOf(r2, val) });
+        }, 120);
+        return;
+      }
+      if(Date.now()-t0>3000) return cb(null);
+      setTimeout(wait, 60);
+    })();
+  }
+
+  // запасний шлях: через ядро (page-context + Angular)
+  function setPriceBridge(tier, value, cb){
     var token=String(Date.now())+'_'+Math.random().toString(36).slice(2);
     function done(d){ PAGEW.removeEventListener('sdSetPriceResult', onRes); clearTimeout(tm); cb(d); }
     function onRes(){
@@ -3393,7 +3493,19 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     document.documentElement.removeAttribute('data-sd-setprice-result');
     document.documentElement.setAttribute('data-sd-setprice', JSON.stringify({token:token, tier:String(tier), value:value}));
     PAGEW.dispatchEvent(new Event('sdSetPrice'));
-    var tm=setTimeout(function(){ done(null); }, 8000);
+    // якщо ядро мовчить (інший контекст/стара версія) — просто перевіряємо атрибут
+    var tm=setTimeout(function(){ onRes(); done(null); }, 4000);
+  }
+
+  function setPrice(tier, value, cb){
+    var fired=false;
+    function once(d){ if(fired) return; fired=true; cb(d); }
+    try{
+      setPriceDom(tier, value, function(d){
+        if(d) return once(d);
+        setPriceBridge(tier, value, once);     // поля не знайшли — пробуємо ядро
+      });
+    }catch(e){ setPriceBridge(tier, value, once); }
   }
 
   // делегований клік по чипу/бейджу: підставляє суму в потрібний тип ціни товару
