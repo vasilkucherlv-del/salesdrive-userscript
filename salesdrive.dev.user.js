@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.62
+// @version      2.63
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -2265,6 +2265,65 @@ function __sdPageMain() {
     }
   });
 
+  // ---------- ПІДСТАНОВКА СУМИ КОМПЛЕКТУ В ЦІНУ ТОВАРУ ----------
+  // Чипи модуля lkComplectPrice («Великий опт 251 ₴» тощо) шлють подію sdSetPrice:
+  // пишемо суму в потрібний тип ціни картки товару. Якщо такого рядка ще немає —
+  // додаємо його штатною кнопкою vm.addProductPrice() і заповнюємо.
+  // НІЧОГО не зберігаємо: значення лягає у форму, менеджер тисне «Зберегти» сам.
+  window.addEventListener("sdSetPrice", function () {
+    var req = {};
+    try { req = JSON.parse(document.documentElement.getAttribute("data-sd-setprice") || "{}") || {}; } catch (e) {}
+    function respond(o) {
+      o.token = req.token || "";
+      document.documentElement.setAttribute("data-sd-setprice-result", JSON.stringify(o));
+      window.dispatchEvent(new Event("sdSetPriceResult"));
+    }
+    function money(n) { return (Math.round(Number(n) * 100) / 100).toFixed(2).replace(".", ","); }
+    try {
+      var val = Number(req.value);
+      if (!(val > 0)) return respond({ ok: false, err: "порожня сума" });
+
+      // scope картки товару (там, де поле роздрібної ціни)
+      var el = document.querySelector('[ng-model="viewModel.item.defaultPrice"]');
+      var sc = el && window.angular ? window.angular.element(el).scope() : null;
+      var vm = sc && (sc.viewModel || sc.vm);
+      if (!vm || !vm.item) return respond({ ok: false, err: "картка товару не знайдена" });
+
+      var created = false, name = "", eff = 0;
+      safeApply(sc, function () {
+        if (String(req.tier) === "retail") {
+          vm.item.defaultPrice = money(val);
+          name = "Роздрібна";
+          return;
+        }
+        var list = vm.item.priceTypes;
+        if (!Array.isArray(list)) list = vm.item.priceTypes = [];
+        var row = null;
+        for (var i = 0; i < list.length; i++)
+          if (String(list[i].priceTypeId) === String(req.tier)) { row = list[i]; break; }
+        if (!row) {
+          if (typeof vm.addProductPrice === "function") vm.addProductPrice();
+          list = vm.item.priceTypes || [];
+          row = list[list.length - 1];
+          if (!row) { row = { priceTypeId: String(req.tier) }; list.push(row); }
+          row.priceTypeId = String(req.tier);
+          if (row.currencyId == null) row.currencyId = 0;
+          created = true;
+        }
+        row.price = money(val);
+        row.defaultPrice = Math.round(val * 100) / 100;
+        // знижку рядка НЕ чіпаємо (може бути виставлена свідомо), але повідомимо про неї
+        var d = parseFloat(String(row.discount == null ? "" : row.discount).replace(",", ".")) || 0;
+        var pd = Number(row.percentDiscount) || 0;
+        eff = pd > 0 ? Math.round(val * (1 - pd / 100) * 100) / 100 : (d > 0 ? Math.round((val - d) * 100) / 100 : 0);
+        try { name = ((vm.meta || {}).priceTypes || {})[String(req.tier)] || ("тип " + req.tier); } catch (e2) {}
+      });
+      respond({ ok: true, created: created, name: name, value: money(val), eff: eff });
+    } catch (e) {
+      respond({ ok: false, err: String(e) });
+    }
+  });
+
   // ---------- ОПТ-ЦІНИ З ПРИХІДНОЇ НАКЛАДНОЇ ----------
   // Кнопка модуля lkArrivalOpt шле подію sdArrivalOpt: для кожного рядка накладної
   // беремо собівартість (ціну закупки рядка) і пишемо в картку товару ціни
@@ -3195,7 +3254,10 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     +'.lkcp-sum,.lkcp-chip{cursor:pointer}'
     +'.lkcp-sum:hover,.lkcp-chip:hover{filter:brightness(.97)}'
     +'.lkcp-sum.lkcp-copied,.lkcp-chip.lkcp-copied{outline:2px solid #2e7d32;background:#d7f0dc}'
-    +'.lkcp-copied::after{content:" ✓";color:#2e7d32;font-weight:800}';
+    +'.lkcp-copied::after{content:" ✓";color:#2e7d32;font-weight:800}'
+    +'.lkcp-sum.lkcp-err,.lkcp-chip.lkcp-err{outline:2px solid #c62828;background:#fdecea}'
+    +'.lkcp-note{margin:2px 0 6px;font:600 12px/1.5 sans-serif;color:#1b5e20}'
+    +'.lkcp-note.bad{color:#b71c1c}';
   var st=document.createElement('style'); st.textContent=css;
   (document.head||document.documentElement).appendChild(st);
 
@@ -3291,7 +3353,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     return 9;
   }
 
-  // копіювання суми в буфер + коротка індикація «✓»
+  // копіювання суми в буфер (запасний варіант, якщо підставити не вийшло)
   function doCopy(text){
     try{ if(typeof GM_setClipboard==='function'){ GM_setClipboard(String(text)); return true; } }catch(e){}
     try{ navigator.clipboard.writeText(String(text)); return true; }catch(e){}
@@ -3301,11 +3363,60 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     el.classList.add('lkcp-copied');
     setTimeout(function(){ try{ el.classList.remove('lkcp-copied'); }catch(e){} }, 1000);
   }
-  // делегований клік: копіює число з data-copy елемента (без «₴»)
-  function onCopyClick(e){
+  function flashErr(el, msg){
+    var old=el.getAttribute('title')||'';
+    el.classList.add('lkcp-err'); el.setAttribute('title', msg||'не вдалося підставити');
+    setTimeout(function(){ try{ el.classList.remove('lkcp-err'); el.setAttribute('title', old); }catch(e){} }, 2500);
+  }
+  // коротке повідомлення під заголовком: що саме підставили
+  function note(box, txt, bad){
+    if(!box) return;
+    var n=box.parentNode && box.parentNode.querySelector('.lkcp-note');
+    if(!n){ n=document.createElement('div'); n.className='lkcp-note'; box.insertAdjacentElement('afterend', n); }
+    n.className='lkcp-note'+(bad?' bad':'');
+    n.textContent=txt;
+    clearTimeout(n._t); n._t=setTimeout(function(){ try{ n.remove(); }catch(e){} }, 6000);
+  }
+
+  // ---- підстановка суми в ціну товару (через ядро: page-context + Angular) ----
+  var PAGEW=(typeof unsafeWindow!=='undefined'&&unsafeWindow)||window;
+  function setPrice(tier, value, cb){
+    var token=String(Date.now())+'_'+Math.random().toString(36).slice(2);
+    function done(d){ PAGEW.removeEventListener('sdSetPriceResult', onRes); clearTimeout(tm); cb(d); }
+    function onRes(){
+      var raw=document.documentElement.getAttribute('data-sd-setprice-result'); if(!raw) return;
+      var d; try{ d=JSON.parse(raw); }catch(e){ return; }
+      if(!d || d.token!==token) return;
+      done(d);
+    }
+    PAGEW.addEventListener('sdSetPriceResult', onRes);
+    document.documentElement.removeAttribute('data-sd-setprice-result');
+    document.documentElement.setAttribute('data-sd-setprice', JSON.stringify({token:token, tier:String(tier), value:value}));
+    PAGEW.dispatchEvent(new Event('sdSetPrice'));
+    var tm=setTimeout(function(){ done(null); }, 8000);
+  }
+
+  // делегований клік по чипу/бейджу: підставляє суму в потрібний тип ціни товару
+  function onChipClick(e){
     var el=e.target.closest('[data-copy]'); if(!el) return;
     e.preventDefault(); e.stopPropagation();
-    if(doCopy(el.getAttribute('data-copy'))) flashCopied(el);
+    var tier=el.getAttribute('data-tier')||'retail';
+    var val=Number(el.getAttribute('data-copy'))||0;
+    if(!(val>0)) return;
+    var box=el.closest('.lkcp-tiers')||el;
+    setPrice(tier, val, function(d){
+      if(d && d.ok){
+        flashCopied(el);
+        note(box, '✓ ' + (d.name||'ціну') + ' → ' + val + ' ₴'
+          + (d.created?' (рядок ціни створено)':'')
+          + (d.eff>0 ? ' ⚠ у рядку є знижка — фактично '+d.eff+' ₴' : '')
+          + '. Не забудь «Зберегти».');
+      } else {
+        doCopy(String(val));          // не вийшло підставити — хоч у буфер
+        flashErr(el, (d&&d.err)||'не вдалося підставити');
+        note(box, '✗ Не вдалося підставити ('+((d&&d.err)||'немає відповіді')+'). Суму '+val+' ₴ скопійовано в буфер.', true);
+      }
+    });
   }
 
   // кількість складника з рядка; надійно — з Angular-моделі (item.amount),
@@ -3384,13 +3495,19 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       // роздрібна — головний зелений бейдж (клік копіює суму)
       var retail=sumFor('retail');
       var badge=h.querySelector('.lkcp-sum');
-      if(!badge){ badge=document.createElement('span'); badge.className='lkcp-sum'; badge.title='Натисніть, щоб скопіювати суму'; badge.addEventListener('click', onCopyClick); h.appendChild(badge); }
-      badge.className='lkcp-sum'+(pend?' wait':'');
-      badge.setAttribute('data-copy', String(Math.round(retail)));
-      badge.textContent='Сума за роздрібом: '+fmtInt(retail)+(pend?' …':'');
+      if(!badge){ badge=document.createElement('span'); badge.className='lkcp-sum';
+        badge.title='Натисніть, щоб підставити суму в роздрібну ціну товару';
+        badge.setAttribute('data-tier','retail');
+        badge.addEventListener('click', onChipClick); h.appendChild(badge); }
+      // пишемо, лише коли справді змінилось — інакше блимає на кожен пульс DOM
+      var bCls='lkcp-sum'+(pend?' wait':'');
+      var bTxt='Сума за роздрібом: '+fmtInt(retail)+(pend?' …':'');
+      if(badge.className!==bCls) badge.className=bCls;
+      if(badge.getAttribute('data-copy')!==String(Math.round(retail))) badge.setAttribute('data-copy', String(Math.round(retail)));
+      if(badge.textContent!==bTxt) badge.textContent=bTxt;
       // типи цін — чипи під заголовком (клік по чипу копіює його суму)
       if(TIER_NAMES && showTiers){
-        if(!box){ box=document.createElement('div'); box.className='lkcp-tiers'; box.addEventListener('click', onCopyClick); h.insertAdjacentElement('afterend', box); }
+        if(!box){ box=document.createElement('div'); box.className='lkcp-tiers'; box.addEventListener('click', onChipClick); h.insertAdjacentElement('afterend', box); }
         var ids=Object.keys(TIER_NAMES).sort(function(a,b){
           var ra=tierRank(TIER_NAMES[a]), rb=tierRank(TIER_NAMES[b]);
           return ra!==rb ? ra-rb : Number(a)-Number(b);
@@ -3398,9 +3515,11 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
         var html='';
         ids.forEach(function(id){
           var s=sumFor(id);
-          html+='<span class="lkcp-chip" data-copy="'+Math.round(s)+'" title="Натисніть, щоб скопіювати суму"><span class="l">'+esc(TIER_NAMES[id])+'</span>'+fmtInt(s)+(pend?' …':'')+'</span>';
+          html+='<span class="lkcp-chip" data-copy="'+Math.round(s)+'" data-tier="'+esc(id)+'"'
+             +' title="Натисніть, щоб підставити суму в ціну «'+esc(TIER_NAMES[id])+'» цього товару">'
+             +'<span class="l">'+esc(TIER_NAMES[id])+'</span>'+fmtInt(s)+(pend?' …':'')+'</span>';
         });
-        box.innerHTML=html;
+        if(box.getAttribute('data-sig')!==html){ box.setAttribute('data-sig', html); box.innerHTML=html; }
       } else if(box){ box.remove(); }   // режим перегляду — без чипів опт/майстри
     });
   }
