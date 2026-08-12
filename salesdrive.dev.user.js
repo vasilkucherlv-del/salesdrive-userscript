@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.64
+// @version      2.65
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -150,6 +150,74 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 })();
 }catch(e){ try{ console.warn("[SD] модуль «lkApiBudget» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkApiBudget ▲▲▲ */
+
+/* ▼▼▼ МОДУЛЬ-START • lkProdLink — посилання «код товару → його картка» ▼▼▼ */
+/* Раніше код у списку наборів вів у ПОШУК по каталогу — доводилось клікати ще раз.
+   Тут перекладаємо код у productId внутрішнім довідником СРМ (без API-ключа,
+   без годинного ліміту) і підміняємо посилання на картку товару.
+   Кеш у localStorage на добу. Один код може мати кілька товарів (напр. 069 —
+   і звичайний товар, і комплект): для наборів беремо саме комплект.
+   Використання: <a data-sd-sku="017" data-sd-kit="1" href="...">017</a>
+   — href підміниться сам, щойно ID стане відомий. */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
+(function lkProdLink(){
+  'use strict';
+  var KEY='lk_prodid_v1', TTL=24*60*60*1000, MISS_TTL=10*60*1000;
+  var mem=null, busy={};
+  function load(){ if(mem) return mem; try{ mem=JSON.parse(localStorage.getItem(KEY))||{}; }catch(e){ mem={}; } return mem; }
+  function save(){ try{ localStorage.setItem(KEY, JSON.stringify(mem||{})); }catch(e){} }
+  function card(id){ return '/ua/index.html?formId=1#/product/update/'+id; }
+  function search(sku){ return '/ua/index.html?formId=1#/product/index?filter%5Bsku%5D='+encodeURIComponent(sku); }
+  function pick(rec, preferKit){
+    if(!rec) return 0;
+    return (preferKit && rec.kit) ? rec.kit : (rec.id || rec.kit || 0);
+  }
+  function fresh(rec){
+    if(!rec) return false;
+    var age=Date.now()-(rec.t||0);
+    return (rec.id||rec.kit) ? age<TTL : age<MISS_TTL;   // невдачу теж памʼятаємо, щоб не довбати
+  }
+  function resolve(sku){
+    sku=String(sku||'').trim(); if(!sku || busy[sku]) return;
+    var c=load(); if(fresh(c[sku])) return;
+    busy[sku]=1;
+    fetch('/products/data/?active=1&filter[sku]='+encodeURIComponent(sku)+'&formId=1',
+          {credentials:'include',headers:{'accept':'application/json, text/plain, */*','when':'product/index'}})
+      .then(function(r){ return r.ok?r.json():null; })
+      .then(function(j){
+        var arr=(((((j||{}).response||{}).meta||{}).option||{}).option)||[];
+        var kit=0, plain=0;
+        arr.forEach(function(x){
+          if(String(x.sku).trim()!==sku) return;
+          if(Number(x.isComplect)===1){ if(!kit) kit=Number(x.id)||0; }
+          else if(!plain) plain=Number(x.id)||0;
+        });
+        var cc=load(); cc[sku]={ t:Date.now(), id:plain, kit:kit }; save();
+        paint();
+      })
+      .catch(function(){ var cc=load(); cc[sku]={ t:Date.now(), id:0, kit:0 }; save(); })
+      .then(function(){ busy[sku]=0; });
+  }
+  function url(sku, preferKit){
+    sku=String(sku||'').trim();
+    var rec=load()[sku], id=pick(rec, preferKit);
+    if(!fresh(rec)) resolve(sku);
+    return id ? card(id) : search(sku);
+  }
+  // підміняємо href у вже намальованих посиланнях (пишемо лише коли реально інше)
+  function paint(){
+    try{
+      [].forEach.call(document.querySelectorAll('a[data-sd-sku]'), function(a){
+        var u=url(a.getAttribute('data-sd-sku'), a.getAttribute('data-sd-kit')==='1');
+        if(a.getAttribute('href')!==u) a.setAttribute('href', u);
+      });
+    }catch(e){}
+  }
+  try{ window.sdProdLink={ url:url, paint:paint, resolve:resolve }; }catch(e){}
+  window.addEventListener('lkdom', paint);
+})();
+}catch(e){ try{ console.warn("[SD] модуль «lkProdLink» не запустився:", e); }catch(_){} }
+/* ▲▲▲ МОДУЛЬ-END • lkProdLink ▲▲▲ */
 
 try{ // SD-ізоляція: помилка цього модуля не зупинить решту
 (function () {
@@ -3166,7 +3234,11 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     const list = comp2kits.get(sku) || [];
     let h = '<div class="h">Входить у набори:</div>';
     for (const k of list) {
-      const codeHtml = '<a class="lk" data-sku="' + esc(k.code) + '" href="' + CAT_URL(k.code) + '" target="_blank" rel="noopener">' + esc(k.code) + '</a>';
+      // посилання веде НА КАРТКУ набору (код → productId, модуль lkProdLink);
+      // поки ID невідомий — тимчасово пошук по коду, href підміниться сам
+      const kitHref = (window.sdProdLink ? window.sdProdLink.url(k.code, true) : CAT_URL(k.code));
+      const codeHtml = '<a class="lk" data-sku="' + esc(k.code) + '" data-sd-sku="' + esc(k.code) + '" data-sd-kit="1"'
+        + ' href="' + kitHref + '" target="_blank" rel="noopener" title="Відкрити картку набору">' + esc(k.code) + '</a>';
       h += '<div class="r">' + codeHtml + ' · <span class="nm">' + esc(k.name) + '</span> ×' + k.qty + '</div>';
     }
     return h;
@@ -4076,8 +4148,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     for (const k of kits) {
       const eid = String(k.id || '').replace(/^id_/, '');
       const edit = eid ? ' <a class="led" href="#/product/update/' + esc(eid) + '" title="Редагувати товар"><i class="fa fa-pencil"></i></a>' : '';
-      h += '<div class="r"><a class="lk" data-sku="' + esc(k.code) + '" href="' + CAT_URL(k.code) +
-           '" target="_blank" rel="noopener">' + esc(k.code) + '</a>' + edit +
+      const kitHref = (window.sdProdLink ? window.sdProdLink.url(k.code, true) : CAT_URL(k.code));
+      h += '<div class="r"><a class="lk" data-sku="' + esc(k.code) + '" data-sd-sku="' + esc(k.code) + '" data-sd-kit="1" href="' + kitHref +
+           '" target="_blank" rel="noopener" title="Відкрити картку набору">' + esc(k.code) + '</a>' + edit +
            ' · <span class="nm">' + esc(k.name) + '</span></div>';
     }
     return h;
@@ -5945,7 +6018,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     var exp=document.createElement('div');
     exp.className='lkck-exp'; exp.style.display='none';
     exp.innerHTML='<div class="h">Входить у набори:</div>'+list.map(function(k){
-      return '<div class="r"><a href="'+CAT(k.kit)+'" target="_blank" rel="noopener">'+esc(k.kit)+'</a>'
+      var kitHref=(window.sdProdLink? window.sdProdLink.url(k.kit, true) : CAT(k.kit));
+      return '<div class="r"><a data-sd-sku="'+esc(k.kit)+'" data-sd-kit="1" href="'+kitHref
+        +'" target="_blank" rel="noopener" title="Відкрити картку набору">'+esc(k.kit)+'</a>'
         +' · <span class="nm">'+esc(k.name)+'</span> ×'+k.qty+'</div>';
     }).join('');
     plus.addEventListener('click',function(e){
