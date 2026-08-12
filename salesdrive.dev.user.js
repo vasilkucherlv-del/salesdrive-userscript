@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.65
+// @version      2.66
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -204,17 +204,56 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     if(!fresh(rec)) resolve(sku);
     return id ? card(id) : search(sku);
   }
+  // код із «старого» посилання-пошуку: …#/product/index?filter%5Bsku%5D=017
+  function skuFromHref(href){
+    var m=String(href||'').match(/filter(?:%5B|\[)sku(?:%5D|\])=([^&]+)/i);
+    try{ return m?decodeURIComponent(m[1]):''; }catch(e){ return m?m[1]:''; }
+  }
+  // наші плашки наборів (у т.ч. намальовані ІНШОЮ копією скрипта — стабільною)
+  var KIT_BOXES='.lkck-exp,.lknb-exp,.lkmk-exp';
+  function kitLinks(){
+    var out=[];
+    [].forEach.call(document.querySelectorAll('a[data-sd-sku]'), function(a){ out.push(a); });
+    [].forEach.call(document.querySelectorAll(KIT_BOXES), function(box){
+      [].forEach.call(box.querySelectorAll('a[href]'), function(a){
+        if(!a.hasAttribute('data-sd-sku') && skuFromHref(a.getAttribute('href'))) out.push(a);
+      });
+    });
+    return out;
+  }
+  function skuOfLink(a){
+    return a.getAttribute('data-sd-sku') || skuFromHref(a.getAttribute('href')) || '';
+  }
   // підміняємо href у вже намальованих посиланнях (пишемо лише коли реально інше)
   function paint(){
     try{
-      [].forEach.call(document.querySelectorAll('a[data-sd-sku]'), function(a){
-        var u=url(a.getAttribute('data-sd-sku'), a.getAttribute('data-sd-kit')==='1');
+      kitLinks().forEach(function(a){
+        var sku=skuOfLink(a); if(!sku) return;
+        var u=url(sku, a.getAttribute('data-sd-kit')!=='0');
         if(a.getAttribute('href')!==u) a.setAttribute('href', u);
       });
     }catch(e){}
   }
+  // Страхувальник: навіть якщо href не встиг оновитись (або плашку намалювала
+  // інша копія скрипта) — клік по коду веде на картку набору.
+  document.addEventListener('click', function(e){
+    try{
+      var a=e.target && e.target.closest ? e.target.closest('a[href]') : null;
+      if(!a) return;
+      if(!a.hasAttribute('data-sd-sku') && !(a.closest(KIT_BOXES))) return;
+      var sku=skuOfLink(a); if(!sku) return;
+      var rec=load()[sku], id=pick(rec, a.getAttribute('data-sd-kit')!=='0');
+      if(id){                       // ID відомий — ведемо на картку
+        var u=card(id);
+        if(a.getAttribute('href')!==u) a.setAttribute('href', u);
+        return;                     // далі клік іде як звичайний перехід
+      }
+      resolve(sku);                 // ще не знаємо — цього разу відкриється пошук
+    }catch(err){}
+  }, true);
   try{ window.sdProdLink={ url:url, paint:paint, resolve:resolve }; }catch(e){}
   window.addEventListener('lkdom', paint);
+  setTimeout(paint, 1500); setTimeout(paint, 4000);   // якщо пульсу ще не було
 })();
 }catch(e){ try{ console.warn("[SD] модуль «lkProdLink» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkProdLink ▲▲▲ */
