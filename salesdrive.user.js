@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      2.56
+// @version      2.67
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -35,6 +35,7 @@
      • lkArrivalOpt    — 💰 опт-ціни товарів (×1.2/×1.25/×1.3↑5) із собівартості накладної
      • lkRoundPickup   — 🔟 заокруглення суми самовивозу вгору до 10 ₴ (99→100, 108→110)
      • lkStockWhere    — 🔎 «Де товар»: у яких заявках висить код (з урахуванням комплектів)
+     • lkRozCommission — ⚖ комісія Rozetka для товарів, дописаних менеджером
      • lkCatalogKits   — позначка «входить у набори» в каталозі Товари/Послуги + на сторінці товару
      • lkTtnPrintGuard — 🖨 попередження про повторний друк ТТН Укрпошти
      • lkCashRegister  — 💰 Каса самовивозу
@@ -69,6 +70,193 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 })();
 }catch(e){ try{ console.warn("[SD] модуль «lkDomTick» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkDomTick ▲▲▲ */
+
+/* ▼▼▼ МОДУЛЬ-START • lkApiBudget — спільний облік і захист ліміту API SalesDrive ▼▼▼ */
+/* СРМ дає лише 100 запитів НА ГОДИНУ до /api/order/list/ — і цей ліміт СПІЛЬНИЙ
+   на весь акаунт (усі менеджери, усі вкладки). Перевищення → HTTP 400
+   {"status":"error","message":"API limit reached ... API period: 1 hour. API limit: 100."}
+   Тут один шлюз для всіх модулів:
+     • лічильник витрат за годину (спільний через localStorage — видно з усіх вкладок);
+     • «стоп-кран»: після відмови ніхто не стукає ще 10 хв (раніше кожен модуль
+       повторював запит щохвилини й тримав ліміт вичерпаним постійно);
+     • резерв: останні 15 запитів години лишаємо для ручних дій (кнопки),
+       фонові оновлення туди не лізуть.
+   Використання: window.sdApi.fetch(url, {headers:…, bg:true}) → Promise(Response),
+   відмова = Error з .limit=true і .waitMs. */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
+(function lkApiBudget(){
+  'use strict';
+  var LIMIT=100, RESERVE=15, BLOCK_MS=10*60*1000;
+  var KS='lk_api_stat_v1', KB='lk_api_block_v1';
+
+  function hourKey(){ return Math.floor(Date.now()/3600000); }
+  function stat(){
+    var s=null; try{ s=JSON.parse(localStorage.getItem(KS)); }catch(e){}
+    if(!s || s.h!==hourKey()) s={h:hourKey(), n:0};
+    return s;
+  }
+  function bump(){ var s=stat(); s.n++; try{ localStorage.setItem(KS, JSON.stringify(s)); }catch(e){} return s.n; }
+  function blockedUntil(){ var v=0; try{ v=Number(localStorage.getItem(KB))||0; }catch(e){} return v; }
+  function block(ms){ try{ localStorage.setItem(KB, String(Date.now()+ms)); }catch(e){} }
+
+  function err(msg, waitMs){ var e=new Error(msg); e.limit=true; e.waitMs=waitMs||0; return e; }
+
+  var api={
+    LIMIT: LIMIT,
+    // ── ВНУТРІШНІЙ список заявок СРМ (той самий запит, що робить сама СРМ на
+    //    сторінці списку) — cookie-авторизація, БЕЗ API-ключа і БЕЗ годинного ліміту.
+    //    Дає statusId, payment_method, paymentDate, paymentAmount/restPay,
+    //    document_ord_check, contacts, ord_delivery_data (з isPrinted) —
+    //    усе, крім sku товарів (там лише productId).
+    orders: function(qs, page){
+      var u='/orders/?formId=1&mobileMode=0&mode=orderList&page='+(page||1)+(qs?('&'+qs):'');
+      return fetch(u,{credentials:'include',headers:{'Accept':'application/json, text/plain, */*'}})
+        .then(function(r){ if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); })
+        .then(function(j){
+          var b=(j&&(j.response||j))||{};
+          return { rows: b.data||b.orders||[], pageCount: ((b.pagination||{}).pageCount)||1, meta: b.meta||{} };
+        });
+    },
+    used: function(){ return stat().n; },
+    left: function(){ return Math.max(0, LIMIT-stat().n); },
+    // скільки ще чекати (мс), 0 — можна
+    waitMs: function(){ return Math.max(0, blockedUntil()-Date.now()); },
+    // людський текст для плашок
+    note: function(){
+      var w=api.waitMs();
+      if(w>0) return 'Ліміт API SalesDrive вичерпано (100 запитів на годину на весь акаунт). '
+                    +'Спробуйте через '+Math.ceil(w/60000)+' хв.';
+      return 'Витрачено '+api.used()+' зі 100 запитів API за цю годину.';
+    },
+    fetch: function(url, opts){
+      opts=opts||{};
+      var w=api.waitMs();
+      if(w>0) return Promise.reject(err('api-limit', w));
+      if(opts.bg && api.left()<=RESERVE) return Promise.reject(err('api-reserve', 60000));
+      if(api.left()<=0){ block(BLOCK_MS); return Promise.reject(err('api-limit', BLOCK_MS)); }
+      bump();
+      return fetch(url, opts).then(function(r){
+        if(r.status!==400) return r;
+        // 400 буває і не через ліміт — дивимось текст помилки, щоб не блокувати дарма
+        return r.clone().text().then(function(t){ return t; }, function(){ return ''; })
+          .then(function(t){
+            if(/limit/i.test(t||'')){ block(BLOCK_MS); throw err('api-limit', BLOCK_MS); }
+            return r;
+          });
+      });
+    }
+  };
+  try{ window.sdApi=api; }catch(e){}
+})();
+}catch(e){ try{ console.warn("[SD] модуль «lkApiBudget» не запустився:", e); }catch(_){} }
+/* ▲▲▲ МОДУЛЬ-END • lkApiBudget ▲▲▲ */
+
+/* ▼▼▼ МОДУЛЬ-START • lkProdLink — посилання «код товару → його картка» ▼▼▼ */
+/* Раніше код у списку наборів вів у ПОШУК по каталогу — доводилось клікати ще раз.
+   Тут перекладаємо код у productId внутрішнім довідником СРМ (без API-ключа,
+   без годинного ліміту) і підміняємо посилання на картку товару.
+   Кеш у localStorage на добу. Один код може мати кілька товарів (напр. 069 —
+   і звичайний товар, і комплект): для наборів беремо саме комплект.
+   Використання: <a data-sd-sku="017" data-sd-kit="1" href="...">017</a>
+   — href підміниться сам, щойно ID стане відомий. */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
+(function lkProdLink(){
+  'use strict';
+  var KEY='lk_prodid_v1', TTL=24*60*60*1000, MISS_TTL=10*60*1000;
+  var mem=null, busy={};
+  function load(){ if(mem) return mem; try{ mem=JSON.parse(localStorage.getItem(KEY))||{}; }catch(e){ mem={}; } return mem; }
+  function save(){ try{ localStorage.setItem(KEY, JSON.stringify(mem||{})); }catch(e){} }
+  function card(id){ return '/ua/index.html?formId=1#/product/update/'+id; }
+  function search(sku){ return '/ua/index.html?formId=1#/product/index?filter%5Bsku%5D='+encodeURIComponent(sku); }
+  function pick(rec, preferKit){
+    if(!rec) return 0;
+    return (preferKit && rec.kit) ? rec.kit : (rec.id || rec.kit || 0);
+  }
+  function fresh(rec){
+    if(!rec) return false;
+    var age=Date.now()-(rec.t||0);
+    return (rec.id||rec.kit) ? age<TTL : age<MISS_TTL;   // невдачу теж памʼятаємо, щоб не довбати
+  }
+  function resolve(sku){
+    sku=String(sku||'').trim(); if(!sku || busy[sku]) return;
+    var c=load(); if(fresh(c[sku])) return;
+    busy[sku]=1;
+    fetch('/products/data/?active=1&filter[sku]='+encodeURIComponent(sku)+'&formId=1',
+          {credentials:'include',headers:{'accept':'application/json, text/plain, */*','when':'product/index'}})
+      .then(function(r){ return r.ok?r.json():null; })
+      .then(function(j){
+        var arr=(((((j||{}).response||{}).meta||{}).option||{}).option)||[];
+        var kit=0, plain=0;
+        arr.forEach(function(x){
+          if(String(x.sku).trim()!==sku) return;
+          if(Number(x.isComplect)===1){ if(!kit) kit=Number(x.id)||0; }
+          else if(!plain) plain=Number(x.id)||0;
+        });
+        var cc=load(); cc[sku]={ t:Date.now(), id:plain, kit:kit }; save();
+        paint();
+      })
+      .catch(function(){ var cc=load(); cc[sku]={ t:Date.now(), id:0, kit:0 }; save(); })
+      .then(function(){ busy[sku]=0; });
+  }
+  function url(sku, preferKit){
+    sku=String(sku||'').trim();
+    var rec=load()[sku], id=pick(rec, preferKit);
+    if(!fresh(rec)) resolve(sku);
+    return id ? card(id) : search(sku);
+  }
+  // код із «старого» посилання-пошуку: …#/product/index?filter%5Bsku%5D=017
+  function skuFromHref(href){
+    var m=String(href||'').match(/filter(?:%5B|\[)sku(?:%5D|\])=([^&]+)/i);
+    try{ return m?decodeURIComponent(m[1]):''; }catch(e){ return m?m[1]:''; }
+  }
+  // наші плашки наборів (у т.ч. намальовані ІНШОЮ копією скрипта — стабільною)
+  var KIT_BOXES='.lkck-exp,.lknb-exp,.lkmk-exp';
+  function kitLinks(){
+    var out=[];
+    [].forEach.call(document.querySelectorAll('a[data-sd-sku]'), function(a){ out.push(a); });
+    [].forEach.call(document.querySelectorAll(KIT_BOXES), function(box){
+      [].forEach.call(box.querySelectorAll('a[href]'), function(a){
+        if(!a.hasAttribute('data-sd-sku') && skuFromHref(a.getAttribute('href'))) out.push(a);
+      });
+    });
+    return out;
+  }
+  function skuOfLink(a){
+    return a.getAttribute('data-sd-sku') || skuFromHref(a.getAttribute('href')) || '';
+  }
+  // підміняємо href у вже намальованих посиланнях (пишемо лише коли реально інше)
+  function paint(){
+    try{
+      kitLinks().forEach(function(a){
+        var sku=skuOfLink(a); if(!sku) return;
+        var u=url(sku, a.getAttribute('data-sd-kit')!=='0');
+        if(a.getAttribute('href')!==u) a.setAttribute('href', u);
+      });
+    }catch(e){}
+  }
+  // Страхувальник: навіть якщо href не встиг оновитись (або плашку намалювала
+  // інша копія скрипта) — клік по коду веде на картку набору.
+  document.addEventListener('click', function(e){
+    try{
+      var a=e.target && e.target.closest ? e.target.closest('a[href]') : null;
+      if(!a) return;
+      if(!a.hasAttribute('data-sd-sku') && !(a.closest(KIT_BOXES))) return;
+      var sku=skuOfLink(a); if(!sku) return;
+      var rec=load()[sku], id=pick(rec, a.getAttribute('data-sd-kit')!=='0');
+      if(id){                       // ID відомий — ведемо на картку
+        var u=card(id);
+        if(a.getAttribute('href')!==u) a.setAttribute('href', u);
+        return;                     // далі клік іде як звичайний перехід
+      }
+      resolve(sku);                 // ще не знаємо — цього разу відкриється пошук
+    }catch(err){}
+  }, true);
+  try{ window.sdProdLink={ url:url, paint:paint, resolve:resolve }; }catch(e){}
+  window.addEventListener('lkdom', paint);
+  setTimeout(paint, 1500); setTimeout(paint, 4000);   // якщо пульсу ще не було
+})();
+}catch(e){ try{ console.warn("[SD] модуль «lkProdLink» не запустився:", e); }catch(_){} }
+/* ▲▲▲ МОДУЛЬ-END • lkProdLink ▲▲▲ */
 
 try{ // SD-ізоляція: помилка цього модуля не зупинить решту
 (function () {
@@ -287,7 +475,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   (function () {
     try {
       var __sdStyle = document.createElement("style");
-      __sdStyle.textContent = "/* hint.css */\n#sd-upsell-hint{\n  position:relative; box-sizing:border-box;\n  width:100%; min-width:min(560px, 100%); max-width:980px;\n  margin:10px 0 14px 0; padding:14px 44px 16px 18px;\n  background:#FFF8E1; border:2px solid #F0A800; border-left:7px solid #F0A800;\n  border-radius:10px; font-family:Arial, sans-serif; color:#4a3700;\n  box-shadow:0 3px 12px rgba(0,0,0,.15); z-index:9999;\n  animation:sdpop .18s ease-out;\n}\n@keyframes sdpop{from{transform:scale(.99);opacity:.3}to{transform:scale(1);opacity:1}}\n\n#sd-upsell-hint .sd-top{font-size:13px; opacity:.75; font-weight:600; margin-bottom:6px}\n\n/* блок одного супутнього: скрипт + кнопка */\n#sd-upsell-hint .sd-item{\n  display:flex; flex-wrap:wrap; align-items:flex-start; gap:12px 14px;\n  padding:12px 0 2px 0; margin-top:12px;\n  border-top:1px dashed rgba(240,168,0,.55);\n}\n#sd-upsell-hint .sd-item:first-of-type{border-top:none; margin-top:0; padding-top:0}\n\n/* середня колонка: назва + причина + наявність */\n#sd-upsell-hint .sd-main{\n  flex:1 1 300px; min-width:0;\n  display:flex; flex-direction:column; align-items:flex-start; gap:6px;\n}\n#sd-upsell-hint .sd-name{\n  font-size:15px; font-weight:700; line-height:1.3; color:#3a2c00;\n  overflow-wrap:anywhere;\n}\n#sd-upsell-hint .sd-script{\n  font-size:14px; font-weight:400; line-height:1.5; color:#5a4a14;\n  overflow-wrap:anywhere;\n}\n\n/* права колонка: ціна + кнопка */\n#sd-upsell-hint .sd-action{\n  flex:0 0 auto; width:150px; max-width:100%;\n  display:flex; flex-direction:column; align-items:stretch; gap:8px;\n}\n#sd-upsell-hint .sd-add{\n  width:100%; box-sizing:border-box;\n  white-space:normal; word-break:break-word; text-align:center;\n  padding:11px 14px; background:#2E7D32; color:#fff;\n  border:none; border-radius:7px;\n  font-size:15px; font-weight:bold; cursor:pointer; font-family:Arial, sans-serif;\n}\n#sd-upsell-hint .sd-add:hover{background:#256628}\n#sd-upsell-hint .sd-add:active{transform:translateY(1px)}\n#sd-upsell-hint .sd-add.sd-done{background:#9e9e9e; cursor:default}\n#sd-upsell-hint .sd-add.sd-done:hover{background:#9e9e9e}\n#sd-upsell-hint .sd-sku{background:rgba(255,255,255,.25); padding:2px 8px; border-radius:4px; font-size:13px; margin-left:6px}\n\n#sd-upsell-hint .sd-x{position:absolute; top:8px; right:12px; cursor:pointer; font-size:22px; line-height:1; color:#a07800; border:none; background:none}\n#sd-upsell-hint .sd-x:hover{color:#4a3700}\n\n/* бейдж залишку супутнього */\n#sd-upsell-hint .sd-stock{flex:0 0 auto; max-width:100%; font-size:13px; font-weight:700; padding:5px 10px; border-radius:6px; white-space:normal; overflow-wrap:anywhere}\n#sd-upsell-hint .sd-stock-wait{background:#eee; color:#777; font-weight:normal}\n#sd-upsell-hint .sd-stock-yes{background:#E6F4EA; color:#1B5E20; border:1px solid #A5D6A7}\n#sd-upsell-hint .sd-stock-no{background:#FDECEA; color:#B71C1C; border:1px solid #F5B7B1}\n#sd-upsell-hint .sd-stock-unk{background:#f0f0f0; color:#777; font-weight:normal}\n\n/* мініатюри товарів у пошуку SalesDrive */\nli.sd-has-img{display:flex !important; align-items:center; gap:8px}\nli.sd-has-img > a{flex:1 1 auto; min-width:0}\nimg.sd-opt-img{width:34px; height:34px; flex:0 0 34px; object-fit:contain; border:1px solid #eee; border-radius:4px; background:#fff}\n\n/* фото супутнього у підказці допродажу */\n#sd-upsell-hint .sd-comp-img{flex:0 0 auto; width:48px; height:48px; object-fit:contain; border:1px solid #e0d4a8; border-radius:6px; background:#fff}\n\n/* кнопка діагностики фото (зʼявляється лише якщо фото не знайдено) */\n\n/* ---- Передупередження про ціну ROZETKA ---- */\n#sd-price-warn {\n  position: relative;\n  margin: 10px 0;\n  padding: 10px 34px 10px 12px;\n  border: 1px solid #e0b4b4;\n  border-left: 4px solid #d9534f;\n  background: #fdf3f3;\n  border-radius: 6px;\n  font: 13px/1.45 -apple-system, \"Segoe UI\", Roboto, Arial, sans-serif;\n  color: #7a1f1f;\n  max-width: 980px;\n  box-sizing: border-box;\n}\n#sd-price-warn .sd-x {\n  position: absolute; top: 6px; right: 8px;\n  border: none; background: transparent; cursor: pointer;\n  font-size: 18px; line-height: 1; color: #a05; opacity: .6;\n}\n#sd-price-warn .sd-x:hover { opacity: 1; }\n#sd-price-warn .sd-pw-top { font-weight: 600; margin-bottom: 6px; color: #c0392b; }\n#sd-price-warn .sd-pw-row {\n  display: flex; flex-wrap: wrap; gap: 4px 12px;\n  padding: 4px 0; border-top: 1px dashed #ecc9c9;\n}\n#sd-price-warn .sd-pw-name { flex: 1 1 280px; min-width: 0; }\n#sd-price-warn .sd-pw-info { white-space: nowrap; font-weight: 600; }\n#sd-price-warn .sd-pw-below .sd-pw-info { color: #c0392b; }\n\n/* ---- Передупередження про низький рейтинг клієнта ---- */\n#sd-rating-warn {\n  position: relative;\n  margin: 10px 0;\n  padding: 10px 34px 10px 12px;\n  border: 1px solid #e6c200;\n  border-left: 4px solid #e6a700;\n  background: #fff8e1;\n  border-radius: 6px;\n  font: 13px/1.45 -apple-system, \"Segoe UI\", Roboto, Arial, sans-serif;\n  color: #6b4e00;\n  max-width: 980px;\n  box-sizing: border-box;\n}\n#sd-rating-warn .sd-x {\n  position: absolute; top: 6px; right: 8px;\n  border: none; background: transparent; cursor: pointer;\n  font-size: 18px; line-height: 1; color: #8a6d00; opacity: .6;\n}\n#sd-rating-warn .sd-x:hover { opacity: 1; }\n#sd-rating-warn .sd-rw-top { font-weight: 600; color: #b36b00; }\n\n/* ---- Скрипт у банері ризикового клієнта ---- */\n#sd-rating-warn .sd-rw-script { margin-top: 8px; }\n#sd-rating-warn .sd-rw-block { padding: 6px 0; border-top: 1px dashed #ecd9a0; }\n#sd-rating-warn .sd-rw-label {\n  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;\n  font-weight: 600; color: #8a5a00; margin-bottom: 2px;\n}\n#sd-rating-warn .sd-rw-copy {\n  border: 1px solid #d9b85a; background: #fff; color: #8a5a00;\n  border-radius: 4px; padding: 1px 7px; font-size: 11px; cursor: pointer; line-height: 1.5;\n}\n#sd-rating-warn .sd-rw-copy:hover { background: #fff3d6; }\n#sd-rating-warn .sd-rw-text { color: #5a4400; }\n\n/* ---- Ціна супутнього (блок у правій колонці, за джерелом заявки) ---- */\n#sd-upsell-hint .sd-price{\n  background:#E8F0FE; border:1px solid #BBD3F5; border-radius:8px;\n  text-align:center; padding:6px 8px; box-sizing:border-box;\n}\n#sd-upsell-hint .sd-price-lab{ font-size:11px; color:#4d6285; line-height:1.25; }\n#sd-upsell-hint .sd-price-val{ font-size:21px; font-weight:800; color:#14418f; line-height:1.15; white-space:nowrap; }\n\n/* ---- Сховати наші банери, поки відкрите модальне вікно ---- */\nhtml.sd-modal-open #sd-upsell-hint,\nhtml.sd-modal-open #sd-price-warn,\nhtml.sd-modal-open #sd-rating-warn,\nhtml.sd-modal-open .sd-ttn-box { display: none !important; }\n\n/* ---- Банер «ТТН змінено» (Rozetka/Refort) ---- */\n.sd-ttn-box {\n  position: relative;\n  margin: 10px 0;\n  padding: 10px 34px 10px 12px;\n  border: 1px solid #e67e22;\n  border-left: 4px solid #d35400;\n  background: #fff3e0;\n  border-radius: 6px;\n  font: 13px/1.45 -apple-system, \"Segoe UI\", Roboto, Arial, sans-serif;\n  color: #7a3d00;\n  max-width: 980px;\n  box-sizing: border-box;\n}\n.sd-ttn-box .sd-x {\n  position: absolute; top: 6px; right: 8px;\n  border: none; background: transparent; cursor: pointer;\n  font-size: 18px; line-height: 1; color: #b35900; opacity: .6;\n}\n.sd-ttn-box .sd-x:hover { opacity: 1; }\n.sd-ttn-box .sd-tw-top { font-weight: 700; color: #c0392b; margin-bottom: 4px; }\n.sd-ttn-box .sd-tw-info {\n  font-weight: 600; margin-bottom: 3px;\n  font-family: ui-monospace, \"SFMono-Regular\", Menlo, Consolas, monospace;\n}\n.sd-ttn-box .sd-tw-why { color: #8a5a2b; margin-bottom: 8px; }\n.sd-ttn-box .sd-tw-ack {\n  cursor: pointer; border: 1px solid #d35400; background: #fff;\n  color: #c0392b; font-weight: 600; padding: 5px 12px; border-radius: 5px; font-size: 12px;\n}\n.sd-ttn-box .sd-tw-ack:hover { background: #fde9d6; }\n\n/* kb.css */\n/* База знань — плаваюча кнопка + панель */\n#sd-kb-btn{\n  position:fixed; right:20px; bottom:20px; z-index:2147483600;\n  padding:11px 16px; border:none; border-radius:24px;\n  background:#1565C0; color:#fff; font-family:Arial, sans-serif;\n  font-size:14px; font-weight:700; cursor:pointer;\n  box-shadow:0 3px 12px rgba(0,0,0,.28);\n}\n#sd-kb-btn:hover{background:#0D47A1}\n#sd-kb-btn:active{transform:translateY(1px)}\n\n#sd-kb-panel{\n  position:fixed; right:20px; bottom:74px; z-index:2147483601;\n  width:400px; max-width:calc(100vw - 40px); max-height:72vh;\n  display:flex; flex-direction:column;\n  background:#fff; border:1px solid #d9d9d9; border-radius:12px;\n  box-shadow:0 10px 34px rgba(0,0,0,.30);\n  font-family:Arial, sans-serif; color:#222; overflow:hidden;\n  animation:sdkbpop .16s ease-out;\n}\n@keyframes sdkbpop{from{transform:translateY(8px);opacity:.4}to{transform:translateY(0);opacity:1}}\n\n#sd-kb-panel .sd-kb-head{\n  display:flex; align-items:center; justify-content:space-between;\n  padding:12px 14px; background:#1565C0; color:#fff;\n}\n#sd-kb-panel .sd-kb-title{font-size:15px; font-weight:700}\n#sd-kb-panel .sd-kb-x{\n  border:none; background:none; color:#fff; font-size:24px; line-height:1;\n  cursor:pointer; padding:0 4px;\n}\n#sd-kb-panel .sd-kb-x:hover{opacity:.8}\n\n#sd-kb-search{\n  margin:10px 12px 6px 12px; padding:9px 12px; box-sizing:border-box;\n  border:1px solid #cfcfcf; border-radius:8px; font-size:14px;\n  font-family:Arial, sans-serif; outline:none;\n}\n#sd-kb-search:focus{border-color:#1565C0}\n\n#sd-kb-list{\n  flex:1 1 auto; overflow-y:auto; padding:4px 12px 14px 12px;\n}\n\n#sd-kb-list .sd-kb-cat{\n  font-size:12px; font-weight:700; text-transform:uppercase;\n  letter-spacing:.4px; color:#1565C0; margin:14px 2px 6px 2px;\n}\n#sd-kb-list .sd-kb-cat:first-child{margin-top:6px}\n\n#sd-kb-list .sd-kb-card{\n  border:1px solid #e6e6e6; border-radius:9px; margin-bottom:8px;\n  overflow:hidden; background:#fafafa;\n}\n#sd-kb-list .sd-kb-card-head{\n  display:flex; align-items:center; justify-content:space-between;\n  gap:10px; padding:10px 12px; cursor:pointer;\n}\n#sd-kb-list .sd-kb-card-head:hover{background:#f0f4fb}\n#sd-kb-list .sd-kb-card-title{font-size:14px; font-weight:600; color:#222; line-height:1.35}\n#sd-kb-list .sd-kb-caret{color:#888; font-size:13px; flex:0 0 auto}\n\n#sd-kb-list .sd-kb-card-body{padding:0 12px 12px 12px}\n#sd-kb-list .sd-kb-card-text{\n  font-size:14px; line-height:1.55; color:#333; white-space:pre-wrap;\n  overflow-wrap:anywhere; margin-bottom:10px;\n}\n#sd-kb-list .sd-kb-copy{\n  padding:8px 14px; border:none; border-radius:7px;\n  background:#2E7D32; color:#fff; font-size:13px; font-weight:700;\n  cursor:pointer; font-family:Arial, sans-serif;\n}\n#sd-kb-list .sd-kb-copy:hover{background:#256628}\n#sd-kb-list .sd-kb-copy:active{transform:translateY(1px)}\n#sd-kb-list .sd-kb-copy.sd-kb-copied{background:#9e9e9e}\n\n#sd-kb-list .sd-kb-msg{font-size:14px; color:#666; padding:14px 4px; line-height:1.5}\n#sd-kb-list .sd-kb-err{color:#b00020}\n#sd-kb-list .sd-kb-retry{\n  display:inline-block; margin-left:4px; padding:5px 10px; border:1px solid #b00020;\n  background:#fff; color:#b00020; border-radius:6px; font-size:13px; cursor:pointer;\n  font-family:Arial, sans-serif;\n}\n";
+      __sdStyle.textContent = "/* hint.css */\n#sd-upsell-hint{\n  position:relative; box-sizing:border-box;\n  width:100%; min-width:min(560px, 100%); max-width:980px;\n  margin:10px 0 14px 0; padding:14px 44px 16px 18px;\n  background:#FFF8E1; border:2px solid #F0A800; border-left:7px solid #F0A800;\n  border-radius:10px; font-family:Arial, sans-serif; color:#4a3700;\n  box-shadow:0 3px 12px rgba(0,0,0,.15); z-index:9999;\n  animation:sdpop .18s ease-out;\n}\n@keyframes sdpop{from{transform:scale(.99);opacity:.3}to{transform:scale(1);opacity:1}}\n\n#sd-upsell-hint .sd-top{font-size:13px; opacity:.75; font-weight:600; margin-bottom:6px}\n\n/* блок одного супутнього: скрипт + кнопка */\n#sd-upsell-hint .sd-item{\n  display:flex; flex-wrap:wrap; align-items:flex-start; gap:12px 14px;\n  padding:12px 0 2px 0; margin-top:12px;\n  border-top:1px dashed rgba(240,168,0,.55);\n}\n#sd-upsell-hint .sd-item:first-of-type{border-top:none; margin-top:0; padding-top:0}\n\n/* середня колонка: назва + причина + наявність */\n#sd-upsell-hint .sd-main{\n  flex:1 1 300px; min-width:0;\n  display:flex; flex-direction:column; align-items:flex-start; gap:6px;\n}\n#sd-upsell-hint .sd-name{\n  font-size:15px; font-weight:700; line-height:1.3; color:#3a2c00;\n  overflow-wrap:anywhere;\n}\n#sd-upsell-hint .sd-script{\n  font-size:14px; font-weight:400; line-height:1.5; color:#5a4a14;\n  overflow-wrap:anywhere;\n}\n\n/* права колонка: ціна + кнопка */\n#sd-upsell-hint .sd-action{\n  flex:0 0 auto; width:150px; max-width:100%;\n  display:flex; flex-direction:column; align-items:stretch; gap:8px;\n}\n#sd-upsell-hint .sd-add{\n  width:100%; box-sizing:border-box;\n  white-space:normal; word-break:break-word; text-align:center;\n  padding:11px 14px; background:#2E7D32; color:#fff;\n  border:none; border-radius:7px;\n  font-size:15px; font-weight:bold; cursor:pointer; font-family:Arial, sans-serif;\n}\n#sd-upsell-hint .sd-add:hover{background:#256628}\n#sd-upsell-hint .sd-add:active{transform:translateY(1px)}\n#sd-upsell-hint .sd-add.sd-done{background:#9e9e9e; cursor:default}\n#sd-upsell-hint .sd-add.sd-done:hover{background:#9e9e9e}\n#sd-upsell-hint .sd-sku{background:rgba(255,255,255,.25); padding:2px 8px; border-radius:4px; font-size:13px; margin-left:6px}\n\n#sd-upsell-hint .sd-x{position:absolute; top:8px; right:12px; cursor:pointer; font-size:22px; line-height:1; color:#a07800; border:none; background:none}\n#sd-upsell-hint .sd-x:hover{color:#4a3700}\n\n/* бейдж залишку супутнього */\n#sd-upsell-hint .sd-stock{flex:0 0 auto; max-width:100%; font-size:13px; font-weight:700; padding:5px 10px; border-radius:6px; white-space:normal; overflow-wrap:anywhere}\n#sd-upsell-hint .sd-stock-wait{background:#eee; color:#777; font-weight:normal}\n#sd-upsell-hint .sd-stock-yes{background:#E6F4EA; color:#1B5E20; border:1px solid #A5D6A7}\n#sd-upsell-hint .sd-stock-no{background:#FDECEA; color:#B71C1C; border:1px solid #F5B7B1}\n#sd-upsell-hint .sd-stock-unk{background:#f0f0f0; color:#777; font-weight:normal}\n\n/* мініатюри товарів у пошуку SalesDrive */\nli.sd-has-img{display:flex !important; align-items:center; gap:8px}\nli.sd-has-img > a{flex:1 1 auto; min-width:0}\nimg.sd-opt-img{width:34px; height:34px; flex:0 0 34px; object-fit:contain; border:1px solid #eee; border-radius:4px; background:#fff}\n\n/* фото супутнього у підказці допродажу */\n#sd-upsell-hint .sd-comp-img{flex:0 0 auto; width:48px; height:48px; object-fit:contain; border:1px solid #e0d4a8; border-radius:6px; background:#fff}\n\n/* кнопка діагностики фото (зʼявляється лише якщо фото не знайдено) */\n\n/* ---- Передупередження про ціну ROZETKA ---- */\n#sd-price-warn {\n  position: relative;\n  margin: 10px 0;\n  padding: 10px 34px 10px 12px;\n  border: 1px solid #e0b4b4;\n  border-left: 4px solid #d9534f;\n  background: #fdf3f3;\n  border-radius: 6px;\n  font: 13px/1.45 -apple-system, \"Segoe UI\", Roboto, Arial, sans-serif;\n  color: #7a1f1f;\n  max-width: 980px;\n  box-sizing: border-box;\n}\n#sd-price-warn .sd-x {\n  position: absolute; top: 6px; right: 8px;\n  border: none; background: transparent; cursor: pointer;\n  font-size: 18px; line-height: 1; color: #a05; opacity: .6;\n}\n#sd-price-warn .sd-x:hover { opacity: 1; }\n#sd-price-warn .sd-pw-top { font-weight: 600; margin-bottom: 6px; color: #c0392b; }\n#sd-price-warn .sd-pw-row {\n  display: flex; flex-wrap: wrap; gap: 4px 12px;\n  padding: 4px 0; border-top: 1px dashed #ecc9c9;\n}\n#sd-price-warn .sd-pw-name { flex: 1 1 280px; min-width: 0; }\n#sd-price-warn .sd-pw-info { white-space: nowrap; font-weight: 600; }\n#sd-price-warn .sd-pw-below .sd-pw-info { color: #c0392b; }\n\n/* ---- Передупередження про низький рейтинг клієнта ---- */\n#sd-rating-warn {\n  position: relative;\n  margin: 12px 0 14px;\n  padding: 14px 40px 15px 17px;\n  border: 1px solid #dfa72a;\n  border-left: 7px solid #e59400;\n  background: #fff6df;\n  border-radius: 9px;\n  box-shadow: 0 2px 10px rgba(170,115,0,.14);\n  font: 13.5px/1.55 -apple-system, \"Segoe UI\", Roboto, Arial, sans-serif;\n  color: #5a4400;\n  max-width: 980px;\n  box-sizing: border-box;\n}\n#sd-rating-warn .sd-x {\n  position: absolute; top: 6px; right: 8px;\n  border: none; background: transparent; cursor: pointer;\n  font-size: 18px; line-height: 1; color: #8a6d00; opacity: .6;\n}\n#sd-rating-warn .sd-x:hover { opacity: 1; }\n#sd-rating-warn .sd-rw-top { font-weight: 800; font-size: 15.5px; line-height: 1.35; color: #9a5500; letter-spacing: .2px; }\n\n/* ---- Скрипт у банері ризикового клієнта ---- */\n#sd-rating-warn .sd-rw-script { margin-top: 10px; }\n#sd-rating-warn .sd-rw-block { padding: 8px 0; border-top: 1px solid rgba(200,150,40,.35); }\n#sd-rating-warn .sd-rw-label {\n  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;\n  font-weight: 700; color: #7d4f00; margin-bottom: 3px;\n}\n#sd-rating-warn .sd-rw-copy {\n  border: 1px solid #d9a83a; background: #fffdf6; color: #7d4f00; font-weight: 600;\n  border-radius: 5px; padding: 2px 9px; font-size: 11.5px; cursor: pointer; line-height: 1.55;\n}\n#sd-rating-warn .sd-rw-copy:hover { background: #ffeec2; }\n#sd-rating-warn .sd-rw-text { color: #4d3b00; }\n\n/* ---- Ціна супутнього (блок у правій колонці, за джерелом заявки) ---- */\n#sd-upsell-hint .sd-price{\n  background:#E8F0FE; border:1px solid #BBD3F5; border-radius:8px;\n  text-align:center; padding:6px 8px; box-sizing:border-box;\n}\n#sd-upsell-hint .sd-price-lab{ font-size:11px; color:#4d6285; line-height:1.25; }\n#sd-upsell-hint .sd-price-val{ font-size:21px; font-weight:800; color:#14418f; line-height:1.15; white-space:nowrap; }\n\n/* ---- Сховати наші банери, поки відкрите модальне вікно ---- */\nhtml.sd-modal-open #sd-upsell-hint,\nhtml.sd-modal-open #sd-price-warn,\nhtml.sd-modal-open #sd-rating-warn,\nhtml.sd-modal-open .sd-ttn-box { display: none !important; }\n\n/* ---- Банер «ТТН змінено» (Rozetka/Refort) ---- */\n.sd-ttn-box {\n  position: relative;\n  margin: 10px 0;\n  padding: 10px 34px 10px 12px;\n  border: 1px solid #e67e22;\n  border-left: 4px solid #d35400;\n  background: #fff3e0;\n  border-radius: 6px;\n  font: 13px/1.45 -apple-system, \"Segoe UI\", Roboto, Arial, sans-serif;\n  color: #7a3d00;\n  max-width: 980px;\n  box-sizing: border-box;\n}\n.sd-ttn-box .sd-x {\n  position: absolute; top: 6px; right: 8px;\n  border: none; background: transparent; cursor: pointer;\n  font-size: 18px; line-height: 1; color: #b35900; opacity: .6;\n}\n.sd-ttn-box .sd-x:hover { opacity: 1; }\n.sd-ttn-box .sd-tw-top { font-weight: 700; color: #c0392b; margin-bottom: 4px; }\n.sd-ttn-box .sd-tw-info {\n  font-weight: 600; margin-bottom: 3px;\n  font-family: ui-monospace, \"SFMono-Regular\", Menlo, Consolas, monospace;\n}\n.sd-ttn-box .sd-tw-why { color: #8a5a2b; margin-bottom: 8px; }\n.sd-ttn-box .sd-tw-ack {\n  cursor: pointer; border: 1px solid #d35400; background: #fff;\n  color: #c0392b; font-weight: 600; padding: 5px 12px; border-radius: 5px; font-size: 12px;\n}\n.sd-ttn-box .sd-tw-ack:hover { background: #fde9d6; }\n\n/* kb.css */\n/* База знань — плаваюча кнопка + панель */\n#sd-kb-btn{\n  position:fixed; right:20px; bottom:20px; z-index:2147483600;\n  padding:11px 16px; border:none; border-radius:24px;\n  background:#1565C0; color:#fff; font-family:Arial, sans-serif;\n  font-size:14px; font-weight:700; cursor:pointer;\n  box-shadow:0 3px 12px rgba(0,0,0,.28);\n}\n#sd-kb-btn:hover{background:#0D47A1}\n#sd-kb-btn:active{transform:translateY(1px)}\n\n#sd-kb-panel{\n  position:fixed; right:20px; bottom:74px; z-index:2147483601;\n  width:400px; max-width:calc(100vw - 40px); max-height:72vh;\n  display:flex; flex-direction:column;\n  background:#fff; border:1px solid #d9d9d9; border-radius:12px;\n  box-shadow:0 10px 34px rgba(0,0,0,.30);\n  font-family:Arial, sans-serif; color:#222; overflow:hidden;\n  animation:sdkbpop .16s ease-out;\n}\n@keyframes sdkbpop{from{transform:translateY(8px);opacity:.4}to{transform:translateY(0);opacity:1}}\n\n#sd-kb-panel .sd-kb-head{\n  display:flex; align-items:center; justify-content:space-between;\n  padding:12px 14px; background:#1565C0; color:#fff;\n}\n#sd-kb-panel .sd-kb-title{font-size:15px; font-weight:700}\n#sd-kb-panel .sd-kb-x{\n  border:none; background:none; color:#fff; font-size:24px; line-height:1;\n  cursor:pointer; padding:0 4px;\n}\n#sd-kb-panel .sd-kb-x:hover{opacity:.8}\n\n#sd-kb-search{\n  margin:10px 12px 6px 12px; padding:9px 12px; box-sizing:border-box;\n  border:1px solid #cfcfcf; border-radius:8px; font-size:14px;\n  font-family:Arial, sans-serif; outline:none;\n}\n#sd-kb-search:focus{border-color:#1565C0}\n\n#sd-kb-list{\n  flex:1 1 auto; overflow-y:auto; padding:4px 12px 14px 12px;\n}\n\n#sd-kb-list .sd-kb-cat{\n  font-size:12px; font-weight:700; text-transform:uppercase;\n  letter-spacing:.4px; color:#1565C0; margin:14px 2px 6px 2px;\n}\n#sd-kb-list .sd-kb-cat:first-child{margin-top:6px}\n\n#sd-kb-list .sd-kb-card{\n  border:1px solid #e6e6e6; border-radius:9px; margin-bottom:8px;\n  overflow:hidden; background:#fafafa;\n}\n#sd-kb-list .sd-kb-card-head{\n  display:flex; align-items:center; justify-content:space-between;\n  gap:10px; padding:10px 12px; cursor:pointer;\n}\n#sd-kb-list .sd-kb-card-head:hover{background:#f0f4fb}\n#sd-kb-list .sd-kb-card-title{font-size:14px; font-weight:600; color:#222; line-height:1.35}\n#sd-kb-list .sd-kb-caret{color:#888; font-size:13px; flex:0 0 auto}\n\n#sd-kb-list .sd-kb-card-body{padding:0 12px 12px 12px}\n#sd-kb-list .sd-kb-card-text{\n  font-size:14px; line-height:1.55; color:#333; white-space:pre-wrap;\n  overflow-wrap:anywhere; margin-bottom:10px;\n}\n#sd-kb-list .sd-kb-copy{\n  padding:8px 14px; border:none; border-radius:7px;\n  background:#2E7D32; color:#fff; font-size:13px; font-weight:700;\n  cursor:pointer; font-family:Arial, sans-serif;\n}\n#sd-kb-list .sd-kb-copy:hover{background:#256628}\n#sd-kb-list .sd-kb-copy:active{transform:translateY(1px)}\n#sd-kb-list .sd-kb-copy.sd-kb-copied{background:#9e9e9e}\n\n#sd-kb-list .sd-kb-msg{font-size:14px; color:#666; padding:14px 4px; line-height:1.5}\n#sd-kb-list .sd-kb-err{color:#b00020}\n#sd-kb-list .sd-kb-retry{\n  display:inline-block; margin-left:4px; padding:5px 10px; border:1px solid #b00020;\n  background:#fff; color:#b00020; border-radius:6px; font-size:13px; cursor:pointer;\n  font-family:Arial, sans-serif;\n}\n";
       (document.head || document.documentElement).appendChild(__sdStyle);
     } catch (e) { console.log("[SalesDrive] не вдалося додати стилі:", e); }
   })();
@@ -2184,6 +2372,65 @@ function __sdPageMain() {
     }
   });
 
+  // ---------- ПІДСТАНОВКА СУМИ КОМПЛЕКТУ В ЦІНУ ТОВАРУ ----------
+  // Чипи модуля lkComplectPrice («Великий опт 251 ₴» тощо) шлють подію sdSetPrice:
+  // пишемо суму в потрібний тип ціни картки товару. Якщо такого рядка ще немає —
+  // додаємо його штатною кнопкою vm.addProductPrice() і заповнюємо.
+  // НІЧОГО не зберігаємо: значення лягає у форму, менеджер тисне «Зберегти» сам.
+  window.addEventListener("sdSetPrice", function () {
+    var req = {};
+    try { req = JSON.parse(document.documentElement.getAttribute("data-sd-setprice") || "{}") || {}; } catch (e) {}
+    function respond(o) {
+      o.token = req.token || "";
+      document.documentElement.setAttribute("data-sd-setprice-result", JSON.stringify(o));
+      window.dispatchEvent(new Event("sdSetPriceResult"));
+    }
+    function money(n) { return (Math.round(Number(n) * 100) / 100).toFixed(2).replace(".", ","); }
+    try {
+      var val = Number(req.value);
+      if (!(val > 0)) return respond({ ok: false, err: "порожня сума" });
+
+      // scope картки товару (там, де поле роздрібної ціни)
+      var el = document.querySelector('[ng-model="viewModel.item.defaultPrice"]');
+      var sc = el && window.angular ? window.angular.element(el).scope() : null;
+      var vm = sc && (sc.viewModel || sc.vm);
+      if (!vm || !vm.item) return respond({ ok: false, err: "картка товару не знайдена" });
+
+      var created = false, name = "", eff = 0;
+      safeApply(sc, function () {
+        if (String(req.tier) === "retail") {
+          vm.item.defaultPrice = money(val);
+          name = "Роздрібна";
+          return;
+        }
+        var list = vm.item.priceTypes;
+        if (!Array.isArray(list)) list = vm.item.priceTypes = [];
+        var row = null;
+        for (var i = 0; i < list.length; i++)
+          if (String(list[i].priceTypeId) === String(req.tier)) { row = list[i]; break; }
+        if (!row) {
+          if (typeof vm.addProductPrice === "function") vm.addProductPrice();
+          list = vm.item.priceTypes || [];
+          row = list[list.length - 1];
+          if (!row) { row = { priceTypeId: String(req.tier) }; list.push(row); }
+          row.priceTypeId = String(req.tier);
+          if (row.currencyId == null) row.currencyId = 0;
+          created = true;
+        }
+        row.price = money(val);
+        row.defaultPrice = Math.round(val * 100) / 100;
+        // знижку рядка НЕ чіпаємо (може бути виставлена свідомо), але повідомимо про неї
+        var d = parseFloat(String(row.discount == null ? "" : row.discount).replace(",", ".")) || 0;
+        var pd = Number(row.percentDiscount) || 0;
+        eff = pd > 0 ? Math.round(val * (1 - pd / 100) * 100) / 100 : (d > 0 ? Math.round((val - d) * 100) / 100 : 0);
+        try { name = ((vm.meta || {}).priceTypes || {})[String(req.tier)] || ("тип " + req.tier); } catch (e2) {}
+      });
+      respond({ ok: true, created: created, name: name, value: money(val), eff: eff });
+    } catch (e) {
+      respond({ ok: false, err: String(e) });
+    }
+  });
+
   // ---------- ОПТ-ЦІНИ З ПРИХІДНОЇ НАКЛАДНОЇ ----------
   // Кнопка модуля lkArrivalOpt шле подію sdArrivalOpt: для кожного рядка накладної
   // беремо собівартість (ціну закупки рядка) і пишемо в картку товару ціни
@@ -2331,6 +2578,178 @@ function __sdPageMain() {
         .then(function () { setTimeout(step, mode === "apply" ? 250 : 120); });   // не гатимо сервер
     }
     step();
+  });
+
+  // ---------- КОМІСІЯ ROZETKA для дописаних товарів ----------
+  // У Rozetka-замовленні комісія лежить у полі рядка як ВІДСОТОК (commission=14.04,
+  // percentCommission=1; у полі редагування — «14,04%»). Товари, які менеджер додає
+  // руками, приходять із нульовою комісією → підсумок комісії занижується.
+  // Обробник бере відсоток із рядків, що приїхали з Rozetka, і проставляє його
+  // рядкам без комісії — штатним шляхом (editComment → newCommission → updateComment),
+  // інакше «Зберегти» не зафіксує зміну.
+  window.addEventListener("sdRozCommission", function () {
+    var token = document.documentElement.getAttribute("data-sd-rozcomm-token") || "";
+    function respond(o) {
+      o.token = token;
+      document.documentElement.setAttribute("data-sd-rozcomm-result", JSON.stringify(o));
+      window.dispatchEvent(new Event("sdRozCommissionResult"));
+    }
+    function num(v) { var n = parseFloat(String(v == null ? "" : v).replace(/\s|%/g, "").replace(",", ".")); return isNaN(n) ? 0 : n; }
+
+    var got = getVMcached();
+    if (!got || !got.vm) return respond({ ok: false, err: "no-viewModel" });
+    var vm = got.vm, scope = got.scope, items = vm.items || [];
+    if (!isRozetkaOrder(vm)) return respond({ ok: false, err: "не Rozetka" });
+    if (!items.length) return respond({ ok: false, err: "нема товарів" });
+
+    // еталонний відсоток: найчастіший ненульовий серед рядків із відсотковою комісією
+    var counts = {}, ref = 0;
+    items.forEach(function (x) {
+      var c = num(x.commission);
+      if (c > 0 && Number(x.percentCommission) === 1) counts[c] = (counts[c] || 0) + 1;
+    });
+    Object.keys(counts).forEach(function (c) {
+      if (!ref || counts[c] > counts[ref] || (counts[c] === counts[ref] && Number(c) > ref)) ref = Number(c);
+    });
+    // якщо жодного оригінального рядка з комісією немає (усе дописано вручну) —
+    // беремо запасний відсоток 19,44% (домовленість Василя)
+    var fallback = false;
+    if (!(ref > 0)) { ref = 19.44; fallback = true; }
+
+    var targets = items.filter(function (x) { return !(num(x.commission) > 0); });
+    if (!targets.length) return respond({ ok: true, none: true, ref: ref, fallback: fallback });
+
+    var txt = String(ref).replace(".", ",") + "%";
+    var done = [];
+    try {
+      var fakeEvt = { preventDefault: function () {}, stopPropagation: function () {} };
+      safeApply(scope, function () {
+        targets.forEach(function (it) {
+          try {
+            if (typeof vm.editComment === "function" && typeof vm.updateComment === "function") {
+              vm.editComment(it, it.index, fakeEvt);
+              it.percentCommission = 1;
+              it.newCommission = txt;
+              vm.updateComment(it, it.index);
+            } else {
+              it.commission = ref; it.percentCommission = 1;
+            }
+            done.push(String(it.name || it.documentName || "").slice(0, 40));
+          } catch (e) {}
+        });
+        try { if (typeof vm.updateItems === "function") vm.updateItems(); } catch (e) {}
+      });
+      respond({ ok: true, ref: ref, n: done.length, names: done, fallback: fallback });
+    } catch (e) {
+      respond({ ok: false, err: String(e) });
+    }
+  });
+
+  // ---------- ПЕРЕРАХУНОК ЦІН ЗАЯВКИ ЗА ТИПОМ ЦІНИ (опт/майстри/роздріб) ----------
+  // Кнопка модуля lkOrderTier шле подію sdTierPrice: кожному рядку ставимо ціну
+  // з його ж прайсу (рядки заявки вже несуть priceTypes — запити не потрібні).
+  // mode='list'    — які типи цін узагалі доступні в цій заявці;
+  // mode='preview' — що зміниться (нічого не чіпаємо);
+  // mode='apply'   — записати ціни у рядки (зберігає менеджер вручну).
+  window.addEventListener("sdTierPrice", function () {
+    var req = {};
+    try { req = JSON.parse(document.documentElement.getAttribute("data-sd-tier") || "{}") || {}; } catch (e) {}
+    function respond(o) {
+      o.token = req.token || "";
+      document.documentElement.setAttribute("data-sd-tier-result", JSON.stringify(o));
+      window.dispatchEvent(new Event("sdTierPriceResult"));
+    }
+    function num(v) { var n = parseFloat(String(v == null ? "" : v).replace(/\s/g, "").replace(",", ".")); return isNaN(n) ? 0 : n; }
+    function r2(n) { return Math.round(n * 100) / 100; }
+    function qty(x) { var q = num(x.count != null ? x.count : (x.amount != null ? x.amount : x.quantity)); return q > 0 ? q : 1; }
+    // ціна типу з урахуванням знижки самого типу ціни
+    function tierEff(pt) {
+      var base = Number(pt.price != null ? pt.price : pt.defaultPrice);
+      if (!isFinite(base)) return null;
+      var pd = Number(pt.percentDiscount) || 0, d = Number(pt.discount) || 0;
+      var eff = pd > 0 ? base * (1 - pd / 100) : (d > 0 ? base - d : base);
+      return r2(eff);
+    }
+    function tiersOf(it) {
+      var src = priceSource(it);
+      return (src && Array.isArray(src.priceTypes)) ? src.priceTypes : [];
+    }
+    function priceForTier(it, tier) {
+      if (tier === "retail") {
+        var src = priceSource(it);
+        var dp = Number(src && (src.defaultPrice != null ? src.defaultPrice : src.price));
+        return isFinite(dp) ? r2(dp) : null;
+      }
+      var list = tiersOf(it);
+      for (var i = 0; i < list.length; i++)
+        if (normName(list[i].name) === normName(tier)) return tierEff(list[i]);
+      return null;
+    }
+
+    try {
+      var got = getVMcached();
+      if (!got || !got.vm) return respond({ ok: false, err: "no-viewModel" });
+      var vm = got.vm, scope = got.scope, items = vm.items || [];
+      if (!items.length) return respond({ ok: false, err: "нема товарів" });
+
+      // які типи цін доступні (є хоч в одного рядка) + скільки рядків їх мають
+      if (req.mode === "list") {
+        var seen = {};
+        items.forEach(function (it) {
+          tiersOf(it).forEach(function (pt) {
+            var n = String(pt.name || "").trim(); if (!n) return;
+            seen[n] = (seen[n] || 0) + 1;
+          });
+        });
+        return respond({ ok: true, tiers: Object.keys(seen).map(function (n) { return { name: n, n: seen[n] }; }),
+                         items: items.length });
+      }
+
+      var tier = String(req.tier || "");
+      if (!tier) return respond({ ok: false, err: "не вказано тип ціни" });
+
+      var rows = [], oldTotal = 0, newTotal = 0, miss = 0;
+      items.forEach(function (it) {
+        var cur = r2(num(it.price)), q = qty(it);
+        var np = priceForTier(it, tier);
+        oldTotal += cur * q;
+        if (np == null || !(np > 0)) { miss++; newTotal += cur * q;
+          rows.push({ name: String(it.text || it.documentName || it.name || "").slice(0, 40),
+                      sku: String(it.sku || ""), old: cur, "new": null }); return; }
+        newTotal += np * q;
+        rows.push({ name: String(it.text || it.documentName || it.name || "").slice(0, 40),
+                    sku: String(it.sku || ""), old: cur, "new": np, same: np === cur });
+      });
+      oldTotal = r2(oldTotal); newTotal = r2(newTotal);
+
+      if (req.mode !== "apply")
+        return respond({ ok: true, mode: "preview", tier: tier, rows: rows, miss: miss,
+                         oldTotal: oldTotal, newTotal: newTotal });
+
+      var done = 0;
+      var fakeEvt = { preventDefault: function () {}, stopPropagation: function () {} };
+      safeApply(scope, function () {
+        items.forEach(function (it) {
+          try {
+            var np = priceForTier(it, tier);
+            if (np == null || !(np > 0)) return;
+            if (r2(num(it.price)) === np) return;               // уже така ціна
+            // ШТАТНИЙ шлях (інакше «Зберегти» не зафіксує зміну)
+            if (typeof vm.editComment === "function" && typeof vm.updateComment === "function") {
+              vm.editComment(it, it.index, fakeEvt);
+              it.newDefaultPrice = String(np.toFixed(2)).replace(".", ",");
+              vm.updateComment(it, it.index);
+            } else { it.price = np; }
+            done++;
+          } catch (e) {}
+        });
+        try { if (typeof vm.updateItems === "function") vm.updateItems(); } catch (e) {}
+      });
+      respond({ ok: true, mode: "apply", tier: tier, n: done, miss: miss,
+                oldTotal: oldTotal, newTotal: newTotal });
+    } catch (e) {
+      respond({ ok: false, err: String(e) });
+    }
   });
 
   // ---------- ЗАОКРУГЛЕННЯ СУМИ САМОВИВОЗУ (вгору до кратного 10) ----------
@@ -2796,14 +3215,46 @@ function __sdPageMain() {
     window.dispatchEvent(new Event("sdPriceWarn"));
   }
 
-  setInterval(function () { pushOrder(); pushWarn(); }, 2000);
-  setTimeout(function () { pushOrder(); pushWarn(); }, 800);
+  /* ---- Укрпошта: ТТН + прапорець друку ПРЯМО зі сторінки (без запитів до API) ----
+     Дані вже є в scope доставки: viewModel.ukrposhta.barcode / .isPrinted.
+     Раніше сторож повторного друку тягнув їх через /api/order/list/ на КОЖНУ відкриту
+     заявку — це зʼїдало годинний ліміт API (100 запитів/год на весь акаунт). */
+  var lastUkrSig = "";
+  var UKR_SEL = '[ng-model^="viewModel.ukrposhta"],[ng-click*="ukrposhta"],[ng-if*="ukrposhta"],[ng-show*="ukrposhta"],[ng-class*="ukrposhta"]';
+  function ukrInfo() {
+    try {
+      if (!window.angular) return null;
+      var els = document.querySelectorAll(UKR_SEL);
+      for (var i = 0; i < els.length; i++) {
+        var sc; try { sc = window.angular.element(els[i]).scope(); } catch (e) { continue; }
+        var vm = sc && (sc.viewModel || sc.vm), u = vm && vm.ukrposhta;
+        if (u && (u.barcode != null || u.isPrinted != null))
+          return { ttn: String(u.barcode == null ? "" : u.barcode), printed: !!Number(u.isPrinted) };
+      }
+    } catch (e) {}
+    return null;
+  }
+  function pushUkr() {
+    if (!onOrderPage()) { lastUkrSig = ""; return; }
+    var m = (location.hash || "").match(/#\/order\/(?:update|create)\/(\d+)/);
+    var u = ukrInfo();
+    if (!m || !u) return;
+    var sig = JSON.stringify({ id: m[1], ttn: u.ttn, printed: u.printed });
+    if (sig === lastUkrSig) return;
+    lastUkrSig = sig;
+    document.documentElement.setAttribute("data-sd-ukr", sig);
+    window.dispatchEvent(new Event("sdUkrInfo"));
+  }
+
+  setInterval(function () { pushOrder(); pushWarn(); pushUkr(); }, 2000);
+  setTimeout(function () { pushOrder(); pushWarn(); pushUkr(); }, 800);
   window.addEventListener("hashchange", function () {
     _vmCache = null;        // інша заявка — viewModel може бути інший
     lastOrderSig = "";      // примусово переоцінити склад заявки
     lastWarnSig = "";
-    setTimeout(function () { pushOrder(); pushWarn(); }, 500);
-    setTimeout(function () { pushOrder(); pushWarn(); }, 1200);
+    lastUkrSig = "";
+    setTimeout(function () { pushOrder(); pushWarn(); pushUkr(); }, 500);
+    setTimeout(function () { pushOrder(); pushWarn(); pushUkr(); }, 1200);
   });
 
   log("page-міст активний (angular:", !!window.angular, ")");
@@ -2929,7 +3380,11 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     const list = comp2kits.get(sku) || [];
     let h = '<div class="h">Входить у набори:</div>';
     for (const k of list) {
-      const codeHtml = '<a class="lk" data-sku="' + esc(k.code) + '" href="' + CAT_URL(k.code) + '" target="_blank" rel="noopener">' + esc(k.code) + '</a>';
+      // посилання веде НА КАРТКУ набору (код → productId, модуль lkProdLink);
+      // поки ID невідомий — тимчасово пошук по коду, href підміниться сам
+      const kitHref = (window.sdProdLink ? window.sdProdLink.url(k.code, true) : CAT_URL(k.code));
+      const codeHtml = '<a class="lk" data-sku="' + esc(k.code) + '" data-sd-sku="' + esc(k.code) + '" data-sd-kit="1"'
+        + ' href="' + kitHref + '" target="_blank" rel="noopener" title="Відкрити картку набору">' + esc(k.code) + '</a>';
       h += '<div class="r">' + codeHtml + ' · <span class="nm">' + esc(k.name) + '</span> ×' + k.qty + '</div>';
     }
     return h;
@@ -3017,7 +3472,10 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     +'.lkcp-sum,.lkcp-chip{cursor:pointer}'
     +'.lkcp-sum:hover,.lkcp-chip:hover{filter:brightness(.97)}'
     +'.lkcp-sum.lkcp-copied,.lkcp-chip.lkcp-copied{outline:2px solid #2e7d32;background:#d7f0dc}'
-    +'.lkcp-copied::after{content:" ✓";color:#2e7d32;font-weight:800}';
+    +'.lkcp-copied::after{content:" ✓";color:#2e7d32;font-weight:800}'
+    +'.lkcp-sum.lkcp-err,.lkcp-chip.lkcp-err{outline:2px solid #c62828;background:#fdecea}'
+    +'.lkcp-note{margin:2px 0 6px;font:600 12px/1.5 sans-serif;color:#1b5e20}'
+    +'.lkcp-note.bad{color:#b71c1c}';
   var st=document.createElement('style'); st.textContent=css;
   (document.head||document.documentElement).appendChild(st);
 
@@ -3113,7 +3571,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     return 9;
   }
 
-  // копіювання суми в буфер + коротка індикація «✓»
+  // копіювання суми в буфер (запасний варіант, якщо підставити не вийшло)
   function doCopy(text){
     try{ if(typeof GM_setClipboard==='function'){ GM_setClipboard(String(text)); return true; } }catch(e){}
     try{ navigator.clipboard.writeText(String(text)); return true; }catch(e){}
@@ -3123,11 +3581,172 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     el.classList.add('lkcp-copied');
     setTimeout(function(){ try{ el.classList.remove('lkcp-copied'); }catch(e){} }, 1000);
   }
-  // делегований клік: копіює число з data-copy елемента (без «₴»)
-  function onCopyClick(e){
+  function flashErr(el, msg){
+    var old=el.getAttribute('title')||'';
+    el.classList.add('lkcp-err'); el.setAttribute('title', msg||'не вдалося підставити');
+    setTimeout(function(){ try{ el.classList.remove('lkcp-err'); el.setAttribute('title', old); }catch(e){} }, 2500);
+  }
+  // коротке повідомлення під заголовком: що саме підставили
+  function note(box, txt, bad){
+    if(!box) return;
+    var n=box.parentNode && box.parentNode.querySelector('.lkcp-note');
+    if(!n){ n=document.createElement('div'); n.className='lkcp-note'; box.insertAdjacentElement('afterend', n); }
+    n.className='lkcp-note'+(bad?' bad':'');
+    n.textContent=txt;
+    clearTimeout(n._t); n._t=setTimeout(function(){ try{ n.remove(); }catch(e){} }, 6000);
+  }
+
+  // ---- підстановка суми в ціну товару ----
+  // ГОЛОВНИЙ шлях — прямо у поля форми (як це робить руками менеджер): працює
+  // й у пісочниці Tampermonkey, бо не залежить від містка «модуль ↔ сторінка».
+  // Якщо блок цін не знайдено — пробуємо міст до ядра (sdSetPrice).
+  var PAGEW=(typeof unsafeWindow!=='undefined'&&unsafeWindow)||window;
+  function money2(n){ return (Math.round(Number(n)*100)/100).toFixed(2).replace('.',','); }
+  // запис у поле так, щоб Angular побачив зміну
+  function setInput(inp, txt){
+    try{
+      var d=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(inp),'value');
+      if(d && d.set) d.set.call(inp, txt); else inp.value=txt;
+    }catch(e){ inp.value=txt; }
+    inp.dispatchEvent(new Event('input',{bubbles:true}));
+    inp.dispatchEvent(new Event('change',{bubbles:true}));
+  }
+  // Рядок ціни = контейнер ng-repeat="priceType in viewModel.item.priceTypes".
+  // Важливо брати саме його: у сусідніх обгортках лежать поля ІНШОГО рядка,
+  // і сума потрапляла не в той тип ціни.
+  function priceRows(){
+    var out=[];
+    [].forEach.call(document.querySelectorAll('[ng-repeat^="priceType in"]'), function(box){
+      var sel=box.querySelector('select[ng-model="priceType.priceTypeId"]');
+      var price=box.querySelector('input[ng-model="priceType.price"]');
+      if(sel && price) out.push({ sel:sel, box:box, price:price,
+                                  disc:box.querySelector('input[ng-model="priceType.discount"]') });
+    });
+    return out;
+  }
+  function tierOfSelect(sel){
+    var v=String(sel.value||'');                        // буває "string:2" або "2"
+    var m=v.match(/(\d+)\s*$/); return m?m[1]:'';
+  }
+  function optionFor(sel, tier){
+    for(var i=0;i<sel.options.length;i++){
+      var v=String(sel.options[i].value||''), m=v.match(/(\d+)\s*$/);
+      if(m && m[1]===String(tier)) return sel.options[i];
+    }
+    return null;
+  }
+  function tierNameOf(tier){ return (TIER_NAMES&&TIER_NAMES[tier])||('тип '+tier); }
+  // фактична ціна з урахуванням знижки рядка (щоб чесно попередити)
+  function effOf(row, val){
+    var d=parseFloat(String((row.disc&&row.disc.value)||'').replace(',','.'))||0;
+    return d>0 ? Math.round((val-d)*100)/100 : 0;
+  }
+
+  function setPriceDom(tier, val, cb){
+    // роздрібна ціна — окреме поле картки
+    if(String(tier)==='retail'){
+      var ri=document.querySelector('input[ng-model="viewModel.item.defaultPrice"]');
+      if(!ri) return cb(null);
+      setInput(ri, money2(val));
+      return cb({ ok:true, name:'Роздрібна', created:false, eff:0 });
+    }
+    // рядок потрібного типу шукаємо ЩОРАЗУ заново: ng-repeat перебудовує DOM,
+    // тож збережене посилання на поле може вказувати вже на інший рядок
+    function rowOf(t){
+      var rr=priceRows();
+      for(var i=0;i<rr.length;i++) if(tierOfSelect(rr[i].sel)===String(t)) return rr[i];
+      return null;
+    }
+    var have=rowOf(tier);
+    if(have){                                            // рядок уже є — переписуємо
+      setInput(have.price, money2(val));
+      var again=rowOf(tier)||have;
+      return cb({ ok:true, name:tierNameOf(tier), created:false, eff:effOf(again, val) });
+    }
+    // рядка немає — додаємо штатною кнопкою СРМ
+    var add=[].slice.call(document.querySelectorAll('[ng-click]')).filter(function(b){
+      return /addProductPrice/i.test(b.getAttribute('ng-click')||'') && b.offsetParent;
+    })[0];
+    if(!add) return cb(null);
+    var before=priceRows().length;
+    add.click();
+    var t0=Date.now();
+    (function wait(){
+      var now=priceRows();
+      if(now.length>before){
+        var fresh=rowOf(tier);                           // раптом новий рядок уже цього типу
+        if(!fresh){
+          var row=now[now.length-1];
+          var opt=optionFor(row.sel, tier);
+          if(!opt) return cb({ ok:false, err:'тип ціни «'+tierNameOf(tier)+'» недоступний' });
+          row.sel.value=opt.value;
+          row.sel.dispatchEvent(new Event('change',{bubbles:true}));
+        }
+        // після зміни типу даємо Angular перемалювати і ЗНОВУ шукаємо рядок
+        setTimeout(function(){
+          var r=rowOf(tier);
+          if(!r) return cb(null);
+          setInput(r.price, money2(val));
+          var r2=rowOf(tier)||r;
+          cb({ ok:true, name:tierNameOf(tier), created:true, eff:effOf(r2, val) });
+        }, 120);
+        return;
+      }
+      if(Date.now()-t0>3000) return cb(null);
+      setTimeout(wait, 60);
+    })();
+  }
+
+  // запасний шлях: через ядро (page-context + Angular)
+  function setPriceBridge(tier, value, cb){
+    var token=String(Date.now())+'_'+Math.random().toString(36).slice(2);
+    function done(d){ PAGEW.removeEventListener('sdSetPriceResult', onRes); clearTimeout(tm); cb(d); }
+    function onRes(){
+      var raw=document.documentElement.getAttribute('data-sd-setprice-result'); if(!raw) return;
+      var d; try{ d=JSON.parse(raw); }catch(e){ return; }
+      if(!d || d.token!==token) return;
+      done(d);
+    }
+    PAGEW.addEventListener('sdSetPriceResult', onRes);
+    document.documentElement.removeAttribute('data-sd-setprice-result');
+    document.documentElement.setAttribute('data-sd-setprice', JSON.stringify({token:token, tier:String(tier), value:value}));
+    PAGEW.dispatchEvent(new Event('sdSetPrice'));
+    // якщо ядро мовчить (інший контекст/стара версія) — просто перевіряємо атрибут
+    var tm=setTimeout(function(){ onRes(); done(null); }, 4000);
+  }
+
+  function setPrice(tier, value, cb){
+    var fired=false;
+    function once(d){ if(fired) return; fired=true; cb(d); }
+    try{
+      setPriceDom(tier, value, function(d){
+        if(d) return once(d);
+        setPriceBridge(tier, value, once);     // поля не знайшли — пробуємо ядро
+      });
+    }catch(e){ setPriceBridge(tier, value, once); }
+  }
+
+  // делегований клік по чипу/бейджу: підставляє суму в потрібний тип ціни товару
+  function onChipClick(e){
     var el=e.target.closest('[data-copy]'); if(!el) return;
     e.preventDefault(); e.stopPropagation();
-    if(doCopy(el.getAttribute('data-copy'))) flashCopied(el);
+    var tier=el.getAttribute('data-tier')||'retail';
+    var val=Number(el.getAttribute('data-copy'))||0;
+    if(!(val>0)) return;
+    var box=el.closest('.lkcp-tiers')||el;
+    setPrice(tier, val, function(d){
+      if(d && d.ok){
+        flashCopied(el);
+        note(box, '✓ ' + (d.name||'ціну') + ' → ' + val + ' ₴'
+          + (d.created?' (рядок ціни створено)':'')
+          + (d.eff>0 ? ' ⚠ у рядку є знижка — фактично '+d.eff+' ₴' : '')
+          + '. Не забудь «Зберегти».');
+      } else {
+        doCopy(String(val));          // не вийшло підставити — хоч у буфер
+        flashErr(el, (d&&d.err)||'не вдалося підставити');
+        note(box, '✗ Не вдалося підставити ('+((d&&d.err)||'немає відповіді')+'). Суму '+val+' ₴ скопійовано в буфер.', true);
+      }
+    });
   }
 
   // кількість складника з рядка; надійно — з Angular-моделі (item.amount),
@@ -3206,13 +3825,19 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       // роздрібна — головний зелений бейдж (клік копіює суму)
       var retail=sumFor('retail');
       var badge=h.querySelector('.lkcp-sum');
-      if(!badge){ badge=document.createElement('span'); badge.className='lkcp-sum'; badge.title='Натисніть, щоб скопіювати суму'; badge.addEventListener('click', onCopyClick); h.appendChild(badge); }
-      badge.className='lkcp-sum'+(pend?' wait':'');
-      badge.setAttribute('data-copy', String(Math.round(retail)));
-      badge.textContent='Сума за роздрібом: '+fmtInt(retail)+(pend?' …':'');
+      if(!badge){ badge=document.createElement('span'); badge.className='lkcp-sum';
+        badge.title='Натисніть, щоб підставити суму в роздрібну ціну товару';
+        badge.setAttribute('data-tier','retail');
+        badge.addEventListener('click', onChipClick); h.appendChild(badge); }
+      // пишемо, лише коли справді змінилось — інакше блимає на кожен пульс DOM
+      var bCls='lkcp-sum'+(pend?' wait':'');
+      var bTxt='Сума за роздрібом: '+fmtInt(retail)+(pend?' …':'');
+      if(badge.className!==bCls) badge.className=bCls;
+      if(badge.getAttribute('data-copy')!==String(Math.round(retail))) badge.setAttribute('data-copy', String(Math.round(retail)));
+      if(badge.textContent!==bTxt) badge.textContent=bTxt;
       // типи цін — чипи під заголовком (клік по чипу копіює його суму)
       if(TIER_NAMES && showTiers){
-        if(!box){ box=document.createElement('div'); box.className='lkcp-tiers'; box.addEventListener('click', onCopyClick); h.insertAdjacentElement('afterend', box); }
+        if(!box){ box=document.createElement('div'); box.className='lkcp-tiers'; box.addEventListener('click', onChipClick); h.insertAdjacentElement('afterend', box); }
         var ids=Object.keys(TIER_NAMES).sort(function(a,b){
           var ra=tierRank(TIER_NAMES[a]), rb=tierRank(TIER_NAMES[b]);
           return ra!==rb ? ra-rb : Number(a)-Number(b);
@@ -3220,9 +3845,11 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
         var html='';
         ids.forEach(function(id){
           var s=sumFor(id);
-          html+='<span class="lkcp-chip" data-copy="'+Math.round(s)+'" title="Натисніть, щоб скопіювати суму"><span class="l">'+esc(TIER_NAMES[id])+'</span>'+fmtInt(s)+(pend?' …':'')+'</span>';
+          html+='<span class="lkcp-chip" data-copy="'+Math.round(s)+'" data-tier="'+esc(id)+'"'
+             +' title="Натисніть, щоб підставити суму в ціну «'+esc(TIER_NAMES[id])+'» цього товару">'
+             +'<span class="l">'+esc(TIER_NAMES[id])+'</span>'+fmtInt(s)+(pend?' …':'')+'</span>';
         });
-        box.innerHTML=html;
+        if(box.getAttribute('data-sig')!==html){ box.setAttribute('data-sig', html); box.innerHTML=html; }
       } else if(box){ box.remove(); }   // режим перегляду — без чипів опт/майстри
     });
   }
@@ -3667,8 +4294,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     for (const k of kits) {
       const eid = String(k.id || '').replace(/^id_/, '');
       const edit = eid ? ' <a class="led" href="#/product/update/' + esc(eid) + '" title="Редагувати товар"><i class="fa fa-pencil"></i></a>' : '';
-      h += '<div class="r"><a class="lk" data-sku="' + esc(k.code) + '" href="' + CAT_URL(k.code) +
-           '" target="_blank" rel="noopener">' + esc(k.code) + '</a>' + edit +
+      const kitHref = (window.sdProdLink ? window.sdProdLink.url(k.code, true) : CAT_URL(k.code));
+      h += '<div class="r"><a class="lk" data-sku="' + esc(k.code) + '" data-sd-sku="' + esc(k.code) + '" data-sd-kit="1" href="' + kitHref +
+           '" target="_blank" rel="noopener" title="Відкрити картку набору">' + esc(k.code) + '</a>' + edit +
            ' · <span class="nm">' + esc(k.name) + '</span></div>';
     }
     return h;
@@ -3999,12 +4627,16 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     var b=box.querySelector('.bf-btn'), res=box.querySelector('.bf-res');
     b.disabled=true; res.textContent='працюю…'; res.className='bf-res';
     var token=String(Date.now())+'_'+Math.random().toString(36).slice(2);
-    var tm=null;
+    // fin: ядро відповідає СИНХРОННО під час dispatchEvent, тобто ще до того, як
+    // нижче призначиться tm — тоді clearTimeout(null) нічого не чистить і «мертвий»
+    // таймер потім затирає готовий результат написом «нема відповіді».
+    var tm=null, fin=false;
     function onRes(){
       var raw=document.documentElement.getAttribute('data-sd-bundle-result');
       if(!raw) return;
       var d; try{ d=JSON.parse(raw); }catch(e){ return; }
       if(!d || d.token!==token) return;
+      fin=true;
       PAGE.removeEventListener('sdBundleFixResult', onRes); clearTimeout(tm);
       if(d.ok){
         box.setAttribute('data-done','1');
@@ -4026,6 +4658,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     document.documentElement.removeAttribute('data-sd-bundle-result');
     PAGE.dispatchEvent(new Event('sdBundleFix'));
     tm=setTimeout(function(){
+      if(fin) return;
       PAGE.removeEventListener('sdBundleFixResult', onRes);
       b.disabled=false; res.className='bf-res er'; res.textContent='✗ нема відповіді';
     },20000);
@@ -4326,7 +4959,10 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
         c.appendChild(a); c.appendChild(x); bar.appendChild(c);
       });
     }
-    addGroup('⛔ Клієнт НЕ отримав повідомлення:', keys);
+    addGroup('⛔ Клієнт НЕ отримав повідомлення:',
+      keys.filter(function(k){ return (all[k].kind||'alert')==='alert'; }));
+    addGroup('🖨 ТТН друковано повторно:',
+      keys.filter(function(k){ return all[k].kind==='ttn'; }));
   }
 
   function renderToasts(){
@@ -4335,14 +4971,19 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       if(now-(all[k].t||0)>5*24*3600*1000){ delete all[k]; changed=true; }  // чистка старших за 5 днів
     });
     if(changed) saveAll(all);
-    var keys=Object.keys(all).filter(function(k){ return !all[k].ack && (all[k].kind||'alert')==='alert'; });
+    var keys=Object.keys(all).filter(function(k){
+      var kd=(all[k].kind||'alert');
+      return !all[k].ack && (kd==='alert' || kd==='ttn');
+    });
     var box=document.getElementById('sd-cf-toasts');
     var bar=document.getElementById('sd-cf-topbar');
     var onList=/\/order\/index/.test(location.hash||'');   // список заявок (будь-які фільтри менеджера)
 
     if(!onList && keys.length){
-      var cur=curOrderNum();   // на сторінці самої заявки не дублюємо (там банер над чатом)
-      keys=keys.filter(function(k){ return all[k].num!==cur; });
+      var cur=curOrderNum();   // чат-алерт на своїй заявці не дублюємо (там банер над чатом),
+      keys=keys.filter(function(k){        // а ТТН-повідомлення показуємо і тут — банера немає
+        return !((all[k].kind||'alert')==='alert' && all[k].num===cur);
+      });
     }
     if(!keys.length){ if(box) box.remove(); if(bar) bar.remove(); return; }
 
@@ -4358,9 +4999,14 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       if(box.querySelector('[data-k="'+k+'"]')) return;
       var d=document.createElement('div'); d.className='sd-cf-toast'; d.setAttribute('data-k',k);
       var t=document.createElement('div'); t.className='t';
-      t.textContent='⛔ Заявка #'+r.num+': повідомлення НЕ доставлено';
+      var isTtn=(r.kind==='ttn');
+      t.textContent=isTtn
+        ? '🖨 Заявка #'+r.num+': ТТН друковано ПОВТОРНО'
+        : '⛔ Заявка #'+r.num+': повідомлення НЕ доставлено';
       var w=document.createElement('div');
-      w.textContent=(r.reason||'')+'. Клієнт його не бачив — подзвони або SMS.';
+      w.textContent=isTtn
+        ? ('ТТН '+(r.ttn||'')+' — '+(r.reason||'')+'. Перевір, чи не наклеїли дві етикетки.')
+        : ((r.reason||'')+'. Клієнт його не бачив — подзвони або SMS.');
       var a=document.createElement('div'); a.className='a';
       var op=document.createElement('a'); op.textContent='Відкрити заявку'; op.href=r.url||'#';
       var ok=document.createElement('button'); ok.type='button'; ok.textContent='OK, зрозумів';
@@ -4722,7 +5368,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     function onProg(){
       if(onProgTxt) onProgTxt(document.documentElement.getAttribute('data-sd-arropt-progress')||'');
     }
+    var fin=false;
     function cleanup(){
+      fin=true;
       PAGE.removeEventListener('sdArrivalOptResult', onRes);
       PAGE.removeEventListener('sdArrivalOptProgress', onProg);
       clearTimeout(tm);
@@ -4740,7 +5388,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     document.documentElement.setAttribute('data-sd-arropt-mode', mode);
     document.documentElement.removeAttribute('data-sd-arropt-result');
     PAGE.dispatchEvent(new Event('sdArrivalOpt'));
-    tm=setTimeout(function(){ cleanup(); onDone(null); }, 180000);
+    tm=setTimeout(function(){ if(fin) return; cleanup(); onDone(null); }, 180000);
   }
 
   function updateApplyLabel(){
@@ -4941,8 +5589,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   // виклик core-обробника: target = 'calc' (лише сума) або число (ціль)
   function invoke(target, cb){
     var token=String(Date.now())+'_'+Math.random().toString(36).slice(2);
-    var tm=null;
-    function done(){ PAGE.removeEventListener('sdRoundPickupResult', onRes); clearTimeout(tm); }
+    var tm=null, fin=false;
+    function done(){ fin=true; PAGE.removeEventListener('sdRoundPickupResult', onRes); clearTimeout(tm); }
     function onRes(){
       var raw=document.documentElement.getAttribute('data-sd-round-result');
       if(!raw) return;
@@ -4955,7 +5603,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     document.documentElement.setAttribute('data-sd-round-target', String(target));
     document.documentElement.removeAttribute('data-sd-round-result');
     PAGE.dispatchEvent(new Event('sdRoundPickup'));
-    tm=setTimeout(function(){ done(); cb(null); },8000);
+    tm=setTimeout(function(){ if(fin) return; done(); cb(null); },8000);
   }
 
   // видима кнопка «Зберегти» самої заявки (не в модалці)
@@ -5058,6 +5706,283 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 }catch(e){ try{ console.warn("[SD] модуль «lkRoundPickup» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkRoundPickup ▲▲▲ */
 
+/* ▼▼▼ МОДУЛЬ-START • lkOrderTier — 💱 перерахунок цін заявки за типом ціни (опт/майстри) ▼▼▼ */
+/* ===== Кнопка під таблицею товарів: одним кліком ставить усім рядкам ціну
+   «Великий опт» / «середній опт» / «майстри» / ROZETKA / роздріб — з прайсу самого
+   товару (рядки заявки вже несуть priceTypes, запити не потрібні). Спершу показує,
+   що зміниться (стара сума → нова), і лише потім записує. Core: sdTierPrice.
+   Зберігає менеджер — «Зберегти» самі не тиснемо. ===== */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
+(function lkOrderTier(){
+  'use strict';
+  var PAGE=(typeof unsafeWindow!=='undefined'&&unsafeWindow)||window;
+
+  var css=''
+    +'#lk-tier-wrap{margin:6px 0 2px;font:13px/1.5 Arial,sans-serif}'
+    +'#lk-tier-btn{display:inline-block;padding:6px 16px;border:none;border-radius:7px;'
+    +'  background:#00796B;color:#fff;font:700 13px/1.5 Arial,sans-serif;cursor:pointer;white-space:nowrap}'
+    +'#lk-tier-btn:hover{background:#00594f}'
+    +'#lk-tier-btn[disabled]{background:#9e9e9e;cursor:default}'
+    +'.lk-tier-opt{margin-left:6px;padding:5px 13px;border:none;border-radius:6px;background:#00796B;'
+    +'  color:#fff;font:700 13px/1.4 Arial,sans-serif;cursor:pointer}'
+    +'.lk-tier-opt:hover{background:#00594f}'
+    +'.lk-tier-opt.go{background:#2E7D32}'
+    +'.lk-tier-opt.go:hover{background:#256628}'
+    +'.lk-tier-opt.no{background:#9e9e9e}'
+    +'#lk-tier-res{display:inline-block;margin-left:10px;vertical-align:middle;font-weight:700}'
+    +'#lk-tier-res.ok{color:#1B5E20}'
+    +'#lk-tier-res.er{color:#B71C1C}'
+    +'#lk-tier-prev{margin:6px 0 0;padding:7px 10px;border-left:3px solid #00796B;background:#e9f5f3;'
+    +'  border-radius:5px;max-width:760px}'
+    +'#lk-tier-prev table{border-collapse:collapse;font:12.5px/1.45 Arial,sans-serif}'
+    +'#lk-tier-prev td{padding:2px 10px 2px 0;white-space:nowrap}'
+    +'#lk-tier-prev td.nm{white-space:normal;max-width:340px}'
+    +'#lk-tier-prev .up{color:#B71C1C;font-weight:700}'
+    +'#lk-tier-prev .dn{color:#1B5E20;font-weight:700}'
+    +'#lk-tier-prev .miss{color:#8a6d00}';
+  var st=document.createElement('style'); st.textContent=css;
+  (document.head||document.documentElement).appendChild(st);
+
+  function onOrderPage(){ return /#\/order\/(update|create)/.test(location.hash||''); }
+  function fN(n){ return String(Number(n).toFixed(2)).replace('.',','); }
+  function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
+
+  // місце: одразу ПІСЛЯ таблиці товарів (той самий якір, що в заокругленні)
+  function findSpot(){
+    var btn=null, all=document.querySelectorAll('[ng-click]');
+    for(var i=0;i<all.length;i++){
+      if((all[i].getAttribute('ng-click')||'').replace(/\s+/g,'')==='viewModel.addOption()'){ btn=all[i]; break; }
+    }
+    if(!btn) btn=document.getElementById('addCompleteProduct');
+    if(!btn) return null;
+    var tbl=btn.closest('table');
+    return (tbl && tbl.parentElement) ? tbl : null;
+  }
+
+  function invoke(payload, cb){
+    var token=String(Date.now())+'_'+Math.random().toString(36).slice(2);
+    var tm=null, fin=false;
+    function done(){ fin=true; PAGE.removeEventListener('sdTierPriceResult', onRes); clearTimeout(tm); }
+    function onRes(){
+      var raw=document.documentElement.getAttribute('data-sd-tier-result'); if(!raw) return;
+      var d; try{ d=JSON.parse(raw); }catch(e){ return; }
+      if(!d || d.token!==token) return;
+      done(); cb(d);
+    }
+    payload.token=token;
+    PAGE.addEventListener('sdTierPriceResult', onRes);
+    document.documentElement.removeAttribute('data-sd-tier-result');
+    document.documentElement.setAttribute('data-sd-tier', JSON.stringify(payload));
+    PAGE.dispatchEvent(new Event('sdTierPrice'));
+    tm=setTimeout(function(){ if(fin) return; done(); cb(null); }, 8000);
+  }
+
+  // порядок кнопок: великий опт → середній → майстри → решта
+  function rank(n){
+    n=String(n||'').toLowerCase();
+    if(/велик/.test(n)) return 1;
+    if(/серед/.test(n)) return 2;
+    if(/майст/.test(n)) return 3;
+    return 9;
+  }
+
+  function clearPrev(){ var p=document.getElementById('lk-tier-prev'); if(p) p.remove(); }
+
+  function showPreview(d, wrap, res){
+    clearPrev();
+    var box=document.createElement('div'); box.id='lk-tier-prev';
+    var chg=(d.rows||[]).filter(function(r){ return r['new']!=null && !r.same; });
+    var head='<div><b>'+esc(d.tier)+'</b>: сума '+fN(d.oldTotal)+' → <b>'+fN(d.newTotal)+' ₴</b>'
+      +' · змінюється рядків: '+chg.length+'/'+(d.rows||[]).length
+      +(d.miss?(' · <span class="miss">без цієї ціни: '+d.miss+'</span>'):'')+'</div>';
+    var rowsHtml=(d.rows||[]).map(function(r){
+      var right;
+      if(r['new']==null) right='<td colspan="2" class="miss">немає такої ціни — лишиться '+fN(r.old)+'</td>';
+      else if(r.same) right='<td>'+fN(r.old)+'</td><td>= без змін</td>';
+      else right='<td>'+fN(r.old)+'</td><td class="'+(r['new']>r.old?'up':'dn')+'">→ '+fN(r['new'])+'</td>';
+      return '<tr><td class="nm">'+esc(r.name)+(r.sku?(' <span style="color:#888">('+esc(r.sku)+')</span>'):'')+'</td>'+right+'</tr>';
+    }).join('');
+    box.innerHTML=head+'<table>'+rowsHtml+'</table>';
+    var go=document.createElement('button'); go.type='button'; go.className='lk-tier-opt go';
+    go.textContent='✅ Записати ціни ('+chg.length+')';
+    go.disabled=!chg.length;
+    var no=document.createElement('button'); no.type='button'; no.className='lk-tier-opt no'; no.textContent='Скасувати';
+    var act=document.createElement('div'); act.style.marginTop='6px';
+    act.appendChild(go); act.appendChild(no);
+    box.appendChild(act);
+    wrap.appendChild(box);
+    no.addEventListener('click',function(e){ e.preventDefault(); e.stopPropagation(); clearPrev(); res.textContent=''; });
+    go.addEventListener('click',function(e){
+      e.preventDefault(); e.stopPropagation();
+      go.disabled=true; go.textContent='записую…';
+      invoke({mode:'apply', tier:d.tier}, function(a){
+        clearPrev();
+        if(!a || !a.ok){ res.className='er'; res.textContent='✗ '+((a&&a.err)||'нема відповіді'); return; }
+        res.className='ok';
+        res.textContent='✓ '+a.tier+': перераховано рядків '+a.n
+          +(a.miss?(' (без цієї ціни: '+a.miss+')'):'')
+          +' · сума '+fN(a.oldTotal)+' → '+fN(a.newTotal)+' ₴ — тепер натисни «Зберегти»';
+      });
+    });
+  }
+
+  function run(btn, res, wrap){
+    clearPrev();
+    btn.disabled=true; res.className=''; res.textContent='…';
+    invoke({mode:'list'}, function(d){
+      btn.disabled=false;
+      if(!d || !d.ok){ res.className='er'; res.textContent='✗ '+((d&&d.err)||'нема відповіді'); return; }
+      var tiers=(d.tiers||[]).slice().sort(function(a,b){
+        var ra=rank(a.name), rb=rank(b.name);
+        return ra!==rb ? ra-rb : a.name.localeCompare(b.name,'uk');
+      });
+      res.className=''; res.textContent='';
+      if(!tiers.length){ res.className='er'; res.textContent='у товарів заявки немає додаткових цін'; return; }
+      var lbl=document.createElement('span'); lbl.style.fontWeight='400';
+      lbl.textContent='Поставити ціни: ';
+      res.appendChild(lbl);
+      tiers.forEach(function(t){
+        var b=document.createElement('button'); b.type='button'; b.className='lk-tier-opt';
+        b.textContent=t.name;
+        b.title=t.name+' — є у '+t.n+' з '+d.items+' рядків';
+        b.addEventListener('click',function(e){
+          e.preventDefault(); e.stopPropagation();
+          res.textContent='рахую…';
+          invoke({mode:'preview', tier:t.name}, function(p){
+            if(!p || !p.ok){ res.className='er'; res.textContent='✗ '+((p&&p.err)||'нема відповіді'); return; }
+            res.textContent='';
+            showPreview(p, wrap, res);
+          });
+        });
+        res.appendChild(b);
+      });
+      var rb=document.createElement('button'); rb.type='button'; rb.className='lk-tier-opt';
+      rb.textContent='роздріб'; rb.title='повернути звичайну (роздрібну) ціну товарів';
+      rb.addEventListener('click',function(e){
+        e.preventDefault(); e.stopPropagation();
+        res.textContent='рахую…';
+        invoke({mode:'preview', tier:'retail'}, function(p){
+          if(!p || !p.ok){ res.className='er'; res.textContent='✗ '+((p&&p.err)||'нема відповіді'); return; }
+          res.textContent=''; showPreview(p, wrap, res);
+        });
+      });
+      res.appendChild(rb);
+    });
+  }
+
+  function mount(){
+    if(!onOrderPage()){ var old=document.getElementById('lk-tier-wrap'); if(old) old.remove(); return; }
+    if(document.getElementById('lk-tier-wrap')) return;
+    var tbl=findSpot(); if(!tbl) return;
+    var wrap=document.createElement('div'); wrap.id='lk-tier-wrap';
+    var btn=document.createElement('button'); btn.type='button'; btn.id='lk-tier-btn';
+    btn.textContent='💱 Ціни за типом (опт / майстри)';
+    var res=document.createElement('span'); res.id='lk-tier-res';
+    var line=document.createElement('div');
+    line.appendChild(btn); line.appendChild(res);
+    wrap.appendChild(line);
+    btn.addEventListener('click',function(e){ e.preventDefault(); e.stopPropagation(); run(btn,res,wrap); });
+    tbl.parentElement.insertBefore(wrap, tbl.nextSibling);
+  }
+
+  var t=null;
+  function soon(){ clearTimeout(t); t=setTimeout(mount,300); }
+  soon();
+  window.addEventListener('lkdom', soon);
+  window.addEventListener('hashchange', function(){ clearPrev(); soon(); });
+})();
+}catch(e){ try{ console.warn("[SD] модуль «lkOrderTier» не запустився:", e); }catch(_){} }
+/* ▲▲▲ МОДУЛЬ-END • lkOrderTier ▲▲▲ */
+
+/* ▼▼▼ МОДУЛЬ-START • lkRozCommission — ⚖ комісія Rozetka для дописаних товарів ▼▼▼ */
+/* ===== У Rozetka-замовленні товар, доданий менеджером, приходить із нульовою
+   комісією. Модуль помічає появу нових рядків і проставляє їм той самий відсоток
+   комісії, що був у товарів, які приїхали в замовленні спочатку. Core: sdRozCommission. ===== */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
+(function lkRozCommission(){
+  'use strict';
+  var PAGE=(typeof unsafeWindow!=='undefined'&&unsafeWindow)||window;
+
+  var css=''
+    +'#lk-rozcomm{margin:6px 0 2px;padding:8px 12px;border:1px solid #BBD3F5;border-left:4px solid #1565C0;'
+    +'  background:#E8F0FE;border-radius:6px;font:13px/1.5 Arial,sans-serif;color:#14418f;'
+    +'  max-width:980px;box-sizing:border-box;position:relative}'
+    +'#lk-rozcomm b{font-weight:800}'
+    +'#lk-rozcomm .x{position:absolute;top:4px;right:8px;border:none;background:none;cursor:pointer;'
+    +'  font-size:16px;color:#14418f;opacity:.6}'
+    +'#lk-rozcomm .x:hover{opacity:1}';
+  var st=document.createElement('style'); st.textContent=css;
+  (document.head||document.documentElement).appendChild(st);
+
+  function onOrderPage(){ return /#\/order\/(update|create)/.test(location.hash||''); }
+  function orderKey(){ var m=(location.hash||'').match(/#\/order\/\w+\/(\d+)/); return m?m[1]:''; }
+  function rows(){ return document.querySelectorAll('tr[ng-repeat^="item in viewModel.items"]').length; }
+  function itemsTable(){
+    var btn=null, all=document.querySelectorAll('[ng-click]');
+    for(var i=0;i<all.length;i++){
+      if((all[i].getAttribute('ng-click')||'').replace(/\s+/g,'')==='viewModel.addOption()'){ btn=all[i]; break; }
+    }
+    return btn?btn.closest('table'):null;
+  }
+
+  function notice(text){
+    var old=document.getElementById('lk-rozcomm'); if(old) old.remove();
+    var tbl=itemsTable(); if(!tbl||!tbl.parentElement) return;
+    var box=document.createElement('div'); box.id='lk-rozcomm';
+    box.innerHTML='<b>⚖ '+text+'</b>';
+    var x=document.createElement('button'); x.className='x'; x.textContent='×';
+    x.addEventListener('click',function(){ box.remove(); });
+    box.appendChild(x);
+    tbl.insertAdjacentElement('afterend', box);
+    setTimeout(function(){ try{ box.remove(); }catch(e){} }, 25000);
+  }
+
+  var busy=false;
+  function fill(){
+    if(busy) return;
+    busy=true;
+    var token=String(Date.now())+'_'+Math.random().toString(36).slice(2);
+    var tm=null;
+    function done(){ PAGE.removeEventListener('sdRozCommissionResult', onRes); clearTimeout(tm); busy=false; }
+    function onRes(){
+      var raw=document.documentElement.getAttribute('data-sd-rozcomm-result');
+      if(!raw) return;
+      var d; try{ d=JSON.parse(raw); }catch(e){ return; }
+      if(!d || d.token!==token) return;
+      done();
+      if(!d.ok || d.none) return;                       // не Rozetka / нема чого робити — мовчимо
+      var pct=String(d.ref).replace('.',',')+'%';
+      notice('Комісія Rozetka '+pct+(d.fallback?' (за замовчуванням — у замовленні не було товару з комісією)':'')
+        +' проставлена '+d.n+' '+(d.n===1?'товару':'товарам')
+        +' без комісії. Перевір і натисни «Зберегти».');
+    }
+    PAGE.addEventListener('sdRozCommissionResult', onRes);
+    document.documentElement.setAttribute('data-sd-rozcomm-token', token);
+    document.documentElement.removeAttribute('data-sd-rozcomm-result');
+    PAGE.dispatchEvent(new Event('sdRozCommission'));
+    tm=setTimeout(function(){ done(); }, 8000);
+  }
+
+  // стежимо за появою нових рядків товарів; спрацьовуємо із затримкою,
+  // щоб не лізти, поки менеджер ще друкує в рядку
+  var lastKey='', lastRows=-1, t=null;
+  function check(){
+    if(!onOrderPage()){ lastKey=''; lastRows=-1; return; }
+    var key=orderKey(), n=rows();
+    if(!n) return;
+    if(key!==lastKey){ lastKey=key; lastRows=n; clearTimeout(t); t=setTimeout(fill, 2500); return; }
+    if(n!==lastRows){ lastRows=n; clearTimeout(t); t=setTimeout(fill, 2500); }
+  }
+
+  var ct=null;
+  function checkSoon(){ clearTimeout(ct); ct=setTimeout(check,400); }
+  checkSoon();
+  window.addEventListener('lkdom', checkSoon);
+  window.addEventListener('hashchange', checkSoon);
+})();
+}catch(e){ try{ console.warn("[SD] модуль «lkRozCommission» не запустився:", e); }catch(_){} }
+/* ▲▲▲ МОДУЛЬ-END • lkRozCommission ▲▲▲ */
+
 /* ▼▼▼ МОДУЛЬ-START • lkStockWhere — 🔎 «Де товар»: у яких заявках висить код ▼▼▼ */
 /* ===== Вставляєш код товару — показує, у яких заявках він «висить» у робочих
    (не кінцевих) статусах і по скільки штук. Враховує комплекти: код може входити
@@ -5065,11 +5990,14 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 try{ // SD-ізоляція: помилка цього модуля не зупинить решту
 (function lkStockWhere(){
   'use strict';
-  var API_KEY='9yC3JYj4MlYitQ8J3KUf-uy_qPDYkFzwoITQSUeiWEDMZntbQ4uj0NxNcHrqAg8VAB6wDmkdXJZ1LMFgnQbuivTSrzutQbVB66wN';
   var KITS_URL='https://barcode-printer-production-2b32.up.railway.app/api/kits?token=nab_8Kx2pQ7mLr4tW9vZ';
   // робочі статуси = товар ще «висить» за заявкою (не кінцевий продаж, не відмова)
   var WORK=[1,2,9,15,21,36];
-  var TTL=3*60*1000, KITS_TTL=6*60*60*1000;
+  var TTL=10*60*1000, KITS_TTL=6*60*60*1000;
+  // спільний шлюз ліміту API + внутрішній список заявок (модуль lkApiBudget)
+  function sdApiFetch(u,o){ return (window.sdApi? window.sdApi.fetch(u,o) : fetch(u,o)); }
+  function sdOrders(qs,page){ return window.sdApi.orders(qs,page); }
+  function apiNote(){ return window.sdApi? window.sdApi.note() : 'Ліміт API SalesDrive вичерпано.'; }
 
   var css=''
     +'#lk-where-btn{position:fixed;left:18px;bottom:204px;z-index:99998;width:52px;height:52px;border-radius:50%;'
@@ -5141,47 +6069,89 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     });
   }
 
-  // ---- заявки в робочих статусах (кеш 3 хв)
-  var cache=null, statusMap={};
+  // ---- заявки в робочих статусах (кеш 10 хв, СПІЛЬНИЙ для всіх вкладок) ----
+  // Кеш у localStorage: друга вкладка/повторний пошук не витрачають годинний ліміт API.
+  var CKEY='lksw_cache_v1';
+  var cache=null, statusMap={}, staleNote='';
+  function readCache(){
+    if(cache) return cache;
+    try{
+      var c=JSON.parse(localStorage.getItem(CKEY));
+      if(c && c.rows){ cache=c; if(c.st) statusMap=c.st; }
+    }catch(e){}
+    return cache;
+  }
+  function saveCache(rows){
+    cache={ t:Date.now(), rows:rows, st:statusMap };
+    try{ localStorage.setItem(CKEY, JSON.stringify(cache)); }catch(e){}
+  }
+  // Заявки тягнемо ВНУТРІШНІМ запитом СРМ (як сама СРМ на сторінці списку) —
+  // без API-ключа і без годинного ліміту. Там у товарах немає sku, лише productId,
+  // тому шуканий код спершу перекладаємо в productId (довідник — теж внутрішній).
   function loadOrders(onProg){
-    if(cache && Date.now()-cache.t<TTL) return Promise.resolve(cache.rows);
-    var q=WORK.map(function(s){ return 'filter%5BstatusId%5D%5B%5D='+s; }).join('&');
+    var old=readCache();
+    if(old && Date.now()-old.t<TTL){ staleNote=''; return Promise.resolve(old.rows); }
+    var q=WORK.map(function(s){ return 'filter[statusId][]='+s; }).join('&');
     var all=[], page=1, pages=1;
     function next(){
       if(onProg) onProg(page, pages);
-      return fetch('/api/order/list/?page='+page+'&limit=100&'+q,
-                   { headers:{'Form-Api-Key':API_KEY,'Accept':'application/json'} })
-        .then(function(r){ return r.json(); })
-        .then(function(j){
-          (j.data||[]).forEach(function(o){
-            all.push({ id:o.id, st:o.statusId, prods:(o.products||[]).map(function(p){
-              return { sku:String(p.sku==null?'':p.sku).trim(), amt:Number(p.amount)||0,
-                       name:String(p.documentName||'').slice(0,70) };
-            }) });
-          });
-          try{
-            var opts=(((j.meta||{}).fields||{}).statusId||{}).options||[];
-            opts.forEach(function(o){ statusMap[o.value]=String(o.text||'').replace(/\s+/g,' ').trim(); });
-          }catch(e){}
-          pages=((j.pagination||{}).pageCount)||1;
-          page++;
-          if(page<=pages && page<=12) return next();
-          cache={ t:Date.now(), rows:all };
-          return all;
+      return sdOrders(q, page).then(function(res){
+        (res.rows||[]).forEach(function(o){
+          all.push({ id:o.id, st:o.statusId, prods:(o.products||[]).map(function(p){
+            return { pid:Number(p.productId)||0, amt:Number(p.amount)||0 };
+          }) });
         });
+        try{
+          var opts=(((res.meta||{}).fields||{}).statusId||{}).options
+                 || (res.meta||{}).statuses || [];
+          opts.forEach(function(o){ statusMap[o.value]=String(o.text||'').replace(/\s+/g,' ').trim(); });
+        }catch(e){}
+        pages=res.pageCount||1;
+        page++;
+        if(page<=pages && page<=12) return next();
+        saveCache(all); staleNote='';
+        return all;
+      });
     }
-    return next();
+    return next().catch(function(e){
+      if(old && old.rows){                       // мережа впала — краще старе, ніж нічого
+        staleNote='Дані з кешу ('+Math.round((Date.now()-old.t)/60000)+' хв тому)';
+        return old.rows;
+      }
+      throw e;
+    });
   }
 
-  function search(rows, sku){
+  // ---- код товару → productId (внутрішній довідник, кеш 24 год) ----
+  // Один код може мати кілька товарів (напр. 069 — і окремий товар, і комплект).
+  var PKEY='lksw_pid_v1', PTTL=24*60*60*1000;
+  function pidCache(){ try{ return JSON.parse(localStorage.getItem(PKEY))||{}; }catch(e){ return {}; } }
+  function resolveSku(sku){
     sku=String(sku).trim();
-    var kitsOf=(comp2kits||{})[sku]||[];
-    var kitMap={}; kitsOf.forEach(function(k){ kitMap[k.kit]={qty:k.qty, name:k.name}; });
+    var c=pidCache(), rec=c[sku];
+    if(rec && Date.now()-rec.t<PTTL) return Promise.resolve(rec.v);
+    return fetch('/products/data/?active=1&filter[sku]='+encodeURIComponent(sku)+'&formId=1',
+                 {credentials:'include',headers:{'accept':'application/json, text/plain, */*','when':'product/index'}})
+      .then(function(r){ return r.ok?r.json():null; })
+      .then(function(j){
+        var arr=(((((j||{}).response||{}).meta||{}).option||{}).option)||[];
+        var v=arr.filter(function(x){ return String(x.sku).trim()===sku; })
+                 .map(function(x){ return { id:Number(x.id)||0, name:String(x.documentName||x.name||'').slice(0,70) }; });
+        var cc=pidCache(); cc[sku]={t:Date.now(), v:v};
+        try{ localStorage.setItem(PKEY, JSON.stringify(cc)); }catch(e){}
+        return v;
+      })
+      .catch(function(){ return (rec&&rec.v)||[]; });
+  }
+
+  // шукаємо за productId: сам товар + ті самі комплекти, у які він входить
+  function search(rows, sku, idMap){
+    var kitsOf=(comp2kits||{})[String(sku).trim()]||[];
     var hits=[];
     rows.forEach(function(o){
       o.prods.forEach(function(p){
-        if(p.sku===sku) hits.push({ id:o.id, st:o.st, qty:p.amt, name:p.name, via:null });
-        else if(kitMap[p.sku]) hits.push({ id:o.id, st:o.st, qty:p.amt*kitMap[p.sku].qty, name:p.name, via:p.sku });
+        var m=idMap[p.pid]; if(!m) return;
+        hits.push({ id:o.id, st:o.st, qty:p.amt*(m.qty||1), name:m.name||'', via:m.via||null });
       });
     });
     hits.sort(function(a,b){ return (a.st-b.st)||(b.id-a.id); });
@@ -5195,12 +6165,13 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       total+=h.qty;
       byStatus[h.st]=(byStatus[h.st]||0)+h.qty;
     });
+    var stale=staleNote?('<div class="sub">⏳ '+esc(staleNote)+'</div>'):'';
     if(!res.hits.length){
       c.innerHTML='<div class="msg">Код <b>'+esc(sku)+'</b> у жодній заявці в роботі не знайдено.<br>'
-        +'Отже, залишок не «висить» у заявках — причина в чомусь іншому (не оприбутковано, списання, помилка обліку).</div>';
+        +'Отже, залишок не «висить» у заявках — причина в чомусь іншому (не оприбутковано, списання, помилка обліку).</div>'+stale;
       return;
     }
-    var head='<div class="sum">Код '+esc(sku)+': у роботі '+total+' шт (позицій: '+res.hits.length+')</div>';
+    var head='<div class="sum">Код '+esc(sku)+': у роботі '+total+' шт (позицій: '+res.hits.length+')</div>'+stale;
     var byTxt=Object.keys(byStatus).map(function(s){ return (statusMap[s]||('статус '+s))+' — '+byStatus[s]+' шт'; }).join(' · ');
     head+='<div class="sub">'+esc(byTxt)+'</div>';
     if(res.kits.length){
@@ -5224,10 +6195,31 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     var sku=String(inp.value||'').trim();
     if(!sku){ inp.focus(); return; }
     btn.disabled=true; c.innerHTML='<div class="msg">Шукаю…</div>';
+    var idMap={};
     loadKits()
+      .then(function(){
+        // сам товар + комплекти, до складу яких він входить → усі їхні productId
+        var kitsOf=(comp2kits||{})[sku]||[];
+        var jobs=[ resolveSku(sku).then(function(list){
+          list.forEach(function(p){ idMap[p.id]={ qty:1, name:p.name, via:null }; });
+        }) ];
+        kitsOf.forEach(function(k){
+          jobs.push(resolveSku(k.kit).then(function(list){
+            list.forEach(function(p){
+              if(idMap[p.id]) return;                       // сам товар важливіший за комплект
+              idMap[p.id]={ qty:k.qty||1, name:p.name||k.name, via:k.kit };
+            });
+          }));
+        });
+        return Promise.all(jobs);
+      })
       .then(function(){ return loadOrders(function(p,t){ c.innerHTML='<div class="msg">Читаю заявки… сторінка '+p+(t>1?(' з '+t):'')+'</div>'; }); })
-      .then(function(rows){ render(box, sku, search(rows, sku)); })
-      .catch(function(e){ c.innerHTML='<div class="msg err">Не вдалося: '+esc(String(e&&e.message||e))+'</div>'; })
+      .then(function(rows){ render(box, sku, search(rows, sku, idMap)); })
+      .catch(function(e){
+        c.innerHTML='<div class="msg err">'
+          + (e&&e.limit ? '⏳ '+esc(apiNote()) : 'Не вдалося: '+esc(String(e&&e.message||e)))
+          + '</div>';
+      })
       .then(function(){ btn.disabled=false; });
   }
 
@@ -5367,7 +6359,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     var exp=document.createElement('div');
     exp.className='lkck-exp'; exp.style.display='none';
     exp.innerHTML='<div class="h">Входить у набори:</div>'+list.map(function(k){
-      return '<div class="r"><a href="'+CAT(k.kit)+'" target="_blank" rel="noopener">'+esc(k.kit)+'</a>'
+      var kitHref=(window.sdProdLink? window.sdProdLink.url(k.kit, true) : CAT(k.kit));
+      return '<div class="r"><a data-sd-sku="'+esc(k.kit)+'" data-sd-kit="1" href="'+kitHref
+        +'" target="_blank" rel="noopener" title="Відкрити картку набору">'+esc(k.kit)+'</a>'
         +' · <span class="nm">'+esc(k.name)+'</span> ×'+k.qty+'</div>';
     }).join('');
     plus.addEventListener('click',function(e){
@@ -5439,16 +6433,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 try{ // SD-ізоляція: помилка цього модуля не зупинить решту
 (function lkTtnPrintGuard(){
   'use strict';
-  var API_KEY='9yC3JYj4MlYitQ8J3KUf-uy_qPDYkFzwoITQSUeiWEDMZntbQ4uj0NxNcHrqAg8VAB6wDmkdXJZ1LMFgnQbuivTSrzutQbVB66wN';
   var LKEY='lk_ttnprint_v1';
 
-  var css=''
-    +'.lk-ttnp{display:inline-block;margin-left:8px;padding:2px 10px;border-radius:12px;'
-    +'  font:700 11.5px/1.6 Arial,sans-serif;vertical-align:middle;white-space:nowrap}'
-    +'.lk-ttnp.was{background:#fdecea;color:#b71c1c;border:1px solid #f5b7b1}'
-    +'.lk-ttnp.new{background:#E6F4EA;color:#1B5E20;border:1px solid #A5D6A7}';
-  var st=document.createElement('style'); st.textContent=css;
-  (document.head||document.documentElement).appendChild(st);
 
   function orderId(){ var m=(location.hash||'').match(/#\/order\/update\/(\d+)/); return m?m[1]:null; }
   function load(){ try{ return JSON.parse(localStorage.getItem(LKEY))||{}; }catch(e){ return {}; } }
@@ -5459,66 +6445,32 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     }catch(e){ return ''; }
   }
 
-  // стан заявки з API: чи Укрпошта, ТТН, серверний прапорець друку
-  var state={};   // orderId -> {ready, ukr, ttn, srvPrinted}
-  function fetchState(id){
-    if(state[id]) return;
-    state[id]={ready:false};
-    fetch('/api/order/list/?filter%5Bid%5D%5B%5D='+encodeURIComponent(id),
-          {headers:{'Form-Api-Key':API_KEY,'Accept':'application/json'}})
-      .then(function(r){ return r.json(); })
-      .then(function(j){
-        var o=(j.data||[])[0]||{}, d=(o.ord_delivery_data||[])[0]||{};
-        state[id]={ ready:true,
-          ukr: (String(d.provider||'')==='ukrposhta' || Number(o.shipping_method)===30),
-          ttn: String(d.trackingNumber||''),
-          srvPrinted: !!Number(d.isPrinted) };
-        badge();
-      })
-      .catch(function(){ state[id]={ready:true, ukr:false, ttn:'', srvPrinted:false}; });
+  // Стан заявки БЕЗ запитів до API: ядро кладе ТТН і прапорець друку Укрпошти
+  // в data-sd-ukr (читає viewModel.ukrposhta прямо зі сторінки).
+  var state={};   // orderId -> {ready, ttn, srvPrinted}
+  function readState(){
+    try{
+      var raw=document.documentElement.getAttribute('data-sd-ukr'); if(!raw) return;
+      var u=JSON.parse(raw); if(!u || !u.id) return;
+      var prev=state[u.id];
+      // локальну позначку «щойно надрукував» не збиваємо назад у false
+      state[u.id]={ ready:true, ttn:String(u.ttn||''),
+                    srvPrinted: !!u.printed || !!(prev&&prev.srvPrinted) };
+    }catch(e){}
   }
 
   function localRec(ttn){ return ttn ? (load()[ttn]||null) : null; }
 
-  // бейдж біля номера ТТН у картці заявки
-  function badge(){
-    var id=orderId(); if(!id) return;
-    var s=state[id];
-    var old=document.querySelector('.lk-ttnp');
-    if(!s || !s.ready || !s.ukr || !s.ttn){ if(old) old.remove(); return; }
-    var rec=localRec(s.ttn);
-    var was=s.srvPrinted || !!rec;
-    // якщо бейдж уже намальовано для цього стану — нічого не робимо (без сканувань DOM)
-    var sig=s.ttn+'|'+(was?1:0)+'|'+((rec&&rec.n)||0);
-    if(old && old.getAttribute('data-sig')===sig) return;
-    // елемент із номером ТТН: це посилання <a> (перевірено), тож спершу лише <a>;
-    // повний перебір span/div — тільки якщо раптом не знайшлося
-    function findByText(sel){
-      var all=document.querySelectorAll(sel);
-      for(var i=0;i<all.length;i++){
-        var el=all[i];
-        if(el.children.length) continue;
-        if(String(el.textContent||'').trim()===s.ttn) return el;
-      }
-      return null;
-    }
-    var host=findByText('a')||findByText('span,div');
-    if(!host){ if(old) old.remove(); return; }
-    var b=old;
-    if(!b){ b=document.createElement('span'); b.className='lk-ttnp'; }
-    b.setAttribute('data-sig', sig);
-    b.className='lk-ttnp '+(was?'was':'new');
-    if(was){
-      var n=rec&&rec.n?rec.n:null;
-      b.textContent='🖨 ТТН уже друкували'+(n?(' · '+n+'× на цьому ПК'):'');
-      b.title=(rec&&rec.t)?('останній друк тут: '+fmtDate(rec.t)):'позначено в СРМ як роздрукована';
-    }else{
-      b.textContent='🖨 ще не друкована';
-      b.title='за даними СРМ цю ТТН ще не друкували';
-    }
-    if(b.parentElement!==host.parentElement || b.previousSibling!==host){
-      try{ host.insertAdjacentElement('afterend', b); }catch(e){}
-    }
+  // повідомлення про ПОВТОРНИЙ друк — у спільне зведення зверху (як недоставлені чати)
+  function notifyRepeat(id, ttn, n){
+    try{
+      var LS='lk_chatfail_v1', all={};
+      try{ all=JSON.parse(localStorage.getItem(LS))||{}; }catch(e){}
+      all['ttn:'+ttn]={ num:String(id), ttn:String(ttn), kind:'ttn', n:n,
+        sig:'ttn:'+ttn+':'+n, url:location.href, t:Date.now(), ack:0,
+        reason:(n>1?('друковано '+n+'× на цьому ПК'):'у СРМ уже позначена як роздрукована') };
+      localStorage.setItem(LS, JSON.stringify(all));
+    }catch(e){}
   }
 
   // перехоплення кліку по кнопках друку ТТН (у СРМ: ng-click="viewModel.setIsPrinted(viewModel.ukrposhta)")
@@ -5533,7 +6485,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       var s=state[id];
       if(!s || !s.ready || !s.ttn) return;          // стан невідомий — не заважаємо
       var rec=localRec(s.ttn);
-      if(s.srvPrinted || rec){
+      var wasPrinted=!!(s.srvPrinted || rec);
+      if(wasPrinted){
         var msg='⚠ ПОВТОРНИЙ ДРУК ТТН!\n\nТТН '+s.ttn+' (заявка №'+id+') уже друкували';
         if(rec) msg+='\n• на цьому ПК: '+rec.n+'× , останній раз '+fmtDate(rec.t);
         if(s.srvPrinted) msg+='\n• у СРМ позначена як роздрукована (міг друкувати інший менеджер)';
@@ -5548,21 +6501,14 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       Object.keys(m).forEach(function(k){ if((m[k].t||0)<lim) delete m[k]; });
       save(m);
       s.srvPrinted=true;
-      setTimeout(badge, 300);
+      if(wasPrinted) notifyRepeat(id, s.ttn, cur.n);   // зверху зʼявиться «ТТН друковано повторно»
     }catch(err){}
   }, true);
 
-  var t=null;
-  function sync(){
-    var id=orderId();
-    if(!id){ var o=document.querySelector('.lk-ttnp'); if(o) o.remove(); return; }
-    fetchState(id);
-    badge();
-  }
-  function syncSoon(){ clearTimeout(t); t=setTimeout(sync,400); }
-  sync();
-  window.addEventListener('lkdom', syncSoon);
-  window.addEventListener('hashchange', syncSoon);
+  readState();
+  window.addEventListener('sdUkrInfo', readState);   // ядро оновило дані Укрпошти
+  window.addEventListener('lkdom', readState);       // підстраховка, якщо подію проґавили
+  window.addEventListener('hashchange', function(){ state={}; setTimeout(readState, 600); });
 })();
 }catch(e){ try{ console.warn("[SD] модуль «lkTtnPrintGuard» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkTtnPrintGuard ▲▲▲ */
@@ -5573,8 +6519,6 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 (function lkCashRegister(){
   'use strict';
 
-  var API_KEY   = '9yC3JYj4MlYitQ8J3KUf-uy_qPDYkFzwoITQSUeiWEDMZntbQ4uj0NxNcHrqAg8VAB6wDmkdXJZ1LMFgnQbuivTSrzutQbVB66wN';
-  var ORDERS    = '/api/order/list/';
   var CASHORD   = '/document-cash-order/index/';
   var STATUS_ID = 5;     // Оплачено САМОВИВІЗ
   var CASH_ID   = 44;    // Готівкою 💵
@@ -5595,6 +6539,10 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   function fmt(n){ return Number(n||0).toLocaleString('uk-UA',{minimumFractionDigits:2,maximumFractionDigits:2})+' ₴'; }
   function num(v){ var m=String(v==null?'':v).replace(',','.').match(/-?[\d.]+/); return m?parseFloat(m[0]):0; }
   function sleep(ms){ return new Promise(function(r){ setTimeout(r,ms); }); }
+  // спільний шлюз ліміту API + внутрішній список заявок (модуль lkApiBudget)
+  function sdApiFetch(u,o){ return (window.sdApi? window.sdApi.fetch(u,o) : fetch(u,o)); }
+  function sdOrders(qs,page){ return window.sdApi.orders(qs,page); }
+  function apiNote(){ return window.sdApi? window.sdApi.note() : 'Ліміт API SalesDrive вичерпано.'; }
   function dstr(d){ return d.split('-').reverse().join('.'); }
   function startOfDay(d){ var x=new Date(d); x.setHours(0,0,0,0); return x; }
 
@@ -5786,16 +6734,18 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   }
   var OUTC_URL='/ua/index.html?formId=1#/document/cash-order/outcoming';
 
+  // Заявки беремо ВНУТРІШНІМ запитом СРМ (як сама СРМ на сторінці списку) —
+  // без API-ключа й без годинного ліміту 100 запитів.
   async function fetchOrders(from,to){
-    var page=1,all=[],guard=0;
-    while(guard++<40){
-      var url=ORDERS+'?page='+page+'&limit=100&filter[statusId]='+STATUS_ID
-        +'&filter[paymentDate][from]='+from+'&filter[paymentDate][to]='+to;
-      var r; try{ r=await fetch(url,{headers:{'Form-Api-Key':API_KEY,'Accept':'application/json'}}); }catch(e){ break; }
-      if(r.status===400){ cashNote('⏳ Забагато запитів до SalesDrive.<br>Зачекайте ~1 хв, рахунок продовжиться сам…'); await sleep(65000); cashNote('Рахую…'); continue; }
-      var j=await r.json().catch(function(){return {};});
-      var arr=j.data||j.orders||[]; all=all.concat(arr);
-      if(arr.length<100) break; page++; await sleep(400);
+    var page=1, pages=1, all=[];
+    var qs='filter[statusId][]='+STATUS_ID
+      +'&filter[paymentDate][from]='+from+'&filter[paymentDate][to]='+to;
+    while(page<=pages && page<=40){
+      var res;
+      try{ res=await sdOrders(qs,page); }catch(e){ break; }
+      all=all.concat(res.rows||[]);
+      pages=res.pageCount||1; page++;
+      if(page<=pages) await sleep(200);
     }
     return all;
   }
@@ -5809,8 +6759,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       var url=CHECKS+'?page='+page+'&limit=100'
         +'&filter[date][from]='+encodeURIComponent(ff)
         +'&filter[date][to]='+encodeURIComponent(tt);
-      var r; try{ r=await fetch(url,{headers:{'X-Api-Key':CHECK_KEY,'Accept':'application/json'}}); }catch(e){ break; }
-      if(r.status===400){ await sleep(65000); continue; }
+      var r;
+      try{ r=await sdApiFetch(url,{headers:{'X-Api-Key':CHECK_KEY,'Accept':'application/json'}}); }
+      catch(e){ break; }   // ліміт — просто без чеків (сума каси від цього не залежить)
       var j=await r.json().catch(function(){return {};});
       var arr=j.data||[];
       arr.forEach(function(c){
@@ -5835,11 +6786,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   var unpaidCache=null, unpaidBusy=false;
   async function fetchUnpaidPickup(){
     var out=[];
-    var url=ORDERS+'?page=1&limit=100&filter[statusId]='+STATUS_ID;
-    var r; try{ r=await fetch(url,{headers:{'Form-Api-Key':API_KEY,'Accept':'application/json'}}); }catch(e){ return out; }
-    if(r.status===400){ await sleep(65000); try{ r=await fetch(url,{headers:{'Form-Api-Key':API_KEY,'Accept':'application/json'}}); }catch(e2){ return out; } }
-    var j=await r.json().catch(function(){return {};});
-    (j.data||[]).forEach(function(o){ if(payId(o)===null) out.push({id:o.id,amount:amount(o),date:payDate(o),name:clientName(o)}); });
+    var res;
+    try{ res=await sdOrders('filter[statusId][]='+STATUS_ID, 1); }catch(e){ return out; }
+    (res.rows||[]).forEach(function(o){ if(payId(o)===null) out.push({id:o.id,amount:amount(o),date:payDate(o),name:clientName(o)}); });
     return out;
   }
   async function loadUnpaid(force){
@@ -6018,7 +6967,16 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     if(_rangeCache && _rangeCache.key===okey && (Date.now()-_rangeCache.t)<90000){
       od=_rangeCache.data;
     } else {
-      od=await Promise.all([ fetchOrders(uFrom,uTo), fetchOutcoming(uFrom,uTo) ]);
+      try{ od=await Promise.all([ fetchOrders(uFrom,uTo), fetchOutcoming(uFrom,uTo) ]); }
+      catch(e){
+        if(!(e&&e.limit)) throw e;
+        if(myseq!==renderSeq) return;
+        box.querySelector('#lk-cash-body').innerHTML=
+          '<div style="padding:18px 16px;color:#8a4a00;font-size:14px;line-height:1.55">⏳ '+apiNote()
+          +'<br><span style="color:#999;font-size:12.5px">Ліміт спільний на весь акаунт — його міг вичерпати інший менеджер. '
+          +'Каса порахується, щойно ліміт відновиться.</span></div>';
+        return;
+      }
       if(myseq!==renderSeq) return;
       _rangeCache={key:okey, t:Date.now(), data:od};
     }
@@ -6136,6 +7094,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     }
     catch(e){
       if(/HTTP 403|bad pin/.test(e.message)) alert('Невірний PIN — залишок не змінено.');
+      else if(e && e.limit) alert('⏳ '+apiNote()+'\n\nЗалишок НЕ змінено — спробуйте пізніше.');
       else alert('Не вдалося зберегти: '+e.message);
       render();
     }
@@ -6204,6 +7163,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 try{ // SD-ізоляція: помилка цього модуля не зупинить решту
 (function lkPickList(){
   'use strict';
+  // публічний API — єдине джерело, де в товарах заявки є sku (внутрішній список
+  // віддає лише productId, а лист комплектації агрегує саме за кодами)
   var API_KEY  = '9yC3JYj4MlYitQ8J3KUf-uy_qPDYkFzwoITQSUeiWEDMZntbQ4uj0NxNcHrqAg8VAB6wDmkdXJZ1LMFgnQbuivTSrzutQbVB66wN';
   var ORDERS   = '/api/order/list/';
   var APP_URL  = 'https://barcode-printer-production-2b32.up.railway.app';
@@ -6214,6 +7175,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 
   function onListPage(){ return /#\/order\/index/.test(location.hash||''); }
   function sleep(ms){ return new Promise(function(r){ setTimeout(r,ms); }); }
+  // спільний шлюз ліміту API (модуль lkApiBudget)
+  function sdApiFetch(u,o){ return (window.sdApi? window.sdApi.fetch(u,o) : fetch(u,o)); }
+  function apiNote(){ return window.sdApi? window.sdApi.note() : 'Ліміт API SalesDrive вичерпано.'; }
   function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
   function gGet(k){ try{ var s=GM_getValue(k,null); return s?((typeof s==='string')?JSON.parse(s):s):null; }catch(e){ return null; } }
   function gSet(k,v){ try{ GM_setValue(k, JSON.stringify(v)); }catch(e){} }
@@ -6263,22 +7227,25 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       }).catch(function(){});
   }
 
-  // фетч заявок за статусами (пагінація + захист від rate-limit 400)
+  // фетч заявок за статусами (пагінація; ліміт API — через спільний шлюз)
   function fetchOrders(statusIds){
     var qs=statusIds.map(function(s){ return 'filter%5BstatusId%5D%5B%5D='+s; }).join('&');
     var page=1, all=[], guard=0;
     function next(){
       if(guard++>=40) return Promise.resolve(all);
       var url=ORDERS+'?page='+page+'&limit=100'+(qs?'&'+qs:'');
-      return fetch(url,{headers:{'Form-Api-Key':API_KEY,'Accept':'application/json'}})
+      return sdApiFetch(url,{headers:{'Form-Api-Key':API_KEY,'Accept':'application/json'}})
         .then(function(r){
-          if(r.status===400){ return sleep(65000).then(next); }
           return r.json().catch(function(){return {};}).then(function(j){
             var arr=j.data||[]; all=all.concat(arr);
             if(arr.length<100) return all;
             page++; return sleep(400).then(next);
           });
-        }).catch(function(){ return all; });
+        }).catch(function(e){
+          // ліміт API — краще чесно сказати, ніж віддати НЕПОВНИЙ лист комплектації
+          if(e && e.limit) throw e;
+          return all;
+        });
     }
     return next();
   }
@@ -6376,7 +7343,13 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       var rows=aggregate(pending);
       cache={key:key, t:Date.now(), rows:rows, ordersCount:pending.length, statuses:st};
       busy=false; render();
-    }).catch(function(){ busy=false; document.getElementById('lk-pick-content').innerHTML='<div id="lk-pick-msg">Не вдалося порахувати. Натисни 🔄.</div>'; });
+    }).catch(function(e){
+      busy=false;
+      document.getElementById('lk-pick-content').innerHTML='<div id="lk-pick-msg">'
+        + (e&&e.limit ? '⏳ '+apiNote()+'<br>Ліміт спільний на весь акаунт (усі менеджери разом).'
+                      : 'Не вдалося порахувати. Натисни 🔄.')
+        + '</div>';
+    });
   }
 
   function sortedRows(){
@@ -6455,8 +7428,6 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 try{ // SD-ізоляція: помилка цього модуля не зупинить решту
 (function lkUkrPromList(){
   'use strict';
-  var API_KEY  = '9yC3JYj4MlYitQ8J3KUf-uy_qPDYkFzwoITQSUeiWEDMZntbQ4uj0NxNcHrqAg8VAB6wDmkdXJZ1LMFgnQbuivTSrzutQbVB66wN';
-  var ORDERS   = '/api/order/list/';
   var PROM_PM  = 20;   // спосіб оплати «Пром-оплата» (підтверджено на #305175)
   var UKR_SM   = 30;   // доставка Укрпошта
   var PACKED_STATUS = 15; // статус «Спаковано» (ті, що віддаються курʼєру) — підтверджено на #305175
@@ -6466,26 +7437,25 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 
   function onListPage(){ return /#\/order\/index/.test(location.hash||''); }
   function sleep(ms){ return new Promise(function(r){ setTimeout(r,ms); }); }
+  // спільний шлюз ліміту API + внутрішній список заявок (модуль lkApiBudget)
+  function sdApiFetch(u,o){ return (window.sdApi? window.sdApi.fetch(u,o) : fetch(u,o)); }
+  function sdOrders(qs,page){ return window.sdApi.orders(qs,page); }
+  function apiNote(){ return window.sdApi? window.sdApi.note() : 'Ліміт API SalesDrive вичерпано.'; }
   function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
 
-  // Заявки у статусі «Спаковано» (серверний фільтр за статусом — бере лише ті,
-  // що зараз віддаються курʼєру; далі клієнтом лишаємо пром+укрпошта).
-  // Ліміт API (HTTP 400) НЕ чекаємо по 65с — одразу віддаємо {limited:true},
-  // щоб не морозити вікно; показуємо збережений кеш і підказку оновити.
+  // Заявки у статусі «Спаковано» — ВНУТРІШНІМ запитом СРМ (без API-ключа
+  // й без годинного ліміту); далі клієнтом лишаємо пром+укрпошта.
   function fetchOrders(){
-    var page=1, all=[], guard=0;
+    var page=1, pages=1, all=[], guard=0;
     function next(){
-      if(guard++>=40) return Promise.resolve({orders:all, limited:false});
-      var url=ORDERS+'?page='+page+'&limit=100&filter%5BstatusId%5D%5B%5D='+PACKED_STATUS;
-      return fetch(url,{headers:{'Form-Api-Key':API_KEY,'Accept':'application/json'}})
-        .then(function(r){
-          if(r.status===400){ return {orders:all, limited:true}; }
-          return r.json().catch(function(){return {};}).then(function(j){
-            var arr=j.data||[]; all=all.concat(arr);
-            if(arr.length<100) return {orders:all, limited:false};
-            page++; return sleep(250).then(next);
-          });
-        }).catch(function(){ return {orders:all, limited:false}; });
+      if(guard++>=40 || page>pages) return Promise.resolve({orders:all, limited:false});
+      return sdOrders('filter[statusId][]='+PACKED_STATUS, page)
+        .then(function(res){
+          all=all.concat(res.rows||[]); pages=res.pageCount||1; page++;
+          if(page>pages) return {orders:all, limited:false};
+          return sleep(200).then(next);
+        })
+        .catch(function(){ return {orders:all, limited:false}; });
     }
     return next();
   }
@@ -6574,8 +7544,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     fetchOrders().then(function(res){
       busy=false;
       if(res.limited){                                  // ліміт API — не оновлюємо частковим, лишаємо кеш
-        if(sub) sub.textContent='⚠️ Сервер обмежує запити (ліміт).'+(have?' Показано збережене.':'')+' Спробуй 🔄 за хвилину.';
-        if(!have) document.getElementById('lk-ukp-content').innerHTML='<div id="lk-ukp-msg">Сервер тимчасово обмежує запити. Зачекай хвилину й натисни 🔄.</div>';
+        if(sub) sub.textContent='⏳ '+apiNote()+(have?' Показано збережене.':'');
+        if(!have) document.getElementById('lk-ukp-content').innerHTML='<div id="lk-ukp-msg">⏳ '+apiNote()
+          +'<br>Ліміт спільний на весь акаунт (усі менеджери разом) — оновиться протягом години.</div>';
         return;
       }
       var rows=(res.orders||[]).filter(isTarget).map(mapRow).sort(function(a,b){ return b.id-a.id; });
