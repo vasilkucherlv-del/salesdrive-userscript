@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.68
+// @version      2.69
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -5894,17 +5894,18 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 }catch(e){ try{ console.warn("[SD] модуль «lkOrderTier» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkOrderTier ▲▲▲ */
 
-/* ▼▼▼ МОДУЛЬ-START • lkNpDescr — 📋 шаблон опису у формі ТТН Нової пошти ▼▼▼ */
+/* ▼▼▼ МОДУЛЬ-START • lkNpDescr — 📋 шаблони опису у формі ТТН Нової пошти ▼▼▼ */
 /* ===== У формі «Сформувати ТТН» поле «Опис» СРМ заповнює переліком усіх товарів —
    це майже завжди більше за ліміт у 100 символів, і менеджер стирає його руками.
-   Додаємо кнопку-шаблон «запчастини» (один клік — і поле готове) та лічильник
-   символів, щоб одразу було видно перебір. Нічого не зберігаємо і ТТН не
-   створюємо — це робить менеджер. ===== */
+   Даємо кнопки-шаблони (один клік — і поле готове) та лічильник символів.
+   Список шаблонів редагує сам менеджер («✎ шаблони»), зберігається в браузері.
+   Нічого не зберігаємо і ТТН не створюємо — це робить менеджер. ===== */
 try{ // SD-ізоляція: помилка цього модуля не зупинить решту
 (function lkNpDescr(){
   'use strict';
-  var TPL=['запчастини'];             // шаблони (перший — основний)
-  var MAX=100;                        // ліміт Нової пошти
+  var KEY='lk_npdescr_tpl_v1';
+  var DEF=['запчастини'];             // шаблон за замовчуванням
+  var MAX=100;                        // ліміт опису в Новій пошті
 
   var css=''
     +'.lk-npd{margin:4px 0 2px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;'
@@ -5912,10 +5913,30 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     +'.lk-npd button{padding:4px 12px;border:1px solid #1565C0;border-radius:6px;background:#e8f0fe;'
     +'  color:#0d47a1;font:700 12.5px/1.4 Arial,sans-serif;cursor:pointer}'
     +'.lk-npd button:hover{background:#d4e4fd}'
+    +'.lk-npd button.edit{border-color:#90a4ae;background:#f4f6f8;color:#455a64;font-weight:600}'
     +'.lk-npd .cnt{color:#777}'
-    +'.lk-npd .cnt.bad{color:#B71C1C;font-weight:700}';
+    +'.lk-npd .cnt.bad{color:#B71C1C;font-weight:700}'
+    +'.lk-npd-ed{margin:4px 0 6px;padding:8px 10px;border-left:3px solid #1565C0;background:#f2f7ff;'
+    +'  border-radius:5px;font:12.5px/1.5 -apple-system,Segoe UI,Roboto,Arial,sans-serif}'
+    +'.lk-npd-ed textarea{width:100%;box-sizing:border-box;min-height:78px;padding:6px 8px;'
+    +'  border:1px solid #b0bec5;border-radius:5px;font:13px/1.5 Arial,sans-serif;resize:vertical}'
+    +'.lk-npd-ed .hint{color:#607d8b;margin-bottom:4px}'
+    +'.lk-npd-ed .act{margin-top:6px;display:flex;gap:8px;align-items:center}'
+    +'.lk-npd-ed .act button{padding:4px 14px}'
+    +'.lk-npd-ed .act .save{background:#2E7D32;border-color:#2E7D32;color:#fff}'
+    +'.lk-npd-ed .act .save:hover{background:#256628}'
+    +'.lk-npd-ed .warn{color:#B71C1C;font-weight:700}';
   var st=document.createElement('style'); st.textContent=css;
   (document.head||document.documentElement).appendChild(st);
+
+  function load(){
+    try{
+      var a=JSON.parse(localStorage.getItem(KEY));
+      if(Array.isArray(a) && a.length) return a.filter(function(x){ return String(x||'').trim(); });
+    }catch(e){}
+    return DEF.slice();
+  }
+  function save(list){ try{ localStorage.setItem(KEY, JSON.stringify(list)); }catch(e){} }
 
   // запис у поле так, щоб Angular побачив зміну (ng-model)
   function setVal(el, txt){
@@ -5929,34 +5950,18 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 
   function mount(){
     var ta=document.getElementById('descriptionNovaPoshta');
-    if(!ta){                                   // форму закрили — приберемо панельку
-      var old=document.querySelector('.lk-npd'); if(old) old.remove();
+    if(!ta){                                   // форму закрили — прибираємо панель
+      [].forEach.call(document.querySelectorAll('.lk-npd,.lk-npd-ed'), function(n){ n.remove(); });
       return;
     }
     var box=ta.closest('.form-group')||ta.parentElement;
     var bar=box.querySelector('.lk-npd');
     if(!bar){
       bar=document.createElement('div'); bar.className='lk-npd';
-      TPL.forEach(function(t){
-        var b=document.createElement('button'); b.type='button';
-        b.textContent=t;
-        b.title='Підставити «'+t+'» в опис (замінить те, що там зараз)';
-        b.addEventListener('click',function(e){
-          e.preventDefault(); e.stopPropagation();
-          setVal(ta, t);
-          refresh();
-          try{ ta.focus(); }catch(err){}
-        });
-        bar.appendChild(b);
-      });
-      var cnt=document.createElement('span'); cnt.className='cnt';
-      bar.appendChild(cnt);
-      // панель — одразу під полем «Опис»
       ta.insertAdjacentElement('afterend', bar);
     }
-    refresh();
 
-    function refresh(){
+    function count(){
       var n=String(ta.value||'').length;
       var cn=bar.querySelector('.cnt'); if(!cn) return;
       var txt=n+' / '+MAX+(n>MAX?' — задовго, ТТН не сформується':'');
@@ -5964,10 +5969,77 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       if(cn.textContent!==txt) cn.textContent=txt;
       if(cn.className!==cls) cn.className=cls;
     }
+
+    // перемальовуємо кнопки лише коли список шаблонів справді змінився
+    function draw(){
+      var list=load();
+      var sig=JSON.stringify(list);
+      if(bar.getAttribute('data-sig')!==sig){
+        bar.setAttribute('data-sig', sig);
+        bar.innerHTML='';
+        list.forEach(function(t){
+          var b=document.createElement('button'); b.type='button';
+          b.textContent=t.length>28?(t.slice(0,26)+'…'):t;
+          b.title='Підставити в опис: «'+t+'»'+(t.length>MAX?' ⚠ довше за '+MAX+' символів':'');
+          b.addEventListener('click',function(e){
+            e.preventDefault(); e.stopPropagation();
+            setVal(ta, t); count();
+            try{ ta.focus(); }catch(err){}
+          });
+          bar.appendChild(b);
+        });
+        var ed=document.createElement('button'); ed.type='button'; ed.className='edit';
+        ed.textContent='✎ шаблони'; ed.title='Додати / змінити свої шаблони опису';
+        ed.addEventListener('click',function(e){ e.preventDefault(); e.stopPropagation(); editor(); });
+        bar.appendChild(ed);
+        var cnt=document.createElement('span'); cnt.className='cnt';
+        bar.appendChild(cnt);
+      }
+      count();
+    }
+
+    function editor(){
+      var old=box.querySelector('.lk-npd-ed');
+      if(old){ old.remove(); return; }                 // друге натискання — закрити
+      var wrap=document.createElement('div'); wrap.className='lk-npd-ed';
+      var hint=document.createElement('div'); hint.className='hint';
+      hint.textContent='Один шаблон — один рядок (ліміт Нової пошти: '+MAX+' символів).';
+      var area=document.createElement('textarea');
+      area.value=load().join('\n');
+      var act=document.createElement('div'); act.className='act';
+      var sv=document.createElement('button'); sv.type='button'; sv.className='save'; sv.textContent='Зберегти';
+      var cl=document.createElement('button'); cl.type='button'; cl.textContent='Скасувати';
+      var msg=document.createElement('span');
+      act.appendChild(sv); act.appendChild(cl); act.appendChild(msg);
+      wrap.appendChild(hint); wrap.appendChild(area); wrap.appendChild(act);
+      bar.insertAdjacentElement('afterend', wrap);
+      area.focus();
+      cl.addEventListener('click',function(e){ e.preventDefault(); e.stopPropagation(); wrap.remove(); });
+      sv.addEventListener('click',function(e){
+        e.preventDefault(); e.stopPropagation();
+        var list=[], seen={};
+        String(area.value||'').split('\n').forEach(function(ln){
+          var t=ln.replace(/\s+/g,' ').trim();
+          if(!t || seen[t]) return;
+          seen[t]=1; list.push(t);
+        });
+        if(!list.length){ msg.className='warn'; msg.textContent='порожньо — лишаю як було'; return; }
+        var longs=list.filter(function(t){ return t.length>MAX; });
+        save(list);
+        draw();
+        wrap.remove();
+        if(longs.length){
+          var c=bar.querySelector('.cnt');
+          if(c){ c.className='cnt bad'; c.textContent='⚠ довші за '+MAX+' символів: '+longs.length; }
+        }
+      });
+    }
+
+    draw();
     if(!ta.getAttribute('data-lk-npd')){
       ta.setAttribute('data-lk-npd','1');
-      ta.addEventListener('input', refresh);
-      ta.addEventListener('keyup', refresh);
+      ta.addEventListener('input', count);
+      ta.addEventListener('keyup', count);
     }
   }
 
