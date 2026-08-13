@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.67
+// @version      2.68
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -5893,6 +5893,91 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 })();
 }catch(e){ try{ console.warn("[SD] модуль «lkOrderTier» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkOrderTier ▲▲▲ */
+
+/* ▼▼▼ МОДУЛЬ-START • lkNpDescr — 📋 шаблон опису у формі ТТН Нової пошти ▼▼▼ */
+/* ===== У формі «Сформувати ТТН» поле «Опис» СРМ заповнює переліком усіх товарів —
+   це майже завжди більше за ліміт у 100 символів, і менеджер стирає його руками.
+   Додаємо кнопку-шаблон «запчастини» (один клік — і поле готове) та лічильник
+   символів, щоб одразу було видно перебір. Нічого не зберігаємо і ТТН не
+   створюємо — це робить менеджер. ===== */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
+(function lkNpDescr(){
+  'use strict';
+  var TPL=['запчастини'];             // шаблони (перший — основний)
+  var MAX=100;                        // ліміт Нової пошти
+
+  var css=''
+    +'.lk-npd{margin:4px 0 2px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;'
+    +'  font:12.5px/1.5 -apple-system,Segoe UI,Roboto,Arial,sans-serif}'
+    +'.lk-npd button{padding:4px 12px;border:1px solid #1565C0;border-radius:6px;background:#e8f0fe;'
+    +'  color:#0d47a1;font:700 12.5px/1.4 Arial,sans-serif;cursor:pointer}'
+    +'.lk-npd button:hover{background:#d4e4fd}'
+    +'.lk-npd .cnt{color:#777}'
+    +'.lk-npd .cnt.bad{color:#B71C1C;font-weight:700}';
+  var st=document.createElement('style'); st.textContent=css;
+  (document.head||document.documentElement).appendChild(st);
+
+  // запис у поле так, щоб Angular побачив зміну (ng-model)
+  function setVal(el, txt){
+    try{
+      var d=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el),'value');
+      if(d && d.set) d.set.call(el, txt); else el.value=txt;
+    }catch(e){ el.value=txt; }
+    el.dispatchEvent(new Event('input',{bubbles:true}));
+    el.dispatchEvent(new Event('change',{bubbles:true}));
+  }
+
+  function mount(){
+    var ta=document.getElementById('descriptionNovaPoshta');
+    if(!ta){                                   // форму закрили — приберемо панельку
+      var old=document.querySelector('.lk-npd'); if(old) old.remove();
+      return;
+    }
+    var box=ta.closest('.form-group')||ta.parentElement;
+    var bar=box.querySelector('.lk-npd');
+    if(!bar){
+      bar=document.createElement('div'); bar.className='lk-npd';
+      TPL.forEach(function(t){
+        var b=document.createElement('button'); b.type='button';
+        b.textContent=t;
+        b.title='Підставити «'+t+'» в опис (замінить те, що там зараз)';
+        b.addEventListener('click',function(e){
+          e.preventDefault(); e.stopPropagation();
+          setVal(ta, t);
+          refresh();
+          try{ ta.focus(); }catch(err){}
+        });
+        bar.appendChild(b);
+      });
+      var cnt=document.createElement('span'); cnt.className='cnt';
+      bar.appendChild(cnt);
+      // панель — одразу під полем «Опис»
+      ta.insertAdjacentElement('afterend', bar);
+    }
+    refresh();
+
+    function refresh(){
+      var n=String(ta.value||'').length;
+      var cn=bar.querySelector('.cnt'); if(!cn) return;
+      var txt=n+' / '+MAX+(n>MAX?' — задовго, ТТН не сформується':'');
+      var cls='cnt'+(n>MAX?' bad':'');
+      if(cn.textContent!==txt) cn.textContent=txt;
+      if(cn.className!==cls) cn.className=cls;
+    }
+    if(!ta.getAttribute('data-lk-npd')){
+      ta.setAttribute('data-lk-npd','1');
+      ta.addEventListener('input', refresh);
+      ta.addEventListener('keyup', refresh);
+    }
+  }
+
+  var t=null;
+  function soon(){ clearTimeout(t); t=setTimeout(mount,250); }
+  soon();
+  window.addEventListener('lkdom', soon);
+})();
+}catch(e){ try{ console.warn("[SD] модуль «lkNpDescr» не запустився:", e); }catch(_){} }
+/* ▲▲▲ МОДУЛЬ-END • lkNpDescr ▲▲▲ */
 
 /* ▼▼▼ МОДУЛЬ-START • lkRozCommission — ⚖ комісія Rozetka для дописаних товарів ▼▼▼ */
 /* ===== У Rozetka-замовленні товар, доданий менеджером, приходить із нульовою
