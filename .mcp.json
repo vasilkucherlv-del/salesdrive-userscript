@@ -7,6 +7,14 @@
         "--headless",
         "--executable-path", "/opt/pw-browsers/chromium"
       ]
+    },
+    "scrapling": {
+      "command": "uvx",
+      "args": [
+        "--from", "scrapling[ai]>=0.4.14,<0.5",
+        "scrapling-mcp",
+        "--executable-path", "/opt/pw-browsers/chromium"
+      ]
     }
   }
 }
