@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.70
+// @version      2.71
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -3925,10 +3925,15 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     + '  overflow:hidden;font:12px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;color:#0f3d39}'
     + '.lkan-exp .h{color:#00695c;font-weight:700;padding:6px 9px;border-bottom:1px solid #00897B;'
     + '  text-transform:uppercase;letter-spacing:.3px;font-size:11px;background:#e3f4f2}'
-    + '.lkan-exp .r{display:grid;grid-template-columns:1fr auto auto;align-items:stretch}'
+    + '.lkan-exp .r{display:grid;grid-template-columns:auto 1fr auto auto;align-items:stretch}'
+    // колонка з фото товару (як у допродаж-банері) — щоб аналог було видно в обличчя
+    + '.lkan-exp .r .phb{display:flex;align-items:center;justify-content:center;width:46px;'
+    + '  background:#fff;border-right:1px solid rgba(0,137,123,.45);cursor:pointer}'
+    + '.lkan-exp .r .phb img{max-width:40px;max-height:40px;object-fit:contain;display:none}'
+    + '.lkan-exp .r .phb .no{color:#cfe0de;font-size:15px;line-height:1}'
     + '.lkan-exp .r+.r{border-top:1px solid rgba(0,137,123,.45)}'
     + '.lkan-exp .r .nm{color:#0f2b29;font-weight:600;min-width:0;padding:6px 9px;cursor:pointer;'
-    + '  display:flex;flex-direction:column;justify-content:center;gap:2px;word-break:break-word}'
+    + '  display:flex;flex-direction:column;justify-content:center;gap:2px;overflow-wrap:anywhere}'
     + '.lkan-exp .r .nm:hover .nmt{text-decoration:underline;color:#00695c}'
     + '.lkan-exp .r .nm .code{color:#00787a;font:600 10.5px/1.2 ui-monospace,Menlo,Consolas,monospace;'
     + '  opacity:.85;white-space:nowrap}'
@@ -4011,6 +4016,10 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     else if (r.qty == null) { stk.textContent = 'залишок —'; }
     else if (Number(r.qty) > 0) { stk.classList.add('yes'); stk.textContent = '✓ ' + fmtQty(r.qty) + ' шт'; }
     else { stk.classList.add('no'); stk.textContent = '✗ немає'; }
+
+    // фото ставимо лише коли товар справді знайдено в каталозі —
+    // для ненайденого коду картинка може бути чужою і збити з пантелику
+    if (slot.ph && r && r.found !== false && r.img && slot.ph.getAttribute('src') !== r.img) slot.ph.src = r.img;
 
     var pr = slot.pr;
     if (r && r.found !== false && r.price && r.price.value != null) {
@@ -4097,6 +4106,23 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       var r = document.createElement('div');
       r.className = 'r';
 
+      // фото товару (URL приходить тим самим мостом, що й залишок із ціною)
+      var phb = document.createElement('span');
+      phb.className = 'phb';
+      phb.title = 'Відкрити картку товару';
+      var ph = document.createElement('img');
+      ph.alt = ''; ph.loading = 'eager';   // список короткий; lazy не вантажиться, поки рядок поза екраном
+      ph.onerror = function () { ph.style.display = 'none'; noph.style.display = ''; };
+      ph.onload = function () { ph.style.display = 'block'; noph.style.display = 'none'; };
+      var noph = document.createElement('span');
+      noph.className = 'no'; noph.textContent = '—';   // нейтральна позначка «фото немає»
+      phb.appendChild(ph); phb.appendChild(noph);
+      phb.addEventListener('click', function (e) {
+        e.preventDefault(); e.stopPropagation();
+        openProduct(it.sku);
+      });
+      r.appendChild(phb);
+
       var nm = document.createElement('span');
       nm.className = 'nm';
       nm.title = 'Відкрити картку товару';
@@ -4144,7 +4170,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
         r.appendChild(s);
       }
       exp.appendChild(r);
-      rowsByCode[String(it.sku)] = { row: r, stk: stk, pr: pr };
+      rowsByCode[String(it.sku)] = { row: r, stk: stk, pr: pr, ph: ph };
     });
 
     var stockLoaded = false;
