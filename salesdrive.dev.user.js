@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.71
+// @version      2.72
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4452,48 +4452,92 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 /* ▲▲▲ МОДУЛЬ-END • lkModalKits ▲▲▲ */
 
 /* ▼▼▼ МОДУЛЬ-START • lkUpsellRedesign — Компактний вигляд картки допродажу ▼▼▼ */
-/* ===== Компактний сучасний вигляд картки допродажу ===== */
+/* ===== Компактна картка допродажу в спокійних сіро-синіх тонах.
+   Рядок товару — сітка з ФІКСОВАНИМИ колонками, тож артикул, наявність, ціна
+   й кнопка стоять рівно одне під одним у всіх рядках (як таблиця).
+   Артикул виносимо з кнопки в окрему колонку — інакше він «плаває».
+   На вузькому екрані сітка згортається у два рядки. ===== */
 try{ // SD-ізоляція: помилка цього модуля не зупинить решту
 (function lkUpsellRedesign() {
   'use strict';
   var css = ''
-    // контейнер: тягнеться вправо на всю ширину, тонкий, невеликі поля
-    + '#sd-upsell-hint{padding:9px 36px 9px 12px;max-width:none;width:100%;margin:10px 0 6px 0;'
-    + '  background:#FFFDF6;border:1px solid #F0CE72;border-left:5px solid #F0A800;'
-    + '  border-radius:11px;box-shadow:0 6px 18px rgba(0,0,0,.08);'
-    + '  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif}'
-    // рядок товару: тонкий, невеликі вертикальні відступи
-    + '#sd-upsell-hint .sd-item{gap:6px 14px;padding:9px 0;margin-top:0;'
-    + '  border-top:1px solid rgba(0,0,0,.07)}'
-    + '#sd-upsell-hint .sd-item:first-of-type{border-top:none;padding-top:3px}'
-    // фото
-    + '#sd-upsell-hint .sd-comp-img{width:38px;height:38px;border-radius:8px;border:1px solid #ece0bf}'
-    // середня колонка: широка основа → на всю ширину текст в один-два рядки (тонко)
-    + '#sd-upsell-hint .sd-main{flex:1 1 420px;gap:3px}'
-    + '#sd-upsell-hint .sd-name{font-size:11.5px;font-weight:700;letter-spacing:.3px;'
-    + '  color:#9b7d23;line-height:1.25;margin:0;text-transform:uppercase}'
-    + '#sd-upsell-hint .sd-say{display:inline-block;font-size:10px;font-weight:800;'
-    + '  letter-spacing:.5px;text-transform:uppercase;color:#2E7D32;margin:0}'
-    + '#sd-upsell-hint .sd-say::before{content:"💬 "}'
-    // головний акцент — репліка, але компактніше
-    + '#sd-upsell-hint .sd-script{font-size:13.5px;font-weight:500;line-height:1.4;color:#1f2d17;'
-    + '  background:#fff;border:1px solid #dcebd6;border-left:3px solid #2E7D32;'
-    + '  border-radius:8px;padding:7px 11px;overflow-wrap:anywhere;box-shadow:none}'
-    // бейдж залишку — пігулка
-    + '#sd-upsell-hint .sd-stock{font-size:11px;font-weight:600;padding:3px 9px;border-radius:999px}'
-    // права колонка
-    + '#sd-upsell-hint .sd-action{width:138px;gap:6px}'
-    + '#sd-upsell-hint .sd-price{padding:4px 6px;border-radius:9px}'
-    + '#sd-upsell-hint .sd-price-lab{font-size:10px}'
-    + '#sd-upsell-hint .sd-price-val{font-size:17px;font-weight:800}'
-    + '#sd-upsell-hint .sd-add{padding:8px 10px;font-size:13px;font-weight:700;border-radius:9px;'
-    + '  display:flex;align-items:center;justify-content:center;gap:5px;flex-wrap:wrap;line-height:1.2}'
-    + '#sd-upsell-hint .sd-sku{font-size:11px;padding:1px 6px;margin-left:0;border-radius:5px;'
-    + '  background:rgba(255,255,255,.22)}'
-    + '#sd-upsell-hint .sd-x{top:7px;right:11px;font-size:19px}';
+    // ── контейнер
+    + '#sd-upsell-hint{padding:8px 34px 9px 13px;max-width:none;width:100%;margin:10px 0 6px 0;'
+    + '  background:#F7F9FC;border:1px solid #DCE3EC;border-left:5px solid #4B7BB0;'
+    + '  border-radius:11px;box-shadow:0 2px 10px rgba(40,70,110,.10);'
+    + '  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;color:#2A3E57}'
+    + '#sd-upsell-hint .sd-x{top:7px;right:11px;font-size:19px;color:#8496AC}'
+    + '#sd-upsell-hint .sd-x:hover{color:#3C5876}'
+    // ── рядок товару = сітка: фото | назва+скрипт | артикул | наявність | ціна | кнопка
+    + '#sd-upsell-hint .sd-item{display:grid;align-items:center;gap:2px 12px;padding:7px 0;margin-top:0;'
+    + '  border-top:1px solid #E7EDF4;'
+    + '  grid-template-columns:38px minmax(220px,1fr) 92px 124px 104px 118px;'
+    + '  grid-template-areas:"img name code stock price add" "img script script script script script"}'
+    + '#sd-upsell-hint .sd-item:first-of-type{border-top:none}'
+    // display:contents — щоб діти .sd-main і .sd-action стали клітинками спільної сітки
+    + '#sd-upsell-hint .sd-main{display:contents}'
+    + '#sd-upsell-hint .sd-action{display:contents}'
+    // ── фото
+    + '#sd-upsell-hint .sd-comp-img{grid-area:img;width:38px;height:38px;border-radius:8px;'
+    + '  border:1px solid #DEE5EE;background:#fff}'
+    // ── назва + скрипт
+    + '#sd-upsell-hint .sd-name{grid-area:name;font-size:11.5px;font-weight:700;letter-spacing:.3px;'
+    + '  color:#3D5A80;line-height:1.25;margin:0;text-transform:uppercase;overflow-wrap:anywhere}'
+    + '#sd-upsell-hint .sd-say{display:none}'
+    + '#sd-upsell-hint .sd-script{grid-area:script;font-size:12.5px;font-weight:400;line-height:1.4;'
+    + '  color:#5C6B7E;background:transparent;border:none;padding:2px 0 0;margin:0;'
+    + '  overflow-wrap:anywhere;box-shadow:none}'
+    // ── артикул окремою колонкою (переносимо його з кнопки, див. нижче)
+    + '#sd-upsell-hint .sd-code{grid-area:code;justify-self:start;white-space:nowrap;'
+    + '  font:600 11.5px/1.4 ui-monospace,Menlo,Consolas,monospace;color:#5C6B7E;'
+    + '  background:#EDF2F9;border:1px solid #D8E2EF;border-radius:5px;padding:2px 7px}'
+    // ── наявність
+    + '#sd-upsell-hint .sd-stock{grid-area:stock;justify-self:start;font-size:11px;font-weight:600;'
+    + '  padding:3px 9px;border-radius:999px;white-space:nowrap}'
+    + '#sd-upsell-hint .sd-stock-yes{background:#EBF4EE;color:#2C6B45;border:1px solid #CFE3D6}'
+    + '#sd-upsell-hint .sd-stock-no{background:#FBEEEC;color:#9C3A31;border:1px solid #EED2CD}'
+    + '#sd-upsell-hint .sd-stock-wait,#sd-upsell-hint .sd-stock-unk{background:#F1F3F7;color:#7C8899;'
+    + '  border:1px solid #E3E8EF;font-weight:500}'
+    // ── ціна
+    + '#sd-upsell-hint .sd-price{grid-area:price;justify-self:stretch;display:flex;align-items:baseline;'
+    + '  justify-content:center;gap:5px;padding:3px 8px;border-radius:8px;'
+    + '  background:#EDF2F9;border:1px solid #D8E2EF}'
+    + '#sd-upsell-hint .sd-price-lab{font-size:10px;color:#6B7C93}'
+    + '#sd-upsell-hint .sd-price-val{font-size:16px;font-weight:800;color:#25456C}'
+    // ── кнопка
+    + '#sd-upsell-hint .sd-add{grid-area:add;width:100%;padding:8px 10px;font-size:13px;font-weight:700;'
+    + '  border-radius:9px;background:#3D7A52;display:flex;align-items:center;justify-content:center;'
+    + '  gap:5px;line-height:1.2;white-space:nowrap}'
+    + '#sd-upsell-hint .sd-add:hover{background:#336646}'
+    + '#sd-upsell-hint .sd-add.sd-done{background:#9AA6B2}'
+    + '#sd-upsell-hint .sd-sku{display:none}'   // код тепер в окремій колонці
+    // ── вузький екран: колонки згортаються у другий рядок
+    + '@media (max-width:1100px){'
+    + '  #sd-upsell-hint .sd-item{grid-template-columns:38px 1fr auto auto;'
+    + '    grid-template-areas:"img name name name" "img script script script" "img code stock price" "img add add add";'
+    + '    row-gap:5px}'
+    + '  #sd-upsell-hint .sd-add{justify-self:start;width:auto;padding:7px 14px}'
+    + '}';
   var st = document.createElement('style');
   st.textContent = css;
   (document.head || document.documentElement).appendChild(st);
+
+  // Артикул із кнопки «➕ Додати» переносимо в окрему клітинку рядка,
+  // щоб коди стояли в один стовпчик. Робимо це на пульс DOM, ідемпотентно.
+  function moveCodes() {
+    var box = document.getElementById('sd-upsell-hint'); if (!box) return;
+    [].forEach.call(box.querySelectorAll('.sd-item'), function (item) {
+      if (item.querySelector('.sd-code')) return;
+      var sku = item.querySelector('.sd-add .sd-sku'); if (!sku) return;
+      var code = document.createElement('span');
+      code.className = 'sd-code';
+      code.textContent = String(sku.textContent || '').replace(/^код\s*/i, '');
+      code.title = 'Артикул товару';
+      item.appendChild(code);
+    });
+  }
+  moveCodes();
+  window.addEventListener('lkdom', moveCodes);
 })();
 }catch(e){ try{ console.warn("[SD] модуль «lkUpsellRedesign» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkUpsellRedesign ▲▲▲ */
