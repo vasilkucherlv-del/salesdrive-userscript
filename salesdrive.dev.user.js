@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.77
+// @version      2.78
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4523,6 +4523,11 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     + '#sd-upsell-hint .sd-add:hover{background:#336646}'
     + '#sd-upsell-hint .sd-add.sd-done{background:#9AA6B2}'
     + '#sd-upsell-hint .sd-sku{display:none}'   // код тепер в окремій колонці
+    // ── Поки відкрита картка товару (чи випадайка пошуку) банер НЕ ховаємо —
+    // менеджер бачить його під вікном. Ядро ховало банер лише тому, що в нього
+    // z-index:9999 і він перекривав би модалку; опускаємо z-index — і модалка
+    // лягає зверху сама. Селектор із body — щоб перебити правило ядра.
+    + 'html.sd-modal-open body #sd-upsell-hint{display:block !important;z-index:0 !important}'
     // ── СПІЛЬНА сітка на весь банер (subgrid): колонка назви шириною рівно
     // під найдовшу назву в банері, тож наявність/ціна/кнопка стоять одразу за
     // назвами і водночас рівно одна під одною в усіх рядках.
@@ -4539,6 +4544,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     + '  #sd-upsell-hint .sd-price{grid-column:4;grid-row:1}'
     + '  #sd-upsell-hint .sd-add{grid-column:5;grid-row:1}'
     + '  #sd-upsell-hint .sd-script{grid-column:2/-1;grid-row:2}'
+    // під модалкою лишаємо ту саму сітку, лише опущений z-index (див. вище)
+    + '  html.sd-modal-open body #sd-upsell-hint{display:grid !important}'
     + '}}'
     // ── вузький екран: колонки згортаються у другий рядок
     + '@media (max-width:1100px){'
