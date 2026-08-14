@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.79
+// @version      2.78
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4220,244 +4220,6 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 }catch(e){ try{ console.warn("[SD] модуль «lkAnalogInline» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkAnalogInline ▲▲▲ */
 
-/* ▼▼▼ МОДУЛЬ-START • lkAnalogEdit — 🔁 прибрати аналоги за артикулом (без панелі /admin) ▼▼▼ */
-/* ===== Одна кнопка: вписав артикул → бачиш його аналоги → прибрав зайвий (або всі).
-   Пише в ту саму базу, що й панель /admin (models-api), тими самими запитами:
-     GET  /api/analogs?sku=       — публічний, показ (ключ не потрібен)
-     GET  /api/analogs-manual?sku= — ручний список (потрібен ключ)
-     POST /api/analogs-manual      — замінює ручний список товару
-   Звʼязок аналогів двосторонній, тож пару прибираємо з ОБОХ товарів.
-   Ключ (IMPORT_KEY) живе лише в цьому браузері (GM_setValue), у код не потрапляє. ===== */
-try{ // SD-ізоляція: помилка цього модуля не зупинить решту
-(function lkAnalogEdit(){
-  'use strict';
-  var API = 'https://models-api-production-4d71.up.railway.app';
-  var KKEY = 'lk_models_key_v1';
-
-  function gmGetV(k, d){ try{ var v=GM_getValue(k,d); return v; }catch(e){ return d; } }
-  function gmSetV(k, v){ try{ GM_setValue(k, v); }catch(e){} }
-  function req(method, url, body, key){
-    return new Promise(function(res, rej){
-      var h = { 'Accept':'application/json' };
-      if (body) h['Content-Type'] = 'application/json';
-      if (key)  h['X-Import-Key'] = key;
-      if (typeof GM_xmlhttpRequest !== 'undefined') {
-        GM_xmlhttpRequest({ method:method, url:url, headers:h,
-          data: body ? JSON.stringify(body) : undefined,
-          onload:function(r){
-            var j=null; try{ j=JSON.parse(r.responseText); }catch(_){}
-            if (r.status>=200 && r.status<300) res(j||{});
-            else rej(new Error((j&&j.error) || ('HTTP '+r.status)));
-          },
-          onerror:function(){ rej(new Error('немає звʼязку з базою моделей')); } });
-      } else {
-        fetch(url,{ method:method, headers:h, body: body?JSON.stringify(body):undefined })
-          .then(function(r){ return r.json().catch(function(){ return {}; })
-            .then(function(j){ if(r.ok) return j; throw new Error(j.error||('HTTP '+r.status)); }); })
-          .then(res, rej);
-      }
-    });
-  }
-  function analogsOf(sku){ return req('GET', API+'/api/analogs?sku='+encodeURIComponent(sku)); }
-  function manualOf(sku, key){ return req('GET', API+'/api/analogs-manual?sku='+encodeURIComponent(sku), null, key); }
-  function saveManual(sku, list, excl, key){
-    return req('POST', API+'/api/analogs-manual', { sku:String(sku), analogs:list, exclude:excl }, key);
-  }
-  function namesOf(skus){
-    if (!skus.length) return Promise.resolve({});
-    return req('GET', API+'/api/cards?skus='+encodeURIComponent(skus.join(',')))
-      .then(function(d){ var m={}; ((d&&d.cards)||[]).forEach(function(c){ m[String(c.sku)]=c.name||''; }); return m; })
-      .catch(function(){ return {}; });
-  }
-  // прибрати ОДНУ пару: з обох боків, бо звʼязок двосторонній
-  function dropPair(a, b, key){
-    return manualOf(a, key).then(function(ma){
-      var la = (ma.direct||[]).filter(function(x){ return String(x)!==String(b); });
-      return saveManual(a, la, ma.exclude||[], key);
-    }).then(function(){
-      return manualOf(b, key).then(function(mb){
-        var lb = (mb.direct||[]).filter(function(x){ return String(x)!==String(a); });
-        return saveManual(b, lb, mb.exclude||[], key);
-      });
-    });
-  }
-  // прибрати ВСІ аналоги товару: свій список + згадки про нього в чужих
-  function dropAll(sku, key){
-    return manualOf(sku, key).then(function(m){
-      var back = (m.reverse||[]).slice();
-      return saveManual(sku, [], m.exclude||[], key).then(function(){
-        return back.reduce(function(p, r){
-          return p.then(function(){
-            return manualOf(r, key).then(function(mr){
-              var l=(mr.direct||[]).filter(function(x){ return String(x)!==String(sku); });
-              return saveManual(r, l, mr.exclude||[], key);
-            });
-          });
-        }, Promise.resolve());
-      });
-    });
-  }
-
-  var css = ''
-    +'#lk-anx-btn{position:fixed;right:20px;bottom:236px;z-index:2147483600;width:46px;height:46px;'
-    +'  border:none;border-radius:50%;background:#00897B;color:#fff;font-size:20px;cursor:pointer;'
-    +'  box-shadow:0 3px 12px rgba(0,0,0,.28)}'
-    +'#lk-anx-btn:hover{background:#00695C}'
-    +'#lk-anx{position:fixed;right:20px;bottom:74px;z-index:2147483601;width:430px;max-width:calc(100vw - 40px);'
-    +'  max-height:78vh;display:flex;flex-direction:column;background:#fff;border:1px solid #cfd8d7;'
-    +'  border-radius:12px;box-shadow:0 10px 34px rgba(0,0,0,.3);overflow:hidden;'
-    +'  font:13px/1.5 -apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#12312e}'
-    +'#lk-anx .hd{display:flex;align-items:center;justify-content:space-between;padding:11px 13px;'
-    +'  background:#00897B;color:#fff;font-weight:700}'
-    +'#lk-anx .hd button{border:none;background:none;color:#fff;font-size:22px;line-height:1;cursor:pointer}'
-    +'#lk-anx .bd{padding:12px 13px 14px;overflow:auto}'
-    +'#lk-anx label{display:block;font-weight:600;margin:8px 0 4px;color:#33514e}'
-    +'#lk-anx input[type=text],#lk-anx input[type=password]{width:100%;box-sizing:border-box;padding:8px 10px;'
-    +'  border:1px solid #c8d4d3;border-radius:7px;font-size:14px;outline:none}'
-    +'#lk-anx input:focus{border-color:#00897B}'
-    +'#lk-anx .row{display:flex;gap:8px;align-items:center}'
-    +'#lk-anx .row input{flex:1 1 auto}'
-    +'#lk-anx button.go{border:none;border-radius:7px;background:#00897B;color:#fff;font-weight:700;'
-    +'  padding:8px 14px;cursor:pointer;white-space:nowrap}'
-    +'#lk-anx button.go:hover{background:#00695c}'
-    +'#lk-anx button.go[disabled]{background:#9e9e9e;cursor:default}'
-    +'#lk-anx button.wipe{width:100%;margin-top:10px;border:1px solid #c62828;background:#fff;color:#c62828;'
-    +'  font-weight:700;border-radius:7px;padding:8px 12px;cursor:pointer}'
-    +'#lk-anx button.wipe:hover{background:#fdecea}'
-    +'#lk-anx .lst{margin-top:10px;border:1px solid #cde3e0;border-radius:8px;overflow:hidden}'
-    +'#lk-anx .lst .r{display:flex;align-items:center;gap:8px;padding:7px 9px;border-top:1px solid #e3f0ee}'
-    +'#lk-anx .lst .r:first-child{border-top:none}'
-    +'#lk-anx .lst .r .nm{flex:1 1 auto;min-width:0;overflow-wrap:anywhere}'
-    +'#lk-anx .lst .r .cd{font:600 11px/1.3 ui-monospace,Menlo,Consolas,monospace;color:#00787a;'
-    +'  background:#e8f4f2;border:1px solid #cbe3e0;border-radius:5px;padding:1px 6px;white-space:nowrap}'
-    +'#lk-anx .lst .r .del{border:1px solid #e0b4b4;background:#fff;color:#c62828;border-radius:6px;'
-    +'  padding:3px 9px;font-weight:700;cursor:pointer;white-space:nowrap;flex:0 0 auto}'
-    +'#lk-anx .lst .r .del:hover{background:#fdecea}'
-    +'#lk-anx .keyrow{margin-top:12px;padding-top:10px;border-top:1px dashed #cde3e0}'
-    +'#lk-anx .rem{display:flex;align-items:center;gap:6px;font-weight:400;margin-top:6px;color:#54706d}'
-    +'#lk-anx .msg{margin-top:10px;white-space:pre-wrap}'
-    +'#lk-anx .msg.ok{color:#1b5e20}#lk-anx .msg.bad{color:#b00020}#lk-anx .msg.wait{color:#666}';
-  var st=document.createElement('style'); st.textContent=css;
-  (document.head||document.documentElement).appendChild(st);
-
-  var panel=null, curSku='';
-
-  function msg(cls, t){
-    var m=panel && panel.querySelector('.msg'); if(!m) return;
-    m.className='msg '+(cls||''); m.textContent=t||'';
-  }
-  function keyVal(){ return (panel.querySelector('#lk-anx-key').value||'').trim(); }
-
-  function render(sku, items, names){
-    var box=panel.querySelector('#lk-anx-list');
-    box.textContent='';
-    if(!items.length){ msg('ok','У товару '+sku+' аналогів немає.'); return; }
-    var lst=document.createElement('div'); lst.className='lst';
-    items.forEach(function(it){
-      var r=document.createElement('div'); r.className='r';
-      var nm=document.createElement('div'); nm.className='nm';
-      nm.textContent=names[String(it.sku)]||'(немає такого артикула в базі)';
-      var cd=document.createElement('span'); cd.className='cd'; cd.textContent=it.sku;
-      var del=document.createElement('button'); del.className='del'; del.type='button'; del.textContent='✕ прибрати';
-      del.onclick=function(){
-        var k=keyVal();
-        if(!k){ msg('bad','Спершу впиши ключ (IMPORT_KEY) внизу.'); return; }
-        if(!confirm('Прибрати аналог '+it.sku+' у товару '+sku+'?\n(звʼязок двосторонній — приберемо з обох)')) return;
-        del.disabled=true; msg('wait','Прибираю…');
-        dropPair(sku, it.sku, k).then(function(){
-          msg('ok','Готово: '+it.sku+' більше не аналог до '+sku+'.');
-          forgetCache(); show(sku);
-        }, function(e){ del.disabled=false; msg('bad', errText(e)); });
-      };
-      r.appendChild(nm); r.appendChild(cd); r.appendChild(del);
-      lst.appendChild(r);
-    });
-    box.appendChild(lst);
-    msg('ok','Аналогів у товару '+sku+': '+items.length+'.');
-  }
-  function errText(e){
-    var t=String((e&&e.message)||e||'помилка');
-    if(t==='bad_key') return 'Невірний ключ (IMPORT_KEY).';
-    return 'Помилка: '+t;
-  }
-  // скинути кеш аналогів скрипта, щоб зміни було видно одразу, а не за хвилину
-  function forgetCache(){ try{ GM_setValue('sd_analog_cache_v1', null); }catch(e){} }
-
-  function show(sku){
-    sku=String(sku||'').trim(); if(!sku) return;
-    curSku=sku; msg('wait','Дивлюсь…');
-    panel.querySelector('#lk-anx-list').textContent='';
-    analogsOf(sku).then(function(d){
-      var items=((d&&d.items)||[]);
-      return namesOf(items.map(function(x){ return String(x.sku); })).then(function(nm){
-        render(sku, items, nm);
-      });
-    }, function(e){ msg('bad', errText(e)); });
-  }
-
-  function build(){
-    if(panel) return panel;
-    panel=document.createElement('div'); panel.id='lk-anx';
-    var hd=document.createElement('div'); hd.className='hd';
-    var t=document.createElement('span'); t.textContent='🔁 Аналоги товару';
-    var x=document.createElement('button'); x.type='button'; x.textContent='×';
-    x.onclick=function(){ panel.style.display='none'; };
-    hd.appendChild(t); hd.appendChild(x);
-    var bd=document.createElement('div'); bd.className='bd';
-    bd.innerHTML=''
-      +'<label>Артикул товару</label>'
-      +'<div class="row"><input id="lk-anx-sku" type="text" placeholder="напр. 097">'
-      +'<button class="go" id="lk-anx-show" type="button">Показати</button></div>'
-      +'<div id="lk-anx-list"></div>'
-      +'<button class="wipe" id="lk-anx-wipe" type="button">🗑 Прибрати ВСІ аналоги цього товару</button>'
-      +'<div class="keyrow"><label>Ключ (IMPORT_KEY)</label>'
-      +'<input id="lk-anx-key" type="password" autocomplete="off" placeholder="потрібен лише для видалення">'
-      +'<label class="rem"><input id="lk-anx-rem" type="checkbox"> памʼятати в цьому браузері</label></div>'
-      +'<div class="msg"></div>';
-    panel.appendChild(hd); panel.appendChild(bd);
-    document.body.appendChild(panel);
-
-    var saved=gmGetV(KKEY,'');
-    if(saved){ panel.querySelector('#lk-anx-key').value=saved; panel.querySelector('#lk-anx-rem').checked=true; }
-    panel.querySelector('#lk-anx-rem').onchange=function(){
-      gmSetV(KKEY, this.checked ? keyVal() : '');
-    };
-    panel.querySelector('#lk-anx-key').onchange=function(){
-      if(panel.querySelector('#lk-anx-rem').checked) gmSetV(KKEY, keyVal());
-    };
-    panel.querySelector('#lk-anx-show').onclick=function(){ show(panel.querySelector('#lk-anx-sku').value); };
-    panel.querySelector('#lk-anx-sku').onkeydown=function(e){
-      if(e.key==='Enter'){ e.preventDefault(); show(this.value); }
-    };
-    panel.querySelector('#lk-anx-wipe').onclick=function(){
-      var sku=(panel.querySelector('#lk-anx-sku').value||'').trim();
-      if(!sku){ msg('bad','Впиши артикул.'); return; }
-      var k=keyVal();
-      if(!k){ msg('bad','Спершу впиши ключ (IMPORT_KEY) внизу.'); return; }
-      if(!confirm('Прибрати ВСІ аналоги товару '+sku+'?\nЦе прибере його і зі списків тих товарів, де він стоїть аналогом.')) return;
-      msg('wait','Прибираю…');
-      dropAll(sku, k).then(function(){
-        msg('ok','Готово: у товару '+sku+' аналогів більше немає.');
-        forgetCache(); show(sku);
-      }, function(e){ msg('bad', errText(e)); });
-    };
-    return panel;
-  }
-
-  var btn=document.createElement('button');
-  btn.id='lk-anx-btn'; btn.type='button'; btn.title='Аналоги товару: показати / прибрати';
-  btn.textContent='🔁';
-  btn.onclick=function(){
-    build();
-    var open = panel.style.display === 'flex';
-    panel.style.display = open ? 'none' : 'flex';
-    if(!open){ var f=panel.querySelector('#lk-anx-sku'); if(f) f.focus(); }
-  };
-  (document.body||document.documentElement).appendChild(btn);
-})();
-}catch(e){ try{ console.warn("[SD] модуль «lkAnalogEdit» не запустився:", e); }catch(_){} }
-/* ▲▲▲ МОДУЛЬ-END • lkAnalogEdit ▲▲▲ */
-
 
 /* ▼▼▼ МОДУЛЬ-START • lkModalKits — Картка товару (модалка): рядок «Входить у набори» ▼▼▼ */
 /* ===== Картка товару (модалка): рядок «Входить у набори» (джерело: баркод, ключ — ID) ===== */
@@ -8199,8 +7961,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     { id:'lk-side-cash', btn:'lk-cash-btn', ico:'💰', lab:'Каса',                      title:'Каса самовивозу' },
     { id:'lk-side-pick', btn:'lk-pick-btn', ico:'📋', lab:'Лист комплектації',         title:'Зведений лист комплектації' },
     { id:'lk-side-ukp',  btn:'lk-ukp-btn',  ico:'📮', lab:'Друк пром-оплата + Укрпошта', title:'Друк: пром-оплата + Укрпошта (лист відправлень)' },
-    { id:'lk-side-where',btn:'lk-where-btn',ico:'🔎', lab:'Де товар',                    title:'Де товар: у яких заявках висить код (з комплектами)' },
-    { id:'lk-side-anx',  btn:'lk-anx-btn',  ico:'🔁', lab:'Аналоги',                     title:'Аналоги товару: показати / прибрати за артикулом' }
+    { id:'lk-side-where',btn:'lk-where-btn',ico:'🔎', lab:'Де товар',                    title:'Де товар: у яких заявках висить код (з комплектами)' }
   ];
 
   var css = ''
@@ -8216,7 +7977,6 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     // (lk-side-on) — щоб на завантаженні вони не блимали перед перенесенням у меню
     +'html.lk-side-boot #lk-cash-btn,html.lk-side-boot #lk-pick-btn,html.lk-side-boot #lk-ukp-btn,'
     +'html.lk-side-boot #lk-where-btn,html.lk-side-on #lk-where-btn,'
-    +'html.lk-side-boot #lk-anx-btn,html.lk-side-on #lk-anx-btn,'
     +'html.lk-side-on #lk-cash-btn,html.lk-side-on #lk-pick-btn,html.lk-side-on #lk-ukp-btn{display:none!important}';
   var st=document.createElement('style'); st.textContent=css;
   (document.head||document.documentElement).appendChild(st);
