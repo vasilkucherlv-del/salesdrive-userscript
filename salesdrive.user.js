@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      2.67
+// @version      2.68
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -283,8 +283,11 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   // Аналоги (якір + аналоги-заміни). ОКРЕМА таблиця — встав сюди її ID.
   // Колонки такі ж, як у допродажів: 0=код якоря, 1=назва якоря, 2=код аналога, 3=назва аналога, 4=примітка.
   // Поки ID порожній — функція аналогів просто не показується (без помилок).
-  var ANALOG_SHEET_ID = "1S9DN1lNw7wanmJSHCOY9l3dQ9plSBnEPGHWreK_p20c"; // таблиця аналогів
-  var ANALOG_GID = "0";
+  // Аналоги більше НЕ з Google-таблиці, а прямо з models-api (єдине джерело —
+  // /admin на сайті). Причина: IMPORTDATA/Таблиці зʼїдають провідні нулі —
+  // 01082 стає 1082, 0485 стає 485, і код перестає збігатися з СРМ.
+  // Сервер віддає коди текстом, тому нулі зберігаються.
+  var ANALOG_API_URL = "https://models-api-production-4d71.up.railway.app/api/analogs.csv?sep=,";
   var TTL_MS = 60 * 1000;
 
   function gvizUrl(id, gid) {
@@ -337,6 +340,39 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   }
 
   // Аналоги: та сама структура, що й допродажі (анкер + заміна).
+  // Розбір CSV з /api/analogs.csv: колонки ті самі, що були в таблиці —
+  // 0=код якоря, 1=назва якоря, 2=код аналога, 3=назва аналога, 4=примітка.
+  // Свій розбірник, бо в назвах трапляються коми ("Karcher Puzzi 100,200").
+  function csvRows(text) {
+    var t = String(text || "").replace(/^\ufeff/, "");
+    var rows = [], row = [], cell = "", q = false;
+    for (var i = 0; i < t.length; i++) {
+      var c = t.charAt(i);
+      if (q) {
+        if (c === '"') { if (t.charAt(i + 1) === '"') { cell += '"'; i++; } else q = false; }
+        else cell += c;
+      } else if (c === '"') q = true;
+      else if (c === ",") { row.push(cell); cell = ""; }
+      else if (c === "\n") { row.push(cell); rows.push(row); row = []; cell = ""; }
+      else if (c !== "\r") cell += c;
+    }
+    if (cell.length || row.length) { row.push(cell); rows.push(row); }
+    return rows;
+  }
+  function parseAnalogCsv(text) {
+    var rows = csvRows(text), out = [];
+    for (var i = 1; i < rows.length; i++) {           // рядок 0 — заголовки
+      var r = rows[i] || [];
+      var anchorCode = String(r[0] || "").trim();
+      var anchorName = String(r[1] || "").trim();
+      var compCode = String(r[2] || "").trim();
+      var compName = String(r[3] || "").trim();
+      var script = String(r[4] || "").trim();
+      if (!anchorName || !compCode) continue;
+      out.push({ ak: anchorCode, a: anchorName, sku: compCode, c: compName, s: script });
+    }
+    return out;
+  }
   function parseAnalog(text) {
     var s = text.indexOf("{");
     var e = text.lastIndexOf("}");
@@ -415,8 +451,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   function getMap(force) { return swrGet("sd_upsell_cache_v1", "pairs", fetchMapFresh, force); }
 
   function fetchAnalogFresh() {
-    return gmFetch(gvizUrl(ANALOG_SHEET_ID, ANALOG_GID)).then(function (txt) {
-      var pairs = parseAnalog(txt);
+    return gmFetch(ANALOG_API_URL).then(function (txt) {
+      var pairs = parseAnalogCsv(txt);
       if (!pairs.length) throw new Error("у таблиці 0 придатних рядків");
       gmSetJSON("sd_analog_cache_v1", { ts: Date.now(), pairs: pairs });
       return { pairs: pairs, source: "sheet" };
@@ -424,7 +460,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   }
   function getAnalog(force) {
     // не налаштовано — мовчки повертаємо порожньо (банер аналогів не зʼявиться)
-    if (!ANALOG_SHEET_ID) return Promise.resolve({ pairs: [], source: "disabled" });
+    if (!ANALOG_API_URL) return Promise.resolve({ pairs: [], source: "disabled" });
     return swrGet("sd_analog_cache_v1", "pairs", fetchAnalogFresh, force);
   }
 
@@ -5893,6 +5929,163 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 })();
 }catch(e){ try{ console.warn("[SD] модуль «lkOrderTier» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkOrderTier ▲▲▲ */
+
+/* ▼▼▼ МОДУЛЬ-START • lkNpDescr — 📋 шаблони опису у формі ТТН Нової пошти ▼▼▼ */
+/* ===== У формі «Сформувати ТТН» поле «Опис» СРМ заповнює переліком усіх товарів —
+   це майже завжди більше за ліміт у 100 символів, і менеджер стирає його руками.
+   Даємо кнопки-шаблони (один клік — і поле готове) та лічильник символів.
+   Список шаблонів редагує сам менеджер («✎ шаблони»), зберігається в браузері.
+   Нічого не зберігаємо і ТТН не створюємо — це робить менеджер. ===== */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
+(function lkNpDescr(){
+  'use strict';
+  var KEY='lk_npdescr_tpl_v1';
+  var DEF=['запчастини'];             // шаблон за замовчуванням
+  var MAX=100;                        // ліміт опису в Новій пошті
+
+  var css=''
+    +'.lk-npd{margin:4px 0 2px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;'
+    +'  font:12.5px/1.5 -apple-system,Segoe UI,Roboto,Arial,sans-serif}'
+    +'.lk-npd button{padding:4px 12px;border:1px solid #1565C0;border-radius:6px;background:#e8f0fe;'
+    +'  color:#0d47a1;font:700 12.5px/1.4 Arial,sans-serif;cursor:pointer}'
+    +'.lk-npd button:hover{background:#d4e4fd}'
+    +'.lk-npd button.edit{border-color:#90a4ae;background:#f4f6f8;color:#455a64;font-weight:600}'
+    +'.lk-npd .cnt{color:#777}'
+    +'.lk-npd .cnt.bad{color:#B71C1C;font-weight:700}'
+    +'.lk-npd-ed{margin:4px 0 6px;padding:8px 10px;border-left:3px solid #1565C0;background:#f2f7ff;'
+    +'  border-radius:5px;font:12.5px/1.5 -apple-system,Segoe UI,Roboto,Arial,sans-serif}'
+    +'.lk-npd-ed textarea{width:100%;box-sizing:border-box;min-height:78px;padding:6px 8px;'
+    +'  border:1px solid #b0bec5;border-radius:5px;font:13px/1.5 Arial,sans-serif;resize:vertical}'
+    +'.lk-npd-ed .hint{color:#607d8b;margin-bottom:4px}'
+    +'.lk-npd-ed .act{margin-top:6px;display:flex;gap:8px;align-items:center}'
+    +'.lk-npd-ed .act button{padding:4px 14px}'
+    +'.lk-npd-ed .act .save{background:#2E7D32;border-color:#2E7D32;color:#fff}'
+    +'.lk-npd-ed .act .save:hover{background:#256628}'
+    +'.lk-npd-ed .warn{color:#B71C1C;font-weight:700}';
+  var st=document.createElement('style'); st.textContent=css;
+  (document.head||document.documentElement).appendChild(st);
+
+  function load(){
+    try{
+      var a=JSON.parse(localStorage.getItem(KEY));
+      if(Array.isArray(a) && a.length) return a.filter(function(x){ return String(x||'').trim(); });
+    }catch(e){}
+    return DEF.slice();
+  }
+  function save(list){ try{ localStorage.setItem(KEY, JSON.stringify(list)); }catch(e){} }
+
+  // запис у поле так, щоб Angular побачив зміну (ng-model)
+  function setVal(el, txt){
+    try{
+      var d=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el),'value');
+      if(d && d.set) d.set.call(el, txt); else el.value=txt;
+    }catch(e){ el.value=txt; }
+    el.dispatchEvent(new Event('input',{bubbles:true}));
+    el.dispatchEvent(new Event('change',{bubbles:true}));
+  }
+
+  function mount(){
+    var ta=document.getElementById('descriptionNovaPoshta');
+    if(!ta){                                   // форму закрили — прибираємо панель
+      [].forEach.call(document.querySelectorAll('.lk-npd,.lk-npd-ed'), function(n){ n.remove(); });
+      return;
+    }
+    var box=ta.closest('.form-group')||ta.parentElement;
+    var bar=box.querySelector('.lk-npd');
+    if(!bar){
+      bar=document.createElement('div'); bar.className='lk-npd';
+      ta.insertAdjacentElement('afterend', bar);
+    }
+
+    function count(){
+      var n=String(ta.value||'').length;
+      var cn=bar.querySelector('.cnt'); if(!cn) return;
+      var txt=n+' / '+MAX+(n>MAX?' — задовго, ТТН не сформується':'');
+      var cls='cnt'+(n>MAX?' bad':'');
+      if(cn.textContent!==txt) cn.textContent=txt;
+      if(cn.className!==cls) cn.className=cls;
+    }
+
+    // перемальовуємо кнопки лише коли список шаблонів справді змінився
+    function draw(){
+      var list=load();
+      var sig=JSON.stringify(list);
+      if(bar.getAttribute('data-sig')!==sig){
+        bar.setAttribute('data-sig', sig);
+        bar.innerHTML='';
+        list.forEach(function(t){
+          var b=document.createElement('button'); b.type='button';
+          b.textContent=t.length>28?(t.slice(0,26)+'…'):t;
+          b.title='Підставити в опис: «'+t+'»'+(t.length>MAX?' ⚠ довше за '+MAX+' символів':'');
+          b.addEventListener('click',function(e){
+            e.preventDefault(); e.stopPropagation();
+            setVal(ta, t); count();
+            try{ ta.focus(); }catch(err){}
+          });
+          bar.appendChild(b);
+        });
+        var ed=document.createElement('button'); ed.type='button'; ed.className='edit';
+        ed.textContent='✎ шаблони'; ed.title='Додати / змінити свої шаблони опису';
+        ed.addEventListener('click',function(e){ e.preventDefault(); e.stopPropagation(); editor(); });
+        bar.appendChild(ed);
+        var cnt=document.createElement('span'); cnt.className='cnt';
+        bar.appendChild(cnt);
+      }
+      count();
+    }
+
+    function editor(){
+      var old=box.querySelector('.lk-npd-ed');
+      if(old){ old.remove(); return; }                 // друге натискання — закрити
+      var wrap=document.createElement('div'); wrap.className='lk-npd-ed';
+      var hint=document.createElement('div'); hint.className='hint';
+      hint.textContent='Один шаблон — один рядок (ліміт Нової пошти: '+MAX+' символів).';
+      var area=document.createElement('textarea');
+      area.value=load().join('\n');
+      var act=document.createElement('div'); act.className='act';
+      var sv=document.createElement('button'); sv.type='button'; sv.className='save'; sv.textContent='Зберегти';
+      var cl=document.createElement('button'); cl.type='button'; cl.textContent='Скасувати';
+      var msg=document.createElement('span');
+      act.appendChild(sv); act.appendChild(cl); act.appendChild(msg);
+      wrap.appendChild(hint); wrap.appendChild(area); wrap.appendChild(act);
+      bar.insertAdjacentElement('afterend', wrap);
+      area.focus();
+      cl.addEventListener('click',function(e){ e.preventDefault(); e.stopPropagation(); wrap.remove(); });
+      sv.addEventListener('click',function(e){
+        e.preventDefault(); e.stopPropagation();
+        var list=[], seen={};
+        String(area.value||'').split('\n').forEach(function(ln){
+          var t=ln.replace(/\s+/g,' ').trim();
+          if(!t || seen[t]) return;
+          seen[t]=1; list.push(t);
+        });
+        if(!list.length){ msg.className='warn'; msg.textContent='порожньо — лишаю як було'; return; }
+        var longs=list.filter(function(t){ return t.length>MAX; });
+        save(list);
+        draw();
+        wrap.remove();
+        if(longs.length){
+          var c=bar.querySelector('.cnt');
+          if(c){ c.className='cnt bad'; c.textContent='⚠ довші за '+MAX+' символів: '+longs.length; }
+        }
+      });
+    }
+
+    draw();
+    if(!ta.getAttribute('data-lk-npd')){
+      ta.setAttribute('data-lk-npd','1');
+      ta.addEventListener('input', count);
+      ta.addEventListener('keyup', count);
+    }
+  }
+
+  var t=null;
+  function soon(){ clearTimeout(t); t=setTimeout(mount,250); }
+  soon();
+  window.addEventListener('lkdom', soon);
+})();
+}catch(e){ try{ console.warn("[SD] модуль «lkNpDescr» не запустився:", e); }catch(_){} }
+/* ▲▲▲ МОДУЛЬ-END • lkNpDescr ▲▲▲ */
 
 /* ▼▼▼ МОДУЛЬ-START • lkRozCommission — ⚖ комісія Rozetka для дописаних товарів ▼▼▼ */
 /* ===== У Rozetka-замовленні товар, доданий менеджером, приходить із нульовою
