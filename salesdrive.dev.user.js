@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.78
+// @version      2.79
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -1959,7 +1959,7 @@ function __sdPageMain() {
 
     var vm = got.vm,
       scope = got.scope;
-    dbg("preSale=", vm.preSale, "| hasAddOption=", typeof vm.addOption);
+    dbg("upsell/preSale=", vm.upsell, "/", vm.preSale, "| hasAddOption=", typeof vm.addOption);
 
     if (
       typeof vm.getAutocomplete !== "function" ||
@@ -2012,6 +2012,20 @@ function __sdPageMain() {
             }
           }
 
+          // Прапорець «допродаж» у доданому рядку заявки.
+          // SalesDrive перейменовує поле preSale -> upsell (в API списку заявок і у
+          // вебхуках це вже зроблено; у моделі форми може змінитись будь-коли).
+          // Тому ставимо те поле, яке реально є на рядку, а якщо жодного — обидва.
+          function markUpsell(row, on) {
+            if (!row) return;
+            var v = on ? 1 : 0, hit = false;
+            try {
+              if ("upsell" in row) { row.upsell = v; hit = true; }
+              if ("preSale" in row) { row.preSale = v; hit = true; }
+              if (!hit) { row.upsell = v; row.preSale = v; }
+            } catch (e) {}
+          }
+
           // "розігріваємо" рядок додавання (у відкритій заявці він холодний)
           try { var inp = findInput(); if (inp) inp.focus(); } catch (e) {}
 
@@ -2026,7 +2040,7 @@ function __sdPageMain() {
                   var b0 = (vm.items || []).length;
                   vm.addOption(!asRegular);
                   var a0 = (vm.items || []).length;
-                  if (a0 > b0) { vm.items[a0 - 1].preSale = asRegular ? 0 : 1; fixRozPrice(vm.items[a0 - 1]); added = true; return; }
+                  if (a0 > b0) { markUpsell(vm.items[a0 - 1], !asRegular); fixRozPrice(vm.items[a0 - 1]); added = true; return; }
                   try { vm.addAttribute = {}; } catch (e) {} // не зафіксувати "хвіст" нижче
                 }
                 // якщо лежить ІНШИЙ товар (якір із пошуку) — зафіксувати його нормально
@@ -2037,7 +2051,7 @@ function __sdPageMain() {
                 if (!vm.addAttribute || !vm.addAttribute.productId) vm.addAttribute = item;
                 vm.addOption(!asRegular);
                 var after = (vm.items || []).length;
-                if (after > before) { vm.items[after - 1].preSale = asRegular ? 0 : 1; fixRozPrice(vm.items[after - 1]); added = true; }
+                if (after > before) { markUpsell(vm.items[after - 1], !asRegular); fixRozPrice(vm.items[after - 1]); added = true; }
               });
             } catch (e) {}
             return added;
