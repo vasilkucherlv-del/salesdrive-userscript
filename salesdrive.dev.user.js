@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.75
+// @version      2.76
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4498,6 +4498,11 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     + '  font:700 12px/1.4 ui-monospace,Menlo,Consolas,monospace;color:#34485F;'
     + '  background:#E7EEF8;border:1px solid #CBD9EA;border-radius:5px;padding:1px 6px;'
     + '  text-transform:none;letter-spacing:0}'
+    // ── назва-посилання на картку товару (артикул усередині нього ж).
+    // Підкреслення не переходить на артикул: він inline-block.
+    + '#sd-upsell-hint .sd-nlink{color:inherit;text-decoration:none;cursor:pointer}'
+    + '#sd-upsell-hint .sd-nlink:hover{color:#0F5FA8;text-decoration:underline}'
+    + '#sd-upsell-hint .sd-nlink:hover .sd-code{background:#DCE8F7;border-color:#A9C4E4;color:#1A4F86}'
     // ── наявність
     + '#sd-upsell-hint .sd-stock{grid-area:stock;justify-self:start;font-size:12px;font-weight:700;'
     + '  padding:3px 9px;border-radius:999px;white-space:nowrap}'
@@ -4546,23 +4551,42 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   st.textContent = css;
   (document.head || document.documentElement).appendChild(st);
 
-  // Артикул із кнопки «➕ Додати» переносимо в окрему клітинку рядка,
-  // щоб коди стояли в один стовпчик. Робимо це на пульс DOM, ідемпотентно.
-  function moveCodes() {
+  // Назву разом з артикулом робимо посиланням на КАРТКУ товару.
+  // Відкриваємо в новій вкладці — щоб менеджер не втратив незбережену заявку.
+  // ID товару за кодом дістає модуль lkProdLink (внутрішній довідник СРМ, кеш
+  // на добу); поки ID невідомий — веде в каталог, відфільтрований по цьому коду.
+  function prodHref(sku) {
+    try { if (window.sdProdLink && window.sdProdLink.url) return window.sdProdLink.url(sku, false); } catch (e) {}
+    return '/ua/index.html?formId=1#/product/index?filter%5Bsku%5D=' + encodeURIComponent(sku);
+  }
+  // Артикул із кнопки «➕ Додати» переносимо до назви, а саму назву загортаємо
+  // в посилання. Робимо це на пульс DOM, ідемпотентно.
+  function decorate() {
     var box = document.getElementById('sd-upsell-hint'); if (!box) return;
     [].forEach.call(box.querySelectorAll('.sd-item'), function (item) {
-      if (item.querySelector('.sd-code')) return;
-      var sku = item.querySelector('.sd-add .sd-sku'); if (!sku) return;
+      if (item.querySelector('.sd-nlink')) return;
+      var skuEl = item.querySelector('.sd-add .sd-sku'); if (!skuEl) return;
+      var sku = String(skuEl.textContent || '').replace(/^код\s*/i, '').trim();
+      var nameEl = item.querySelector('.sd-name'); if (!nameEl || !sku) return;
+      var a = document.createElement('a');
+      a.className = 'sd-nlink';
+      a.setAttribute('data-sd-sku', sku);
+      a.setAttribute('data-sd-kit', '0');      // супутній — звичайний товар, не набір
+      a.setAttribute('href', prodHref(sku));
+      a.setAttribute('target', '_blank');
+      a.setAttribute('rel', 'noopener');
+      a.title = 'Відкрити картку товару в новій вкладці';
+      while (nameEl.firstChild) a.appendChild(nameEl.firstChild);
       var code = document.createElement('span');
       code.className = 'sd-code';
-      code.textContent = String(sku.textContent || '').replace(/^код\s*/i, '');
-      code.title = 'Артикул товару';
-      var nameEl = item.querySelector('.sd-name');
-      if (nameEl) nameEl.appendChild(code); else item.appendChild(code);
+      code.textContent = sku;
+      a.appendChild(code);
+      nameEl.appendChild(a);
     });
+    try { if (window.sdProdLink && window.sdProdLink.paint) window.sdProdLink.paint(); } catch (e) {}
   }
-  moveCodes();
-  window.addEventListener('lkdom', moveCodes);
+  decorate();
+  window.addEventListener('lkdom', decorate);
 })();
 }catch(e){ try{ console.warn("[SD] модуль «lkUpsellRedesign» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkUpsellRedesign ▲▲▲ */
