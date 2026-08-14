@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.69
+// @version      2.70
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -283,8 +283,11 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   // Аналоги (якір + аналоги-заміни). ОКРЕМА таблиця — встав сюди її ID.
   // Колонки такі ж, як у допродажів: 0=код якоря, 1=назва якоря, 2=код аналога, 3=назва аналога, 4=примітка.
   // Поки ID порожній — функція аналогів просто не показується (без помилок).
-  var ANALOG_SHEET_ID = "1S9DN1lNw7wanmJSHCOY9l3dQ9plSBnEPGHWreK_p20c"; // таблиця аналогів
-  var ANALOG_GID = "0";
+  // Аналоги більше НЕ з Google-таблиці, а прямо з models-api (єдине джерело —
+  // /admin на сайті). Причина: IMPORTDATA/Таблиці зʼїдають провідні нулі —
+  // 01082 стає 1082, 0485 стає 485, і код перестає збігатися з СРМ.
+  // Сервер віддає коди текстом, тому нулі зберігаються.
+  var ANALOG_API_URL = "https://models-api-production-4d71.up.railway.app/api/analogs.csv?sep=,";
   var TTL_MS = 60 * 1000;
 
   function gvizUrl(id, gid) {
@@ -337,6 +340,39 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   }
 
   // Аналоги: та сама структура, що й допродажі (анкер + заміна).
+  // Розбір CSV з /api/analogs.csv: колонки ті самі, що були в таблиці —
+  // 0=код якоря, 1=назва якоря, 2=код аналога, 3=назва аналога, 4=примітка.
+  // Свій розбірник, бо в назвах трапляються коми ("Karcher Puzzi 100,200").
+  function csvRows(text) {
+    var t = String(text || "").replace(/^\ufeff/, "");
+    var rows = [], row = [], cell = "", q = false;
+    for (var i = 0; i < t.length; i++) {
+      var c = t.charAt(i);
+      if (q) {
+        if (c === '"') { if (t.charAt(i + 1) === '"') { cell += '"'; i++; } else q = false; }
+        else cell += c;
+      } else if (c === '"') q = true;
+      else if (c === ",") { row.push(cell); cell = ""; }
+      else if (c === "\n") { row.push(cell); rows.push(row); row = []; cell = ""; }
+      else if (c !== "\r") cell += c;
+    }
+    if (cell.length || row.length) { row.push(cell); rows.push(row); }
+    return rows;
+  }
+  function parseAnalogCsv(text) {
+    var rows = csvRows(text), out = [];
+    for (var i = 1; i < rows.length; i++) {           // рядок 0 — заголовки
+      var r = rows[i] || [];
+      var anchorCode = String(r[0] || "").trim();
+      var anchorName = String(r[1] || "").trim();
+      var compCode = String(r[2] || "").trim();
+      var compName = String(r[3] || "").trim();
+      var script = String(r[4] || "").trim();
+      if (!anchorName || !compCode) continue;
+      out.push({ ak: anchorCode, a: anchorName, sku: compCode, c: compName, s: script });
+    }
+    return out;
+  }
   function parseAnalog(text) {
     var s = text.indexOf("{");
     var e = text.lastIndexOf("}");
@@ -415,8 +451,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   function getMap(force) { return swrGet("sd_upsell_cache_v1", "pairs", fetchMapFresh, force); }
 
   function fetchAnalogFresh() {
-    return gmFetch(gvizUrl(ANALOG_SHEET_ID, ANALOG_GID)).then(function (txt) {
-      var pairs = parseAnalog(txt);
+    return gmFetch(ANALOG_API_URL).then(function (txt) {
+      var pairs = parseAnalogCsv(txt);
       if (!pairs.length) throw new Error("у таблиці 0 придатних рядків");
       gmSetJSON("sd_analog_cache_v1", { ts: Date.now(), pairs: pairs });
       return { pairs: pairs, source: "sheet" };
@@ -424,7 +460,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   }
   function getAnalog(force) {
     // не налаштовано — мовчки повертаємо порожньо (банер аналогів не зʼявиться)
-    if (!ANALOG_SHEET_ID) return Promise.resolve({ pairs: [], source: "disabled" });
+    if (!ANALOG_API_URL) return Promise.resolve({ pairs: [], source: "disabled" });
     return swrGet("sd_analog_cache_v1", "pairs", fetchAnalogFresh, force);
   }
 
