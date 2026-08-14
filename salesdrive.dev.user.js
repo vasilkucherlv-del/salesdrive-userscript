@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.73
+// @version      2.74
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4465,13 +4465,13 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     + '#sd-upsell-hint{padding:8px 34px 9px 13px;max-width:none;width:100%;margin:10px 0 6px 0;'
     + '  background:#F7F9FC;border:1px solid #DCE3EC;border-left:5px solid #4B7BB0;'
     + '  border-radius:11px;box-shadow:0 2px 10px rgba(40,70,110,.10);'
-    + '  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;color:#2A3E57}'
-    + '#sd-upsell-hint .sd-x{top:7px;right:11px;font-size:19px;color:#8496AC}'
-    + '#sd-upsell-hint .sd-x:hover{color:#3C5876}'
+    + '  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;color:#1E3350}'
+    + '#sd-upsell-hint .sd-x{top:7px;right:11px;font-size:20px;color:#6B7E96}'
+    + '#sd-upsell-hint .sd-x:hover{color:#2E4A69}'
     // ── рядок товару = сітка: фото | назва+скрипт | артикул | наявність | ціна | кнопка
     + '#sd-upsell-hint .sd-item{display:grid;align-items:center;gap:2px 12px;padding:7px 0;margin-top:0;'
     + '  border-top:1px solid #E7EDF4;'
-    + '  grid-template-columns:38px minmax(220px,1fr) 124px 104px 118px;'
+    + '  grid-template-columns:38px minmax(220px,1fr) 138px 112px 124px;'
     + '  grid-template-areas:"img name stock price add" "img script script script script"}'
     + '#sd-upsell-hint .sd-item:first-of-type{border-top:none}'
     // display:contents — щоб діти .sd-main і .sd-action стали клітинками спільної сітки
@@ -4481,34 +4481,34 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     + '#sd-upsell-hint .sd-comp-img{grid-area:img;width:38px;height:38px;border-radius:8px;'
     + '  border:1px solid #DEE5EE;background:#fff}'
     // ── назва + скрипт
-    + '#sd-upsell-hint .sd-name{grid-area:name;font-size:11.5px;font-weight:700;letter-spacing:.3px;'
-    + '  color:#3D5A80;line-height:1.25;margin:0;text-transform:uppercase;overflow-wrap:anywhere}'
+    + '#sd-upsell-hint .sd-name{grid-area:name;font-size:13px;font-weight:700;letter-spacing:.2px;'
+    + '  color:#1D3E68;line-height:1.3;margin:0;text-transform:uppercase;overflow-wrap:anywhere}'
     + '#sd-upsell-hint .sd-say{display:none}'
-    + '#sd-upsell-hint .sd-script{grid-area:script;font-size:12.5px;font-weight:400;line-height:1.4;'
-    + '  color:#5C6B7E;background:transparent;border:none;padding:2px 0 0;margin:0;'
+    + '#sd-upsell-hint .sd-script{grid-area:script;font-size:13.5px;font-weight:500;line-height:1.45;'
+    + '  color:#3E4F66;background:transparent;border:none;padding:2px 0 0;margin:0;'
     + '  overflow-wrap:anywhere;box-shadow:none}'
     // ── артикул окремою колонкою (переносимо його з кнопки, див. нижче)
     // артикул — одразу за назвою (як у таблиці товарів СРМ), щоб не було
     // порожньої смуги між короткою назвою і колонками праворуч
     + '#sd-upsell-hint .sd-code{display:inline-block;vertical-align:middle;margin-left:8px;white-space:nowrap;'
-    + '  font:600 11px/1.35 ui-monospace,Menlo,Consolas,monospace;color:#5C6B7E;'
-    + '  background:#EDF2F9;border:1px solid #D8E2EF;border-radius:5px;padding:1px 6px;'
+    + '  font:700 12px/1.4 ui-monospace,Menlo,Consolas,monospace;color:#34485F;'
+    + '  background:#E7EEF8;border:1px solid #CBD9EA;border-radius:5px;padding:1px 6px;'
     + '  text-transform:none;letter-spacing:0}'
     // ── наявність
-    + '#sd-upsell-hint .sd-stock{grid-area:stock;justify-self:start;font-size:11px;font-weight:600;'
+    + '#sd-upsell-hint .sd-stock{grid-area:stock;justify-self:start;font-size:12px;font-weight:700;'
     + '  padding:3px 9px;border-radius:999px;white-space:nowrap}'
-    + '#sd-upsell-hint .sd-stock-yes{background:#EBF4EE;color:#2C6B45;border:1px solid #CFE3D6}'
-    + '#sd-upsell-hint .sd-stock-no{background:#FBEEEC;color:#9C3A31;border:1px solid #EED2CD}'
-    + '#sd-upsell-hint .sd-stock-wait,#sd-upsell-hint .sd-stock-unk{background:#F1F3F7;color:#7C8899;'
-    + '  border:1px solid #E3E8EF;font-weight:500}'
+    + '#sd-upsell-hint .sd-stock-yes{background:#E6F2EA;color:#1F5936;border:1px solid #BFDBC9}'
+    + '#sd-upsell-hint .sd-stock-no{background:#FAE9E6;color:#8B2C23;border:1px solid #E7C4BE}'
+    + '#sd-upsell-hint .sd-stock-wait,#sd-upsell-hint .sd-stock-unk{background:#EDF0F5;color:#4E5C6E;'
+    + '  border:1px solid #DBE1EA;font-weight:600}'
     // ── ціна
     + '#sd-upsell-hint .sd-price{grid-area:price;justify-self:stretch;display:flex;align-items:baseline;'
     + '  justify-content:center;gap:5px;padding:3px 8px;border-radius:8px;'
-    + '  background:#EDF2F9;border:1px solid #D8E2EF}'
-    + '#sd-upsell-hint .sd-price-lab{font-size:10px;color:#6B7C93}'
-    + '#sd-upsell-hint .sd-price-val{font-size:16px;font-weight:800;color:#25456C}'
+    + '  background:#E7EEF8;border:1px solid #CBD9EA}'
+    + '#sd-upsell-hint .sd-price-lab{font-size:11px;font-weight:600;color:#51637D}'
+    + '#sd-upsell-hint .sd-price-val{font-size:17px;font-weight:800;color:#14335A}'
     // ── кнопка
-    + '#sd-upsell-hint .sd-add{grid-area:add;width:100%;padding:8px 10px;font-size:13px;font-weight:700;'
+    + '#sd-upsell-hint .sd-add{grid-area:add;width:100%;padding:8px 10px;font-size:13.5px;font-weight:700;'
     + '  border-radius:9px;background:#3D7A52;display:flex;align-items:center;justify-content:center;'
     + '  gap:5px;line-height:1.2;white-space:nowrap}'
     + '#sd-upsell-hint .sd-add:hover{background:#336646}'
