@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.72
+// @version      2.73
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4471,8 +4471,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     // ── рядок товару = сітка: фото | назва+скрипт | артикул | наявність | ціна | кнопка
     + '#sd-upsell-hint .sd-item{display:grid;align-items:center;gap:2px 12px;padding:7px 0;margin-top:0;'
     + '  border-top:1px solid #E7EDF4;'
-    + '  grid-template-columns:38px minmax(220px,1fr) 92px 124px 104px 118px;'
-    + '  grid-template-areas:"img name code stock price add" "img script script script script script"}'
+    + '  grid-template-columns:38px minmax(220px,1fr) 124px 104px 118px;'
+    + '  grid-template-areas:"img name stock price add" "img script script script script"}'
     + '#sd-upsell-hint .sd-item:first-of-type{border-top:none}'
     // display:contents — щоб діти .sd-main і .sd-action стали клітинками спільної сітки
     + '#sd-upsell-hint .sd-main{display:contents}'
@@ -4488,9 +4488,12 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     + '  color:#5C6B7E;background:transparent;border:none;padding:2px 0 0;margin:0;'
     + '  overflow-wrap:anywhere;box-shadow:none}'
     // ── артикул окремою колонкою (переносимо його з кнопки, див. нижче)
-    + '#sd-upsell-hint .sd-code{grid-area:code;justify-self:start;white-space:nowrap;'
-    + '  font:600 11.5px/1.4 ui-monospace,Menlo,Consolas,monospace;color:#5C6B7E;'
-    + '  background:#EDF2F9;border:1px solid #D8E2EF;border-radius:5px;padding:2px 7px}'
+    // артикул — одразу за назвою (як у таблиці товарів СРМ), щоб не було
+    // порожньої смуги між короткою назвою і колонками праворуч
+    + '#sd-upsell-hint .sd-code{display:inline-block;vertical-align:middle;margin-left:8px;white-space:nowrap;'
+    + '  font:600 11px/1.35 ui-monospace,Menlo,Consolas,monospace;color:#5C6B7E;'
+    + '  background:#EDF2F9;border:1px solid #D8E2EF;border-radius:5px;padding:1px 6px;'
+    + '  text-transform:none;letter-spacing:0}'
     // ── наявність
     + '#sd-upsell-hint .sd-stock{grid-area:stock;justify-self:start;font-size:11px;font-weight:600;'
     + '  padding:3px 9px;border-radius:999px;white-space:nowrap}'
@@ -4514,7 +4517,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     // ── вузький екран: колонки згортаються у другий рядок
     + '@media (max-width:1100px){'
     + '  #sd-upsell-hint .sd-item{grid-template-columns:38px 1fr auto auto;'
-    + '    grid-template-areas:"img name name name" "img script script script" "img code stock price" "img add add add";'
+    + '    grid-template-areas:"img name name name" "img script script script" "img stock price price" "img add add add";'
     + '    row-gap:5px}'
     + '  #sd-upsell-hint .sd-add{justify-self:start;width:auto;padding:7px 14px}'
     + '}';
@@ -4533,7 +4536,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       code.className = 'sd-code';
       code.textContent = String(sku.textContent || '').replace(/^код\s*/i, '');
       code.title = 'Артикул товару';
-      item.appendChild(code);
+      var nameEl = item.querySelector('.sd-name');
+      if (nameEl) nameEl.appendChild(code); else item.appendChild(code);
     });
   }
   moveCodes();
