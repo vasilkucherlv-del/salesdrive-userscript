@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.76
+// @version      2.77
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4551,8 +4551,19 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   st.textContent = css;
   (document.head || document.documentElement).appendChild(st);
 
-  // Назву разом з артикулом робимо посиланням на КАРТКУ товару.
-  // Відкриваємо в новій вкладці — щоб менеджер не втратив незбережену заявку.
+  var PAGE = (typeof unsafeWindow !== 'undefined' && unsafeWindow) ? unsafeWindow : window;
+
+  // Клік по назві відкриває ТУ САМУ модалку-картку товару, що й клік по товару
+  // в рядку заявки (viewModel.showItem) — міст sdOpenProduct у ядрі.
+  // Заявка при цьому лишається відкритою, нічого не втрачається.
+  function openProduct(sku) {
+    try {
+      document.documentElement.setAttribute('data-sd-open-sku', String(sku));
+      PAGE.dispatchEvent(new Event('sdOpenProduct'));
+    } catch (e) {}
+  }
+
+  // Запасний шлях (Ctrl/⌘/середня кнопка — «відкрити в новій вкладці»):
   // ID товару за кодом дістає модуль lkProdLink (внутрішній довідник СРМ, кеш
   // на добу); поки ID невідомий — веде в каталог, відфільтрований по цьому коду.
   function prodHref(sku) {
@@ -4575,7 +4586,12 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       a.setAttribute('href', prodHref(sku));
       a.setAttribute('target', '_blank');
       a.setAttribute('rel', 'noopener');
-      a.title = 'Відкрити картку товару в новій вкладці';
+      a.title = 'Відкрити картку товару (Ctrl+клік — у новій вкладці)';
+      a.addEventListener('click', function (e) {
+        if (e.ctrlKey || e.metaKey || e.shiftKey || e.button === 1) return; // хай браузер відкриє вкладку
+        e.preventDefault();
+        openProduct(sku);
+      });
       while (nameEl.firstChild) a.appendChild(nameEl.firstChild);
       var code = document.createElement('span');
       code.className = 'sd-code';
