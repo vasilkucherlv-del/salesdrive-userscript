@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.74
+// @version      2.75
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4471,8 +4471,12 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     // ── рядок товару = сітка: фото | назва+скрипт | артикул | наявність | ціна | кнопка
     + '#sd-upsell-hint .sd-item{display:grid;align-items:center;gap:2px 12px;padding:7px 0;margin-top:0;'
     + '  border-top:1px solid #E7EDF4;'
-    + '  grid-template-columns:38px minmax(220px,1fr) 138px 112px 124px;'
-    + '  grid-template-areas:"img name stock price add" "img script script script script"}'
+    // Колонку назви НЕ розтягуємо на всю ширину (було 1fr) — інакше при короткій
+    // назві наявність/ціна/кнопка тікають аж на правий край і між ними діра.
+    // Назва росте лише до 520px, а зайва ширина йде в порожню колонку в кінці;
+    // рядок скрипта займає всю ширину, тож праворуч не лишається пустки.
+    + '  grid-template-columns:38px minmax(200px,520px) 138px 112px 124px 1fr;'
+    + '  grid-template-areas:"img name stock price add ." "img script script script script script"}'
     + '#sd-upsell-hint .sd-item:first-of-type{border-top:none}'
     // display:contents — щоб діти .sd-main і .sd-action стали клітинками спільної сітки
     + '#sd-upsell-hint .sd-main{display:contents}'
@@ -4514,6 +4518,23 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     + '#sd-upsell-hint .sd-add:hover{background:#336646}'
     + '#sd-upsell-hint .sd-add.sd-done{background:#9AA6B2}'
     + '#sd-upsell-hint .sd-sku{display:none}'   // код тепер в окремій колонці
+    // ── СПІЛЬНА сітка на весь банер (subgrid): колонка назви шириною рівно
+    // під найдовшу назву в банері, тож наявність/ціна/кнопка стоять одразу за
+    // назвами і водночас рівно одна під одною в усіх рядках.
+    // Базовий варіант вище (фіксовані 520px) лишається як запас для старих
+    // браузерів без subgrid — там просто трохи ширша колонка назви.
+    + '@media (min-width:1101px){@supports (grid-template-columns:subgrid){'
+    + '  #sd-upsell-hint{display:grid;column-gap:12px;row-gap:0;'
+    + '    grid-template-columns:38px minmax(200px,max-content) 138px 112px 124px 1fr}'
+    + '  #sd-upsell-hint .sd-item{grid-column:1/-1;display:grid;grid-template-columns:subgrid;'
+    + '    grid-template-rows:auto auto;column-gap:12px;row-gap:2px}'
+    + '  #sd-upsell-hint .sd-comp-img{grid-column:1;grid-row:1/3;align-self:center}'
+    + '  #sd-upsell-hint .sd-name{grid-column:2;grid-row:1}'
+    + '  #sd-upsell-hint .sd-stock{grid-column:3;grid-row:1}'
+    + '  #sd-upsell-hint .sd-price{grid-column:4;grid-row:1}'
+    + '  #sd-upsell-hint .sd-add{grid-column:5;grid-row:1}'
+    + '  #sd-upsell-hint .sd-script{grid-column:2/-1;grid-row:2}'
+    + '}}'
     // ── вузький екран: колонки згортаються у другий рядок
     + '@media (max-width:1100px){'
     + '  #sd-upsell-hint .sd-item{grid-template-columns:38px 1fr auto auto;'
