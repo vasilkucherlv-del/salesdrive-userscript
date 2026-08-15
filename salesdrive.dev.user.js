@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.78
+// @version      2.80
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -803,7 +803,7 @@ var UPSELL_MAP_DATA = []; // вбудований запас прибрано: �
     }
 
     if (opts.scrollIntoView) { try { box.scrollIntoView({ block: "nearest", behavior: "smooth" }); } catch (e) {} }
-    requestStock(slots);
+    fill(slots);
     if (!opts.existing) armHideTimer();
   }
 
@@ -4450,6 +4450,205 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 })();
 }catch(e){ try{ console.warn("[SD] модуль «lkModalKits» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkModalKits ▲▲▲ */
+
+/* ▼▼▼ МОДУЛЬ-START • lkModalAnalogs — Картка товару: блок «Аналоги» ▼▼▼ */
+/* ===== У картці товару (модалка з рядка заявки/накладної і сторінка товару)
+   під «Додатковими цінами» показуємо товари-аналоги: фото, назва, код,
+   залишок і ціна. Дані — та сама карта аналогів, що й для значка «🔁 аналоги»
+   в рядках (__sdAnalogBySku), залишки й ціни — той самий міст sdUpsellStock.
+   Клік по рядку відкриває картку того товару. ===== */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
+(function lkModalAnalogs() {
+  'use strict';
+  var PAGE = (typeof unsafeWindow !== 'undefined' && unsafeWindow) || window;
+
+  var css = ''
+    +'.lkma-h{margin:14px 0 0 10px;font:700 15px/1.4 inherit;color:#333}'
+    +'.lkma-h .n{margin-left:6px;font-weight:600;color:#00787a}'
+    +'.lkma-box{margin:6px 10px 0 10px;border:1px solid #cde3e0;border-radius:7px;overflow:hidden;'
+    +'  font:13px/1.45 -apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#12312e}'
+    +'.lkma-box .r{display:grid;grid-template-columns:46px 1fr auto auto auto;align-items:center;'
+    +'  gap:0 10px;border-top:1px solid #e6f1ef;cursor:pointer}'
+    +'.lkma-box .r:first-child{border-top:none}'
+    +'.lkma-box .r:hover{background:#f2fbfa}'
+    +'.lkma-box .ph{display:flex;align-items:center;justify-content:center;width:46px;height:46px;'
+    +'  background:#fff;border-right:1px solid #e6f1ef}'
+    +'.lkma-box .ph img{max-width:40px;max-height:40px;object-fit:contain;display:none}'
+    +'.lkma-box .ph .no{color:#cfe0de}'
+    +'.lkma-box .nm{padding:7px 0;min-width:0;overflow-wrap:anywhere;font-weight:600;color:#0f2b29}'
+    +'.lkma-box .r:hover .nm{color:#00695c;text-decoration:underline}'
+    +'.lkma-box .cd{font:600 11px/1.3 ui-monospace,Menlo,Consolas,monospace;color:#00787a;'
+    +'  background:#e8f4f2;border:1px solid #cbe3e0;border-radius:5px;padding:1px 6px;white-space:nowrap}'
+    +'.lkma-box .stk{font:600 11px/1.1 sans-serif;padding:3px 8px;border-radius:999px;white-space:nowrap;'
+    +'  background:#eef4f3;color:#5a726f}'
+    +'.lkma-box .stk.yes{background:#E6F4EA;color:#1B5E20}'
+    +'.lkma-box .stk.no{background:#FDECEA;color:#B71C1C}'
+    +'.lkma-box .pr{padding-right:10px;font:800 13px/1.1 sans-serif;color:#14418f;white-space:nowrap}'
+    +'.lkma-box .pr.dim{color:#9aa6a4;font-weight:600}';
+  var st = document.createElement('style'); st.textContent = css;
+  (document.head || document.documentElement).appendChild(st);
+
+  function norm(s){ return String(s == null ? '' : s).replace(/\u00A0/g, ' ').replace(/\s+/g, ' ').trim(); }
+  function openProduct(sku){
+    try { document.documentElement.setAttribute('data-sd-open-sku', String(sku));
+          PAGE.dispatchEvent(new Event('sdOpenProduct')); } catch (e) {}
+  }
+  function money(n){
+    var v = Number(n); if (!isFinite(v)) return '';
+    return String(v % 1 ? v.toFixed(2) : v).replace('.', ',') + ' ₴';
+  }
+
+  // корінь картки товару. Картки складаються стосом (з картки можна відкрити
+  // картку аналога), тож беремо ОСТАННЮ видиму — це та, що зараз зверху.
+  function findRoot(){
+    var incs = document.querySelectorAll('[ng-include]'), found = null;
+    for (var i = 0; i < incs.length; i++) {
+      if ((incs[i].getAttribute('ng-include') || '').indexOf('product-view-info') === -1) continue;
+      if (!incs[i].offsetParent) continue;
+      found = incs[i];
+    }
+    return found;
+  }
+  // код товару з рядка «SKU» картки
+  function skuOf(root){
+    var out = '';
+    [].forEach.call(root.querySelectorAll('label'), function (l) {
+      if (out) return;
+      var t = norm(l.textContent);
+      if (/^SKU$/i.test(t)) {
+        var box = l.parentElement;
+        if (box) out = norm(String(box.textContent || '').replace(t, ''));
+      }
+    });
+    return out;
+  }
+  // куди вставляти: перед розділом «Опис», інакше — в кінець картки
+  function anchorFor(root){
+    var hs = root.querySelectorAll('h3');
+    for (var i = 0; i < hs.length; i++) {
+      if (norm(hs[i].textContent) === 'Опис') {
+        return hs[i].closest('.form-group') || hs[i].parentElement;
+      }
+    }
+    return null;
+  }
+
+  // залишок / ціна / фото — внутрішнім довідником СРМ (cookie, без ключа й без
+  // годинного ліміту API). Той самий запит робить сама СРМ у пошуку товару,
+  // тому працює скрізь: і в заявці, і в накладній, і в каталозі.
+  var CKEY = 'lkma_info_v1', CTTL = 10 * 60 * 1000;
+  function cacheGet(code){
+    try {
+      var c = JSON.parse(localStorage.getItem(CKEY) || '{}')[code];
+      return (c && Date.now() - c.t < CTTL) ? c : null;
+    } catch (e) { return null; }
+  }
+  function cachePut(code, rec){
+    try {
+      var all = JSON.parse(localStorage.getItem(CKEY) || '{}');
+      all[code] = rec; rec.t = Date.now();
+      localStorage.setItem(CKEY, JSON.stringify(all));
+    } catch (e) {}
+  }
+  function rowsOf(body){
+    if (Array.isArray(body)) return body;
+    if (body && Array.isArray(body.data)) return body.data;
+    var out = [];
+    Object.keys(body || {}).forEach(function (k) {
+      var v = body[k];
+      if (v && typeof v === 'object' && v.sku != null) out.push(v);
+    });
+    return out;
+  }
+  function infoOf(code){
+    var c = cacheGet(code);
+    if (c) return Promise.resolve(c);
+    return fetch('/products/autocomplete/?_t=' + Date.now() + '&filter=' + encodeURIComponent(code) + '&formId=1',
+                 { credentials: 'include', headers: { 'Accept': 'application/json, text/plain, */*' } })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (j) {
+        var body = (j && (j.response || j)) || {};
+        var row = rowsOf(body).filter(function (x) { return String(x.sku).trim() === String(code); })[0];
+        var rec = row
+          ? { found: true, qty: Number(row.restCount), price: row.defaultPrice, img: row.photo || '' }
+          : { found: false };
+        cachePut(code, rec);
+        return rec;
+      })
+      .catch(function () { return null; });
+  }
+  function fill(slots){
+    Object.keys(slots).forEach(function (code) {
+      infoOf(code).then(function (r) { apply(slots[code], r); });
+    });
+  }
+  function apply(slot, r){
+    if (!slot) return;
+    if (!r) { slot.stk.textContent = 'залишок —'; slot.pr.className = 'pr dim'; slot.pr.textContent = '—'; return; }
+    if (r.found === false) { slot.stk.className = 'stk'; slot.stk.textContent = 'немає в довіднику'; }
+    else if (!isFinite(r.qty)) { slot.stk.className = 'stk'; slot.stk.textContent = 'залишок —'; }
+    else if (r.qty > 0) { slot.stk.className = 'stk yes'; slot.stk.textContent = '✓ ' + r.qty + ' шт'; }
+    else { slot.stk.className = 'stk no'; slot.stk.textContent = '✗ немає'; }
+    if (r.price != null && r.price !== '') { slot.pr.className = 'pr'; slot.pr.textContent = money(r.price); }
+    else { slot.pr.className = 'pr dim'; slot.pr.textContent = '—'; }
+    if (r.img && slot.img) { slot.img.src = r.img; slot.img.style.display = 'block'; slot.no.style.display = 'none'; }
+  }
+
+  function build(root, sku, list){
+    var head = document.createElement('h3');
+    head.className = 'lkma-h'; head.setAttribute('data-sku', sku);
+    head.appendChild(document.createTextNode('Аналоги '));
+    var n = document.createElement('span'); n.className = 'n'; n.textContent = list.length;
+    head.appendChild(n);
+
+    var box = document.createElement('div');
+    box.className = 'lkma-box'; box.setAttribute('data-sku', sku);
+
+    var slots = {};
+    list.forEach(function (it) {
+      var r = document.createElement('div'); r.className = 'r';
+      r.title = 'Відкрити картку товару';
+      var ph = document.createElement('span'); ph.className = 'ph';
+      var img = document.createElement('img'); img.loading = 'eager';
+      var no = document.createElement('span'); no.className = 'no'; no.textContent = '—';
+      ph.appendChild(img); ph.appendChild(no);
+      var nm = document.createElement('div'); nm.className = 'nm'; nm.textContent = it.c || ('код ' + it.sku);
+      var cd = document.createElement('span'); cd.className = 'cd'; cd.textContent = it.sku;
+      var stk = document.createElement('span'); stk.className = 'stk'; stk.textContent = '…';
+      var pr = document.createElement('span'); pr.className = 'pr dim'; pr.textContent = '…';
+      r.appendChild(ph); r.appendChild(nm); r.appendChild(cd); r.appendChild(stk); r.appendChild(pr);
+      r.addEventListener('click', function (e) { e.preventDefault(); e.stopPropagation(); openProduct(it.sku); });
+      box.appendChild(r);
+      slots[String(it.sku)] = { img: img, no: no, stk: stk, pr: pr };
+    });
+
+    var at = anchorFor(root);
+    if (at) { at.parentNode.insertBefore(head, at); at.parentNode.insertBefore(box, at); }
+    else { root.appendChild(head); root.appendChild(box); }
+    fill(slots);
+  }
+
+  function process(){
+    var root = findRoot(); if (!root) return;
+    var map = PAGE.__sdAnalogBySku; if (!map) return;      // карта ще не приїхала
+    var sku = skuOf(root); if (!sku) return;
+    var have = root.querySelector('.lkma-box');
+    if (have && have.getAttribute('data-sku') === sku) return;   // вже намальовано для цього товару
+    var old = root.querySelectorAll('.lkma-box,.lkma-h');
+    [].forEach.call(old, function (n) { n.remove(); });          // інший товар — перемалювати
+    var list = map[sku] || [];
+    if (!list.length) return;                                    // аналогів немає — блоку немає
+    build(root, sku, list);
+  }
+
+  var t = null;
+  function soon(){ clearTimeout(t); t = setTimeout(process, 200); }
+  PAGE.addEventListener('sdAnalogReady', soon);
+  window.addEventListener('lkdom', soon);
+  soon();
+})();
+}catch(e){ try{ console.warn("[SD] модуль «lkModalAnalogs» не запустився:", e); }catch(_){} }
+/* ▲▲▲ МОДУЛЬ-END • lkModalAnalogs ▲▲▲ */
 
 /* ▼▼▼ МОДУЛЬ-START • lkUpsellRedesign — Компактний вигляд картки допродажу ▼▼▼ */
 /* ===== Компактна картка допродажу в спокійних сіро-синіх тонах.
