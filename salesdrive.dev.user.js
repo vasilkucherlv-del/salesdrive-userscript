@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.81
+// @version      2.82
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -21,11 +21,14 @@
    Правити код модуля ТІЛЬКИ в межах його рамок, щоб не зачепити інші.
    Список (зверху вниз):
      • lkDomTick       — спільний «пульс» DOM (подія 'lkdom') для всіх модулів
+     • lkApiBudget     — спільний облік і захист ліміту публічного API (window.sdApi)
+     • lkProdLink      — посилання «код товару → його картка» (window.sdProdLink)
      • core            — ядро: шина, дані з таблиць, стилі, content.js, База знань
      • lkNaboryInline  — позначка «входить у набори» в рядках заявки
+     • lkComplectPrice — роздрібна ціна біля товару в таблиці «Товари в комплекті»
      • lkAnalogInline  — інлайн-значок «🔁 аналог» у рядку товару
      • lkModalKits     — рядок «Входить у набори» в картці товару (модалка)
-     • lkComplectPrice — роздрібна ціна біля товару в таблиці «Товари в комплекті»
+     • lkModalAnalogs  — блок «Аналоги» в картці товару (фото/код/залишок/ціна)
      • lkUpsellRedesign— компактний вигляд картки допродажу
      • lkStockPayWarn  — попередження: передоплата + малий залишок
      • lkBundleFix     — 🧹 «Разом дешевше»: прибрати NEW PRODUCT, ціни товарів → сума акції
@@ -34,6 +37,8 @@
      • lkArrivalCount  — 📦 к-ть позицій та одиниць біля заголовка «Надходження товарів»
      • lkArrivalOpt    — 💰 опт-ціни товарів (×1.2/×1.25/×1.3↑5) із собівартості накладної
      • lkRoundPickup   — 🔟 заокруглення суми самовивозу вгору до 10 ₴ (99→100, 108→110)
+     • lkOrderTier     — 💱 перерахунок цін заявки за типом ціни (опт/майстри) одним кліком
+     • lkNpDescr       — 📋 шаблони опису у формі ТТН Нової пошти (редаговані)
      • lkStockWhere    — 🔎 «Де товар»: у яких заявках висить код (з урахуванням комплектів)
      • lkRozCommission — ⚖ комісія Rozetka для товарів, дописаних менеджером
      • lkCatalogKits   — позначка «входить у набори» в каталозі Товари/Послуги + на сторінці товару
@@ -49,6 +54,23 @@
      • lkCopyNoGoods    — кнопка «🗐 без товарів» (копія заявки без товарних рядків)
      • lkSenderBySource — відправник СМС за джерелом замовлення (FIXLAND/Refort/lartek/Сайт/mobile_catalog_app/Bigl)
    ╚══════════════════════════════════════════════════════════════════╝ */
+
+/* ─── Захист від ПОДВІЙНОГО запуску (стабільна + тестова копії разом) ───
+   Обидві копії позначаються одним ключем на спільному window сторінки:
+   хто перший стартував — той і працює, друга копія зупиняється одразу,
+   інакше були б подвійні банери, подвійні інтервали й подвійні запити. */
+try {
+  var __sdPageW = (typeof unsafeWindow !== 'undefined' && unsafeWindow) ? unsafeWindow : window;
+  if (__sdPageW.__sdLkLoaded) {
+    console.warn('[SD] інша копія скрипта (' + __sdPageW.__sdLkLoaded + ') вже активна — цю (' +
+      (typeof GM_info !== 'undefined' && GM_info.script ? GM_info.script.version : '?') + ') зупинено');
+    throw new Error('sd-duplicate-copy');           // зупиняє ВЕСЬ скрипт, це навмисно
+  }
+  __sdPageW.__sdLkLoaded = (typeof GM_info !== 'undefined' && GM_info.script ? GM_info.script.version : '1');
+} catch (eDup) {
+  if (eDup && eDup.message === 'sd-duplicate-copy') throw eDup;  // прокинути зупинку далі
+  // немає доступу до unsafeWindow/GM_info — працюємо без guard-а (гірше, ніж з ним, але не ламаємось)
+}
 
 /* ▼▼▼ МОДУЛЬ-START • core — ЯДРО — шина подій, дані з Google-таблиць, стилі; містить content.js (підказки/ціни/рейтинг/ТТН) і Базу знань ▼▼▼ */
 /* ▼▼▼ МОДУЛЬ-START • lkDomTick — спільний «пульс» DOM для всіх модулів ▼▼▼ */
@@ -165,7 +187,14 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   var KEY='lk_prodid_v1', TTL=24*60*60*1000, MISS_TTL=10*60*1000;
   var mem=null, busy={};
   function load(){ if(mem) return mem; try{ mem=JSON.parse(localStorage.getItem(KEY))||{}; }catch(e){ mem={}; } return mem; }
-  function save(){ try{ localStorage.setItem(KEY, JSON.stringify(mem||{})); }catch(e){} }
+  function save(){
+    try{
+      // чистка прострочених — кеш не має рости безмежно (та сама дисципліна, що lk_ttnprint_v1)
+      var lim=Date.now()-TTL;
+      Object.keys(mem||{}).forEach(function(k){ if(!mem[k] || (mem[k].t||0)<lim) delete mem[k]; });
+      localStorage.setItem(KEY, JSON.stringify(mem||{}));
+    }catch(e){}
+  }
   function card(id){ return '/ua/index.html?formId=1#/product/update/'+id; }
   function search(sku){ return '/ua/index.html?formId=1#/product/index?filter%5Bsku%5D='+encodeURIComponent(sku); }
   function pick(rec, preferKit){
@@ -1017,13 +1046,17 @@ var UPSELL_MAP_DATA = []; // вбудований запас прибрано: �
       if (ok) { markAdded(btn); armHideTimer(); }
       else { fillFallback(code); }
     }
+    var token = String(Date.now()) + "_up_" + Math.random().toString(36).slice(2);
     function onResult() {
+      // чужа відповідь (напр., додавання зі списку аналогів) — ігноруємо й чекаємо свою
+      if (document.documentElement.getAttribute("data-sd-upsell-result-token") !== token) return;
       var ok = document.documentElement.getAttribute("data-sd-upsell-result") === "ok";
       finish(ok);
     }
 
     BUS.addEventListener("sdUpsellAddResult", onResult);
     document.documentElement.setAttribute("data-sd-upsell-code", String(code));
+    document.documentElement.setAttribute("data-sd-upsell-token", token);
     document.documentElement.removeAttribute("data-sd-upsell-result");
     BUS.dispatchEvent(new Event("sdUpsellAdd"));
 
@@ -1855,11 +1888,14 @@ function __sdPageMain() {
     }
   }
 
-  function setResult(ok, reason) {
+  function setResult(ok, reason, token) {
     document.documentElement.setAttribute(
       "data-sd-upsell-result",
       ok ? "ok" : "fail"
     );
+    // токен запиту повертаємо у відповіді: відправники звіряють його зі своїм
+    // і не зараховують собі чужий результат (банер ↔ список аналогів)
+    document.documentElement.setAttribute("data-sd-upsell-result-token", token || "");
     window.dispatchEvent(new Event("sdUpsellAddResult"));
     log(ok ? "додано ✓" : "не вдалось ✗", reason || "");
   }
@@ -1904,15 +1940,26 @@ function __sdPageMain() {
 
   // резолв внутрішнього id товару напряму з продуктового API SalesDrive
   // (autocomplete не повертає товари-комплекти, тому беремо id з /products/data)
-  function _findRowBySku(rows, code) {
+  // preferKit: один код буває і товаром, і комплектом (069) — для кліку по коду
+  // НАБОРУ маємо відкрити саме комплект, а не перший-ліпший збіг
+  function _findRowBySku(rows, code, preferKit) {
     if (!rows || !rows.length) return null;
-    var c = String(code).trim();
-    for (var i = 0; i < rows.length; i++) { if (rows[i] && String(rows[i].sku).trim() === c) return rows[i]; }
-    var zc = stripZeros(c);
-    if (zc) for (var k = 0; k < rows.length; k++) { if (rows[k] && stripZeros(String(rows[k].sku).trim()) === zc) return rows[k]; }
-    return null;
+    var c = String(code).trim(), zc = stripZeros(c);
+    var hit = null, hitKit = null;
+    for (var i = 0; i < rows.length; i++) {
+      var r = rows[i]; if (!r) continue;
+      var s = String(r.sku).trim();
+      if (s !== c && !(zc && stripZeros(s) === zc)) continue;
+      if (Number(r.isComplect) === 1) { if (!hitKit) hitKit = r; }
+      else if (!hit) hit = r;
+    }
+    return preferKit ? (hitKit || hit) : (hit || hitKit);
   }
-  function _resolveIdViaApi(code) {
+  var _resolveIdCache = {};                       // {code#k: {t, id}} — щоб не бити API на кожен клік
+  function _resolveIdViaApi(code, preferKit) {
+    var ck = String(code) + (preferKit ? "#k" : "#p");
+    var c = _resolveIdCache[ck];
+    if (c && Date.now() - c.t < 6 * 60 * 60 * 1000) return Promise.resolve(c.id);
     var url = "/products/data/?active=1&filter[sku]=" + encodeURIComponent(code) + "&formId=1";
     // заголовок "when" обовʼязковий — інакше СРМ віддає 200, але порожній список
     return fetch(url, { credentials: "include", headers: { "accept": "application/json, text/plain, */*", "when": "product/index" } })
@@ -1921,8 +1968,10 @@ function __sdPageMain() {
         try {
           // товари лежать у response.meta.option.option[]
           var rows = j && j.response && j.response.meta && j.response.meta.option && j.response.meta.option.option;
-          var row = _findRowBySku(rows || [], code);
-          return row && row.id != null ? row.id : null;
+          var row = _findRowBySku(rows || [], code, preferKit);
+          var id = row && row.id != null ? row.id : null;
+          if (id != null) _resolveIdCache[ck] = { t: Date.now(), id: id };
+          return id;
         } catch (e) { return null; }
       })
       .catch(function () { return null; });
@@ -1930,6 +1979,9 @@ function __sdPageMain() {
 
   window.addEventListener("sdOpenProduct", function () {
     var code = document.documentElement.getAttribute("data-sd-open-sku");
+    // прапорець «відкрий саме НАБІР» (ставлять модулі наборів); знімаємо одразу
+    var preferKit = document.documentElement.getAttribute("data-sd-open-kit") === "1";
+    document.documentElement.removeAttribute("data-sd-open-kit");
     if (!code) return;
     var got = getVMcached();
     if (!got || !got.vm) { log("sdOpenProduct: no viewModel"); return; }
@@ -1937,7 +1989,7 @@ function __sdPageMain() {
     var showItemFn = (vm && typeof vm.showItem === "function") ? vm.showItem.bind(vm)
       : (scope && typeof scope.showItem === "function") ? scope.showItem.bind(scope) : null;
     if (!showItemFn) { log("sdOpenProduct: showItem недоступний"); return; }
-    _resolveIdViaApi(code).then(function (pid) {
+    _resolveIdViaApi(code, preferKit).then(function (pid) {
       if (pid == null) { log("sdOpenProduct: id не знайдено для", code); return; }
       var fakeEvt = { preventDefault: function () {}, stopPropagation: function () {} };
       try { safeApply(scope, function () { showItemFn(pid, fakeEvt); }); }
@@ -1947,15 +1999,21 @@ function __sdPageMain() {
 
   window.addEventListener("sdUpsellAdd", function () {
     var code = document.documentElement.getAttribute("data-sd-upsell-code");
-    if (!code) return setResult(false, "no-code");
+    // токен цього запиту — «печатка» для відповіді (звіряють відправники)
+    var reqToken = document.documentElement.getAttribute("data-sd-upsell-token") || "";
+    // локальна обгортка: усі відповіді цього запуску несуть його токен
+    var setRes = function (ok, reason) { return setResult(ok, reason, reqToken); };
 
     // режим додавання: 'regular' → звичайний товар (аналог), інакше → допродаж (банер).
-    // Атрибут знімаємо ОДРАЗУ, щоб він не «протік» на наступний виклик.
+    // Атрибут знімаємо НАЙПЕРШИМ — до будь-яких ранніх виходів, інакше при
+    // гілці no-code він «протече» на наступний клік у банері.
     var asRegular = document.documentElement.getAttribute("data-sd-upsell-mode") === "regular";
     document.documentElement.removeAttribute("data-sd-upsell-mode");
 
+    if (!code) return setRes(false, "no-code");
+
     var got = getVMcached();
-    if (!got || !got.vm) return setResult(false, "no-viewModel");
+    if (!got || !got.vm) return setRes(false, "no-viewModel");
 
     var vm = got.vm,
       scope = got.scope;
@@ -1965,14 +2023,14 @@ function __sdPageMain() {
       typeof vm.getAutocomplete !== "function" ||
       typeof vm.addItemChangeAutoComplete !== "function"
     ) {
-      return setResult(false, "no-method");
+      return setRes(false, "no-method");
     }
 
     try {
       getItemByCode(vm, code).then(
         function (res) {
           var item = res.item;
-          if (!item) return setResult(false, "no-item-match");
+          if (!item) return setRes(false, "no-item-match");
           var label =
             typeof vm.showAutocompleteItem === "function"
               ? vm.showAutocompleteItem(item)
@@ -2058,7 +2116,7 @@ function __sdPageMain() {
               } catch (e) {}
             }, 30);
           }
-          function ok(reason) { cleanupAddRow(); return setResult(true, reason); }
+          function ok(reason) { cleanupAddRow(); return setRes(true, reason); }
 
           // перша спроба одразу; якщо холодний рядок не додав — ще кілька спроб із паузою,
           // щоб користувачу вистачало ОДНОГО кліку (розігрів робимо самі)
@@ -2074,7 +2132,7 @@ function __sdPageMain() {
                   "| товарів:", (vm.items || []).length,
                   "| методи:", methods.join(", "));
               } catch (e) {}
-              return setResult(false, "not-added");
+              return setRes(false, "not-added");
             }
             setTimeout(function () {
               if (attemptAdd()) return ok("ok-" + (i + 2));
@@ -2083,11 +2141,11 @@ function __sdPageMain() {
           })(0);
         },
         function (err) {
-          setResult(false, "autocomplete-rejected: " + err);
+          setRes(false, "autocomplete-rejected: " + err);
         }
       );
     } catch (e) {
-      setResult(false, "getAutocomplete-threw: " + e);
+      setRes(false, "getAutocomplete-threw: " + e);
     }
   });
 
@@ -2578,7 +2636,7 @@ function __sdPageMain() {
       if (!(x.base > 0)) { results.push({ sku: x.sku, name: x.name, err: "ціна закупки порожня" }); return step(); }
       var t = tiers(x.base);
       fetch("/products/" + x.pid + "/?formId=1", { credentials: "include", headers: { "Accept": "application/json" } })
-        .then(function (r) { return r.json(); })
+        .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
         .then(function (j) {
           var item = j.response && j.response.item;
           if (!item) throw new Error("картка товару недоступна");
@@ -3326,7 +3384,10 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   // ----------------------------------
   const PAGE = (typeof unsafeWindow !== 'undefined' && unsafeWindow) || window;
   function openProduct(sku) {
-    try { document.documentElement.setAttribute('data-sd-open-sku', String(sku)); PAGE.dispatchEvent(new Event('sdOpenProduct')); } catch (_) {}
+    // це модуль НАБОРІВ: якщо код має і товар, і комплект (069) — відкриваємо комплект
+    try { document.documentElement.setAttribute('data-sd-open-sku', String(sku));
+          document.documentElement.setAttribute('data-sd-open-kit', '1');
+          PAGE.dispatchEvent(new Event('sdOpenProduct')); } catch (_) {}
   }
 
   let comp2kits = null, loading = false;
@@ -3406,6 +3467,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   function extractSku(cell) {
     let sku = '';
     cell.querySelectorAll('span').forEach(sp => {
+      // не читати код із НАШИХ розгорнутих блоків (аналоги/набори/ціни) —
+      // інакше замість коду рядка можна зловити код аналога (пастка, вже пережита в lkAnalogInline)
+      if (sp.closest('.lkan-exp,.lknb-exp,.lkmk-exp,.lkck-exp,.lkcp,.lkma-box')) return;
       const m = sp.textContent.trim().match(/^\(([\w\-]+)\)$/);
       if (m) sku = m[1];
     });
@@ -3524,7 +3588,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   var TTL=2*60*60*1000;              // 2 год «свіжо» (старіше — тихо оновлюємо у фоні)
   var PKEY='lkcp_prices_v1', NKEY='lkcp_tiernames_v1';
 
-  function esc(s){ return String(s).replace(/[&<>"]/g,function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
+  function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
   function gGet(k){ try{ var s=GM_getValue(k,null); return s?((typeof s==='string')?JSON.parse(s):s):null; }catch(e){ return null; } }
   function gSet(k,v){ try{ GM_setValue(k, JSON.stringify(v)); }catch(e){} }
 
@@ -3736,7 +3800,10 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   // запасний шлях: через ядро (page-context + Angular)
   function setPriceBridge(tier, value, cb){
     var token=String(Date.now())+'_'+Math.random().toString(36).slice(2);
-    function done(d){ PAGEW.removeEventListener('sdSetPriceResult', onRes); clearTimeout(tm); cb(d); }
+    // fin — ядро відповідає синхронно, tm на той момент ще null; без прапорця
+    // «мертвий» таймер викликав би cb() удруге через 4 с (зразок: lkBundleFix)
+    var tm=null, fin=false;
+    function done(d){ if(fin) return; fin=true; PAGEW.removeEventListener('sdSetPriceResult', onRes); clearTimeout(tm); cb(d); }
     function onRes(){
       var raw=document.documentElement.getAttribute('data-sd-setprice-result'); if(!raw) return;
       var d; try{ d=JSON.parse(raw); }catch(e){ return; }
@@ -3748,7 +3815,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     document.documentElement.setAttribute('data-sd-setprice', JSON.stringify({token:token, tier:String(tier), value:value}));
     PAGEW.dispatchEvent(new Event('sdSetPrice'));
     // якщо ядро мовчить (інший контекст/стара версія) — просто перевіряємо атрибут
-    var tm=setTimeout(function(){ onRes(); done(null); }, 4000);
+    tm=setTimeout(function(){ if(fin) return; onRes(); done(null); }, 4000);
   }
 
   function setPrice(tier, value, cb){
@@ -3817,7 +3884,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     if(cell.querySelector('.lkcp')) return;          // вже додано
     var sku=skuOf(cell); if(!sku) return;
     var badge=document.createElement('span'); badge.className='lkcp wait'; badge.textContent='роздріб…';
-    var codeSpan=[].slice.call(cell.querySelectorAll('span')).reverse().filter(function(sp){ return !sp.closest('.lkan-exp,.lknb-exp,.lkmk-exp'); })
+    var codeSpan=[].slice.call(cell.querySelectorAll('span')).reverse().filter(function(sp){ return !sp.closest('.lkan-exp,.lknb-exp,.lkmk-exp,.lkck-exp,.lkma-box'); })
       .find(function(sp){ return /^\([\w\-]+\)$/.test((sp.textContent||'').trim()); });
     if(codeSpan && codeSpan.parentNode) codeSpan.insertAdjacentElement('afterend', badge);
     else { var a=cell.querySelector('a.link-product-field'); if(a) a.insertAdjacentElement('afterend', badge); else cell.appendChild(badge); }
@@ -3978,6 +4045,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     if (!code || btn.classList.contains('done')) return;
     try {
       document.documentElement.setAttribute('data-sd-upsell-code', String(code));
+      // свій токен, щоб відповідь на ЦЕЙ запит не зарахував собі банер допродажу
+      document.documentElement.setAttribute('data-sd-upsell-token',
+        String(Date.now()) + '_an_' + Math.random().toString(36).slice(2));
       // аналог додаємо як ЗВИЧАЙНИЙ товар, а не допродаж (банер цей атрибут не ставить)
       document.documentElement.setAttribute('data-sd-upsell-mode', 'regular');
       document.documentElement.removeAttribute('data-sd-upsell-result');
@@ -4074,6 +4144,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     document.documentElement.removeAttribute('data-sd-stock-result');
     PAGE.dispatchEvent(new Event('sdUpsellStock'));
     tm = setTimeout(function () {
+      if (done) return;   // відповідь уже прийшла — «—» поверх результату не пишемо
       finish();
       codes.forEach(function (c) {
         var slot = rowsByCode[c];
@@ -4238,7 +4309,10 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 
   const PAGE = (typeof unsafeWindow !== 'undefined' && unsafeWindow) || window;
   function openProduct(sku) {
-    try { document.documentElement.setAttribute('data-sd-open-sku', String(sku)); PAGE.dispatchEvent(new Event('sdOpenProduct')); } catch (_) {}
+    // це модуль НАБОРІВ: якщо код має і товар, і комплект (069) — відкриваємо комплект
+    try { document.documentElement.setAttribute('data-sd-open-sku', String(sku));
+          document.documentElement.setAttribute('data-sd-open-kit', '1');
+          PAGE.dispatchEvent(new Event('sdOpenProduct')); } catch (_) {}
   }
 
   const norm = s => String(s == null ? '' : s).replace(/\u00A0/g, ' ').trim();
@@ -4527,7 +4601,10 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     var hs = root.querySelectorAll('h3');
     for (var i = 0; i < hs.length; i++) {
       if (norm(hs[i].textContent) === 'Опис') {
-        return hs[i].closest('.form-group') || hs[i].parentElement;
+        var at = hs[i].closest('.form-group') || hs[i].parentElement;
+        // closest() може вилізти ЗА МЕЖІ root (якщо .form-group — предок картки);
+        // блок поза root наступний пульс не побачить → малював би заново безкінечно
+        return (at && root.contains(at) && at !== root) ? at : null;
       }
     }
     return null;
@@ -4546,6 +4623,10 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   function cachePut(code, rec){
     try {
       var all = JSON.parse(localStorage.getItem(CKEY) || '{}');
+      // чистка прострочених — інакше кеш росте безмежно і зрештою вибʼє
+      // квоту localStorage для всіх модулів (зразок: lkTtnPrintGuard)
+      var lim = Date.now() - CTTL;
+      Object.keys(all).forEach(function (k) { if (!all[k] || (all[k].t || 0) < lim) delete all[k]; });
       all[code] = rec; rec.t = Date.now();
       localStorage.setItem(CKEY, JSON.stringify(all));
     } catch (e) {}
@@ -4579,7 +4660,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   }
   function fill(slots){
     Object.keys(slots).forEach(function (code) {
-      infoOf(code).then(function (r) { apply(slots[code], r); });
+      infoOf(code).then(function (r) { apply(slots[code], r); })
+        .catch(function () {});           // рядок лишиться «…» — не валимо решту
     });
   }
   function apply(slot, r){
@@ -4589,9 +4671,14 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     else if (!isFinite(r.qty)) { slot.stk.className = 'stk'; slot.stk.textContent = 'залишок —'; }
     else if (r.qty > 0) { slot.stk.className = 'stk yes'; slot.stk.textContent = '✓ ' + r.qty + ' шт'; }
     else { slot.stk.className = 'stk no'; slot.stk.textContent = '✗ немає'; }
-    if (r.price != null && r.price !== '') { slot.pr.className = 'pr'; slot.pr.textContent = money(r.price); }
+    var mv = (r.price != null && r.price !== '') ? money(r.price) : '';
+    if (mv) { slot.pr.className = 'pr'; slot.pr.textContent = mv; }     // money(NaN)='' → гілка нижче
     else { slot.pr.className = 'pr dim'; slot.pr.textContent = '—'; }
-    if (r.img && slot.img) { slot.img.src = r.img; slot.img.style.display = 'block'; slot.no.style.display = 'none'; }
+    if (r.img && slot.img) {
+      slot.img.onload = function () { slot.img.style.display = 'block'; slot.no.style.display = 'none'; };
+      slot.img.onerror = function () { slot.img.style.display = 'none'; slot.no.style.display = ''; };
+      slot.img.src = r.img;
+    }
   }
 
   function build(root, sku, list){
@@ -4630,12 +4717,17 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 
   function process(){
     var root = findRoot(); if (!root) return;
-    var map = PAGE.__sdAnalogBySku; if (!map) return;      // карта ще не приїхала
-    var sku = skuOf(root); if (!sku) return;
+    var sku = skuOf(root);
     var have = root.querySelector('.lkma-box');
-    if (have && have.getAttribute('data-sku') === sku) return;   // вже намальовано для цього товару
-    var old = root.querySelectorAll('.lkma-box,.lkma-h');
-    [].forEach.call(old, function (n) { n.remove(); });          // інший товар — перемалювати
+    if (have && sku && have.getAttribute('data-sku') === sku) return; // вже намальовано для цього товару
+    // ЧИСТКА ДО ранніх виходів: Angular перевикористовує картку під інший товар,
+    // і поки SKU/карта ще не готові, на ній не мають висіти аналоги ПОПЕРЕДНЬОГО
+    // (зразок: lkModalKits прибирає свій рядок теж до перевірок)
+    if (have && (!sku || have.getAttribute('data-sku') !== sku)) {
+      [].forEach.call(root.querySelectorAll('.lkma-box,.lkma-h'), function (n) { n.remove(); });
+    }
+    var map = PAGE.__sdAnalogBySku; if (!map) return;      // карта ще не приїхала
+    if (!sku) return;
     var list = map[sku] || [];
     if (!list.length) return;                                    // аналогів немає — блоку немає
     build(root, sku, list);
@@ -4645,6 +4737,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   function soon(){ clearTimeout(t); t = setTimeout(process, 200); }
   PAGE.addEventListener('sdAnalogReady', soon);
   window.addEventListener('lkdom', soon);
+  window.addEventListener('hashchange', soon);   // миттєва реакція на SPA-перехід
   soon();
 })();
 }catch(e){ try{ console.warn("[SD] модуль «lkModalAnalogs» не запустився:", e); }catch(_){} }
@@ -4808,7 +4901,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     try { if (window.sdProdLink && window.sdProdLink.paint) window.sdProdLink.paint(); } catch (e) {}
   }
   decorate();
-  window.addEventListener('lkdom', decorate);
+  var _decT=null;   // дебаунс: paint() обходить усі посилання сторінки, 2×/с — забагато
+  window.addEventListener('lkdom', function(){ clearTimeout(_decT); _decT=setTimeout(decorate,250); });
 })();
 }catch(e){ try{ console.warn("[SD] модуль «lkUpsellRedesign» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkUpsellRedesign ▲▲▲ */
@@ -4906,8 +5000,10 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     return orderKey()+'|'+(isWarnPayment()?'1':'0')+'|'+(document.documentElement.getAttribute('data-sd-order-items')||'');
   }
 
+  var dismissedSig='';                 // «✕»: не малювати той самий стан знову
   function render(low, sp){
     var sig=curSig();
+    if(sig===dismissedSig) return;     // менеджер закрив цей стан — не набридаємо
     var existing=document.getElementById('sd-stockpay-warn');
     if(existing && existing.getAttribute('data-sig')===sig) return; // вже намальовано для цього стану
     removeWarn();
@@ -4915,6 +5011,12 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     var box=document.createElement('div');
     box.id='sd-stockpay-warn';
     box.setAttribute('data-sig',sig);
+
+    var xBtn=document.createElement('button');
+    xBtn.className='sd-x'; xBtn.type='button'; xBtn.textContent='×';
+    xBtn.title='Сховати (зʼявиться знову, якщо зміняться товари чи оплата)';
+    xBtn.addEventListener('click',function(){ dismissedSig=sig; removeWarn(); });
+    box.appendChild(xBtn);
 
     var top=document.createElement('div');
     top.className='sp-top';
@@ -4941,8 +5043,14 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       box.appendChild(row);
     });
 
-    var anchor=document.getElementById('sd-rating-warn')||document.getElementById('sd-price-warn')||sp.ref;
-    sp.parent.insertBefore(box, anchor); // найвище — над іншими банерами/таблицею
+    // найвище — над УСІМА банерами ядра (ttn-multi/ttn-warn теж), і лише тими,
+    // що реально стоять у нашому ж батьку: банер рейтингу має фолбек у <body>,
+    // і insertBefore з чужим якорем кидав NotFoundError кожні 2.5 с
+    var anchor=[ 'sd-ttn-multi','sd-ttn-warn','sd-rating-warn','sd-price-warn' ]
+      .map(function(id){ return document.getElementById(id); })
+      .filter(function(el){ return el && el.parentNode===sp.parent; })[0] || sp.ref;
+    try{ sp.parent.insertBefore(box, anchor); }
+    catch(e){ try{ sp.parent.insertBefore(box, sp.ref); }catch(_){} }
   }
 
   function evaluate(){
@@ -5093,7 +5201,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     +'#sd-chatfail-warn .cf-top{font-weight:800;color:#c0392b;font-size:14px}'
     +'#sd-chatfail-warn .cf-why{margin-top:3px}'
     // липкі сповіщення (видно на БУДЬ-ЯКІЙ сторінці СРМ, поки не натиснуто OK)
-    +'#sd-cf-toasts{position:fixed;right:18px;bottom:84px;z-index:2147483599;display:flex;'
+    // z-index ВИЩИЙ за панель Бази знань (…601): це критичні сповіщення,
+    // їх не можна ховати за відкритою БЗ у тому самому куті
+    +'#sd-cf-toasts{position:fixed;right:18px;bottom:84px;z-index:2147483610;display:flex;'
     +'  flex-direction:column;gap:8px;max-width:360px}'
     +'.sd-cf-toast{background:#fdf3f3;border:1px solid #e0b4b4;border-left:5px solid #c0392b;'
     +'  border-radius:8px;padding:9px 11px;box-shadow:0 4px 14px rgba(0,0,0,.25);'
@@ -5267,7 +5377,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
           arr.forEach(function(c){
             (c.messages||[]).forEach(function(m){
               if(!m || m.direction!=='outcoming' || String(m.status)!=='failed') return;
-              var t=Date.parse(String(m.date||'').replace(' ','T')+'Z')||0;
+              // час СРМ — ЛОКАЛЬНИЙ (без 'Z'!): із «+Z» він читався як UTC і зʼїжджав
+              // на 2-3 год уперед → старі невдалі повідомлення здавались свіжими
+              var t=Date.parse(String(m.date||'').replace(' ','T'))||0;
               if(t >= (cur.t||0)-10*60*1000) fail={ m:m, chat:c.chat };
             });
           });
@@ -5658,7 +5770,14 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 
   function skuOfRow(tr){
     var m=String((tr.cells&&tr.cells[1]?tr.cells[1].textContent:'')||'').match(/\(([\w\-]+)\)/g);
-    return m?m[m.length-1].replace(/[()]/g,''):null;
+    if(!m) return null;
+    // код — ОСТАННЯ дужка, що схожа на артикул (є цифри, без одиниць виміру);
+    // інакше «Ремінь 01082 (46mm)» давав би sku=46mm і колонка опту зʼїжджала
+    for(var i=m.length-1;i>=0;i--){
+      var c=m[i].replace(/[()]/g,'');
+      if(/^\d[\w\-]*$/.test(c) && !/^\d+(mm|мм|ml|мл|w|вт|v|в|g|г|kg|кг|l|л|см|cm)$/i.test(c)) return c;
+    }
+    return m[m.length-1].replace(/[()]/g,'');   // фолбек — як було
   }
 
   // домалювати колонку «Опт» у таблицю (перемальовується на кожен lkdom-пульс, поки view активний)
@@ -6476,8 +6595,11 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     if(busy) return;
     busy=true;
     var token=String(Date.now())+'_'+Math.random().toString(36).slice(2);
-    var tm=null;
-    function done(){ PAGE.removeEventListener('sdRozCommissionResult', onRes); clearTimeout(tm); busy=false; }
+    // fin — захист від «мертвого» таймера: ядро відповідає СИНХРОННО під час dispatchEvent,
+    // тож done() виконується ще до присвоєння tm; без прапорця таймер стрельнув би через 8 с
+    // і скинув busy уже НАСТУПНОГО запуску (див. зразок у lkBundleFix).
+    var tm=null, fin=false;
+    function done(){ if(fin) return; fin=true; PAGE.removeEventListener('sdRozCommissionResult', onRes); clearTimeout(tm); busy=false; }
     function onRes(){
       var raw=document.documentElement.getAttribute('data-sd-rozcomm-result');
       if(!raw) return;
@@ -7071,7 +7193,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   // (дата без часу → початок дня, щоб старі baseline без часу не ламались)
   function dtnorm(s){ s=String(s==null?'':s).replace('T',' ').trim(); return s.length<=10 ? (s+' 00:00:00') : s.slice(0,19); }
   function fmt(n){ return Number(n||0).toLocaleString('uk-UA',{minimumFractionDigits:2,maximumFractionDigits:2})+' ₴'; }
-  function num(v){ var m=String(v==null?'':v).replace(',','.').match(/-?[\d.]+/); return m?parseFloat(m[0]):0; }
+  // спершу зрізаємо ВСІ пробіли (зокрема нерозривні з toLocaleString) — інакше
+  // "1 250,00" матчився б лише до першого пробілу і давав 1 ₴ замість 1250 ₴
+  function num(v){ var m=String(v==null?'':v).replace(/[\s  ]/g,'').replace(',','.').match(/-?[\d.]+/); return m?parseFloat(m[0]):0; }
   function sleep(ms){ return new Promise(function(r){ setTimeout(r,ms); }); }
   // спільний шлюз ліміту API + внутрішній список заявок (модуль lkApiBudget)
   function sdApiFetch(u,o){ return (window.sdApi? window.sdApi.fetch(u,o) : fetch(u,o)); }
@@ -7209,7 +7333,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       var changed = !_baseCache || JSON.stringify(_baseCache.baseline)!==JSON.stringify(b);
       _baseCache={baseline:b, ts:Date.now()}; saveBase();
       if(changed && document.getElementById('lk-cash-box')) render(); // дані змінились — перемалювати
-    });
+    }).catch(function(){ _baseRevBusy=false; });   // фонова звірка впала — просто мовчимо
   }
   async function getBaseline(){
     if(_baseCache && _baseCache.baseline!=null){
@@ -7226,7 +7350,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     var nowStr=ymdhms(new Date());
     var body={amount:amount,date:nowStr,ts:nowStr,by:'',pin:pin};
     var t=await gmPost(BARCODE_URL+'/api/cash-baseline?token='+encodeURIComponent(BARCODE_TOKEN),body);
-    var d=JSON.parse(t); if(!d.ok) throw new Error(d.error||'err');
+    // сервер міг віддати HTML (502/Cloudflare) — тоді кажемо людською, а не «SyntaxError»
+    var d; try{ d=JSON.parse(t); }catch(e){ throw new Error('сервер обліку тимчасово недоступний — спробуй ще раз'); }
+    if(!d.ok) throw new Error(d.error||'err');
     _baseCache={baseline:d.baseline, ts:Date.now()}; saveBase(); // одразу в кеш — без зайвого запиту
     return d.baseline;
   }
@@ -7745,6 +7871,11 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 
   // назви SKU: харвест із рядків заявок + резолв відсутніх через products API (кеш)
   var nameMap=gGet(NAME_KEY)||{};
+  // страховка від безмежного росту: словник назв обрізаємо до ~2000 записів
+  (function(){ try{
+    var ks=Object.keys(nameMap);
+    if(ks.length>2000){ ks.slice(0, ks.length-2000).forEach(function(k){ delete nameMap[k]; }); gSet(NAME_KEY,nameMap); }
+  }catch(e){} })();
   function remember(sku,name){ if(sku && name && !nameMap[sku]) nameMap[sku]=name; }
   var resolving={};
   function resolveName(sku, cb){
@@ -8176,7 +8307,10 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     // (lk-side-on) — щоб на завантаженні вони не блимали перед перенесенням у меню
     +'html.lk-side-boot #lk-cash-btn,html.lk-side-boot #lk-pick-btn,html.lk-side-boot #lk-ukp-btn,'
     +'html.lk-side-boot #lk-where-btn,html.lk-side-on #lk-where-btn,'
-    +'html.lk-side-on #lk-cash-btn,html.lk-side-on #lk-pick-btn,html.lk-side-on #lk-ukp-btn{display:none!important}';
+    +'html.lk-side-on #lk-cash-btn,html.lk-side-on #lk-pick-btn,html.lk-side-on #lk-ukp-btn{display:none!important}'
+    // кружечки й плитки не мають висіти ПОВЕРХ модалок СРМ (z-index у них вищий за модалку)
+    +'html.sd-modal-open #lk-cash-btn,html.sd-modal-open #lk-pick-btn,html.sd-modal-open #lk-ukp-btn,'
+    +'html.sd-modal-open #lk-where-btn,html.sd-modal-open #lk-pay-tiles{display:none!important}';
   var st=document.createElement('style'); st.textContent=css;
   (document.head||document.documentElement).appendChild(st);
 
@@ -8425,8 +8559,12 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   function selPump(){
     if(_selBusy || !_selQ.length) return;
     _selBusy=true;
+    // спільний прапорець для СУСІДНІХ модулів select2 (lkAutoOrgByPayment,
+    // lkCheckCashbox): поки наша черга працює — вони не смикають свої попапи.
+    // Той самий прийом, що REALWIN.__lkChkBusy у кнопки «Чек».
+    try{ REALWIN.__lkSelBusy = Date.now(); }catch(e){}
     var task=_selQ.shift();
-    var fin=function(){ _selBusy=false; setTimeout(selPump,120); };
+    var fin=function(){ _selBusy=false; if(!_selQ.length){ try{ REALWIN.__lkSelBusy = 0; }catch(e){} } setTimeout(selPump,120); };
     try{ task(fin); }catch(e){ fin(); }
   }
   // вибрати значення у кастомному p-editable полі (оплата/доставка/організація) — через чергу
@@ -8493,7 +8631,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     if(isPickup && !paySet) wrap.classList.add('show');
     else wrap.classList.remove('show');
   }
-  window.addEventListener('lkdom', updatePayTiles); updatePayTiles();
+  var _ptT=null;    // дебаунс, щоб не перевіряти форму на кожну мутацію
+  window.addEventListener('lkdom', function(){ clearTimeout(_ptT); _ptT=setTimeout(updatePayTiles,250); });
+  updatePayTiles();
 })();
 }catch(e){ try{ console.warn("[SD] модуль «lkQuickPickup» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkQuickPickup ▲▲▲ */
@@ -8646,6 +8786,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     if(override[location.hash]){ f.classList.remove('sd-org-locked'); return; } // ручну зміну підтверджено
     if(cur===target){ f.classList.add('sd-org-locked'); return; }       // вже правильно → фіксуємо
     if(anyPopupOpen()){ dbg('відкритий інший попап — чекаю'); return; }  // не збивати оплату/інші select2
+    // черга швидких плиток (готівка/термінал) ще працює — їй пріоритет
+    if(REALWIN.__lkSelBusy && (Date.now()-REALWIN.__lkSelBusy)<15000){ dbg('черга select2 зайнята — чекаю'); return; }
     var key=location.hash+'|'+target;
     attempts[key]=(attempts[key]||0)+1;
     if(attempts[key]>12){ dbg('вичерпано спроби автозаміни'); return; }
@@ -8702,6 +8844,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     if(busy) return;
     // якщо касу зараз ставить кнопка «🧾 Чек» — не втручаємось (без гонки за поле cashRegisterId)
     if(REALWIN.__lkChkBusy && (Date.now()-REALWIN.__lkChkBusy)<15000){ dbg('кнопка чека керує — пропускаю'); return; }
+    // те саме для черги швидких плиток lkQuickPickup
+    if(REALWIN.__lkSelBusy && (Date.now()-REALWIN.__lkSelBusy)<15000){ dbg('черга select2 зайнята — пропускаю'); return; }
     var f=cashField(); if(!f) return;            // форми чека немає
     if(!payCashOrCard()){ dbg('оплата не готівка/термінал — пропускаю'); return; }
     if(!isEmpty(f)) return;                       // вже щось обрано — не чіпаємо
