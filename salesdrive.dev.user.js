@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.82
+// @version      2.83
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -40,6 +40,7 @@
      • lkOrderTier     — 💱 перерахунок цін заявки за типом ціни (опт/майстри) одним кліком
      • lkNpDescr       — 📋 шаблони опису у формі ТТН Нової пошти (редаговані)
      • lkStockWhere    — 🔎 «Де товар»: у яких заявках висить код (з урахуванням комплектів)
+     • lkCardReserve   — 🔒 «у роботі: N заявок · M шт» біля залишку в картці товару
      • lkRozCommission — ⚖ комісія Rozetka для товарів, дописаних менеджером
      • lkCatalogKits   — позначка «входить у набори» в каталозі Товари/Послуги + на сторінці товару
      • lkTtnPrintGuard — 🖨 попередження про повторний друк ТТН Укрпошти
@@ -6912,9 +6913,131 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   window.addEventListener('hashchange', function(){
     var ov=document.getElementById('lk-where-ov'); if(ov) ov.remove();
   });
+
+  // ---- публічний міст для сусідніх модулів (бейдж резерву на картці товару) ----
+  // count(sku) → {orders, qty}: та сама логіка, що й панель (з комплектами і
+  // спільними кешами lksw_cache_v1 / lksw_pid_v1) — жодного нового джерела даних.
+  function countFor(sku){
+    sku=String(sku||'').trim();
+    if(!sku) return Promise.resolve(null);
+    var idMap={};
+    return loadKits().then(function(){
+      var kitsOf=(comp2kits||{})[sku]||[];
+      var jobs=[ resolveSku(sku).then(function(list){
+        list.forEach(function(p){ idMap[p.id]={ qty:1, name:p.name, via:null }; });
+      }) ];
+      kitsOf.forEach(function(k){
+        jobs.push(resolveSku(k.kit).then(function(list){
+          list.forEach(function(p){ if(!idMap[p.id]) idMap[p.id]={ qty:k.qty||1, name:p.name||k.name, via:k.kit }; });
+        }));
+      });
+      return Promise.all(jobs);
+    }).then(function(){ return loadOrders(null); })
+      .then(function(rows){
+        var res=search(rows, sku, idMap), qty=0, ids={};
+        res.hits.forEach(function(h){ qty+=h.qty; ids[h.id]=1; });
+        return { orders:Object.keys(ids).length, qty:qty };
+      });
+  }
+  // відкрити панель одразу з пошуком по коду (клік по бейджу резерву)
+  function openWith(sku){
+    open();
+    var box=document.getElementById('lk-where-box'); if(!box) return;
+    var inp=box.querySelector('input'); if(inp) inp.value=String(sku||'').trim();
+    doSearch(box);
+  }
+  try{ window.sdWhere={ count:countFor, open:openWith }; }catch(e){}
 })();
 }catch(e){ try{ console.warn("[SD] модуль «lkStockWhere» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkStockWhere ▲▲▲ */
+
+/* ▼▼▼ МОДУЛЬ-START • lkCardReserve — 🔒 «у роботі: N заявок · M шт» біля залишку в картці товару ▼▼▼ */
+/* ===== У картці товару (модалка) біля рядка «Залишок» — скільки штук цього
+   коду зараз «висить» у заявках робочих статусів (з урахуванням комплектів).
+   Рахує window.sdWhere.count() з модуля «Де товар» — ті самі кеші, 0 нових
+   джерел даних. Клік по бейджу відкриває панель «Де товар» із цим кодом.
+   Якщо в роботі 0 — бейджа немає (не шумимо). ===== */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
+(function lkCardReserve(){
+  'use strict';
+  var css=''
+    +'.lkcr{display:inline-block;vertical-align:middle;margin-left:10px;padding:2px 9px;white-space:nowrap;'
+    +'  font:600 11.5px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;color:#4527A0;background:#EDE7F6;'
+    +'  border:1px solid #D1C4E9;border-radius:999px;cursor:pointer;user-select:none}'
+    +'.lkcr:hover{background:#E1D6F5;text-decoration:underline}';
+  var st=document.createElement('style'); st.textContent=css;
+  (document.head||document.documentElement).appendChild(st);
+
+  function norm(s){ return String(s==null?'':s).replace(/\u00A0/g,' ').replace(/\s+/g,' ').trim(); }
+
+  // корінь ВЕРХНЬОЇ видимої картки (картки складаються стосом — як у lkModalAnalogs)
+  function findRoot(){
+    var incs=document.querySelectorAll('[ng-include]'), found=null;
+    for(var i=0;i<incs.length;i++){
+      if((incs[i].getAttribute('ng-include')||'').indexOf('product-view-info')===-1) continue;
+      if(!incs[i].offsetParent) continue;
+      found=incs[i];
+    }
+    return found;
+  }
+  function labelRow(root, text){
+    var labels=root.querySelectorAll('label');
+    for(var i=0;i<labels.length;i++){
+      if(norm(labels[i].textContent)===text) return labels[i].parentElement;
+    }
+    return null;
+  }
+  function skuOf(root){
+    var row=labelRow(root,'SKU'); if(!row) return '';
+    return norm(String(row.textContent||'').replace(/SKU/,''));
+  }
+
+  // результат памʼятаємо 5 хв на код — щоб пульси DOM не перезапускали підрахунок
+  var mem={};
+  function countCached(sku){
+    var c=mem[sku];
+    if(c && Date.now()-c.t<5*60*1000) return Promise.resolve(c.v);
+    if(c && c.p) return c.p;                       // підрахунок уже йде
+    var p=window.sdWhere.count(sku).then(function(v){ mem[sku]={t:Date.now(), v:v}; return v; })
+      .catch(function(){ delete mem[sku]; return null; });
+    mem[sku]={t:0, p:p};
+    return p;
+  }
+
+  function process(){
+    if(!window.sdWhere) return;                    // модуль «Де товар» ще не піднявся
+    var root=findRoot(); if(!root) return;
+    var sku=skuOf(root);
+    var have=root.querySelector('.lkcr');
+    if(have && sku && have.getAttribute('data-sku')===sku) return;   // вже стоїть для цього товару
+    if(have) have.remove();                                          // інший товар — прибрати одразу
+    if(!sku) return;
+    var restRow=labelRow(root,'Залишок'); if(!restRow) return;
+    countCached(sku).then(function(v){
+      if(!v || !v.orders) return;                  // 0 у роботі → бейджа немає
+      var cur=findRoot(); if(cur!==root) return;   // поки рахували, картку змінили
+      if(skuOf(cur)!==sku) return;
+      if(cur.querySelector('.lkcr')) return;       // хтось уже домалював (другий пульс)
+      var b=document.createElement('span');
+      b.className='lkcr'; b.setAttribute('data-sku', sku);
+      b.textContent='🔒 у роботі: '+v.orders+' '+(v.orders===1?'заявка':(v.orders<5?'заявки':'заявок'))+' · '+v.qty+' шт';
+      b.title='Зарезервовано в незавершених заявках (з комплектами). Клік — показати, у яких саме.';
+      b.addEventListener('click',function(e){
+        e.preventDefault(); e.stopPropagation();
+        try{ window.sdWhere.open(sku); }catch(_){}
+      });
+      restRow.appendChild(b);
+    });
+  }
+
+  var t=null;
+  function soon(){ clearTimeout(t); t=setTimeout(process, 300); }
+  window.addEventListener('lkdom', soon);
+  window.addEventListener('hashchange', soon);
+  soon();
+})();
+}catch(e){ try{ console.warn("[SD] модуль «lkCardReserve» не запустився:", e); }catch(_){} }
+/* ▲▲▲ МОДУЛЬ-END • lkCardReserve ▲▲▲ */
 
 /* ▼▼▼ МОДУЛЬ-START • lkCatalogKits — Набори: позначка в каталозі «Товари» ▼▼▼ */
 /* ===== У списку Товари/Послуги біля SKU показуємо, що товар входить у набори
