@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.80
+// @version      2.81
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -803,7 +803,7 @@ var UPSELL_MAP_DATA = []; // вбудований запас прибрано: �
     }
 
     if (opts.scrollIntoView) { try { box.scrollIntoView({ block: "nearest", behavior: "smooth" }); } catch (e) {} }
-    fill(slots);
+    requestStock(slots);
     if (!opts.existing) armHideTimer();
   }
 
