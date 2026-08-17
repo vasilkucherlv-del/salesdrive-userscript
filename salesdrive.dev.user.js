@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.90
+// @version      2.91
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -6252,9 +6252,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 /* ▲▲▲ МОДУЛЬ-END • lkRoundPickup ▲▲▲ */
 
 /* ▼▼▼ МОДУЛЬ-START • lkOrderTier — 💱 перерахунок цін заявки за типом ціни (опт/майстри) ▼▼▼ */
-/* ===== Кнопка під таблицею товарів: одним кліком ставить усім рядкам ціну
-   «Великий опт» / «середній опт» / «майстри» / ROZETKA / роздріб — з прайсу самого
-   товару (рядки заявки вже несуть priceTypes, запити не потрібні). Спершу показує,
+/* ===== Плашка в колонці клієнта: одним кліком ставить усім рядкам ціну
+   «Великий опт» / «середній опт» / «майстри» — з прайсу самого товару
+   (рядки заявки вже несуть priceTypes, запити не потрібні). Спершу показує,
    що зміниться (стара сума → нова), і лише потім записує. Core: sdTierPrice.
    Зберігає менеджер — «Зберегти» самі не тиснемо. ===== */
 try{ // SD-ізоляція: помилка цього модуля не зупинить решту
@@ -6264,10 +6264,6 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 
   var css=''
     +'#lk-tier-wrap{margin:6px 0 2px;font:13px/1.5 Arial,sans-serif}'
-    +'#lk-tier-btn{display:inline-block;padding:6px 16px;border:none;border-radius:7px;'
-    +'  background:#00796B;color:#fff;font:700 13px/1.5 Arial,sans-serif;cursor:pointer;white-space:nowrap}'
-    +'#lk-tier-btn:hover{background:#00594f}'
-    +'#lk-tier-btn[disabled]{background:#9e9e9e;cursor:default}'
     +'.lk-tier-opt{margin-left:6px;padding:5px 13px;border:none;border-radius:6px;background:#00796B;'
     +'  color:#fff;font:700 13px/1.4 Arial,sans-serif;cursor:pointer}'
     +'.lk-tier-opt:hover{background:#00594f}'
@@ -6375,50 +6371,6 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     });
   }
 
-  function run(btn, res, wrap){
-    clearPrev();
-    btn.disabled=true; res.className=''; res.textContent='…';
-    invoke({mode:'list'}, function(d){
-      btn.disabled=false;
-      if(!d || !d.ok){ res.className='er'; res.textContent='✗ '+((d&&d.err)||'нема відповіді'); return; }
-      var tiers=(d.tiers||[]).slice().sort(function(a,b){
-        var ra=rank(a.name), rb=rank(b.name);
-        return ra!==rb ? ra-rb : a.name.localeCompare(b.name,'uk');
-      });
-      res.className=''; res.textContent='';
-      if(!tiers.length){ res.className='er'; res.textContent='у товарів заявки немає додаткових цін'; return; }
-      var lbl=document.createElement('span'); lbl.style.fontWeight='400';
-      lbl.textContent='Поставити ціни: ';
-      res.appendChild(lbl);
-      tiers.forEach(function(t){
-        var b=document.createElement('button'); b.type='button'; b.className='lk-tier-opt';
-        b.textContent=t.name;
-        b.title=t.name+' — є у '+t.n+' з '+d.items+' рядків';
-        b.addEventListener('click',function(e){
-          e.preventDefault(); e.stopPropagation();
-          res.textContent='рахую…';
-          invoke({mode:'preview', tier:t.name}, function(p){
-            if(!p || !p.ok){ res.className='er'; res.textContent='✗ '+((p&&p.err)||'нема відповіді'); return; }
-            res.textContent='';
-            showPreview(p, wrap, res);
-          });
-        });
-        res.appendChild(b);
-      });
-      var rb=document.createElement('button'); rb.type='button'; rb.className='lk-tier-opt';
-      rb.textContent='роздріб'; rb.title='повернути звичайну (роздрібну) ціну товарів';
-      rb.addEventListener('click',function(e){
-        e.preventDefault(); e.stopPropagation();
-        res.textContent='рахую…';
-        invoke({mode:'preview', tier:'retail'}, function(p){
-          if(!p || !p.ok){ res.className='er'; res.textContent='✗ '+((p&&p.err)||'нема відповіді'); return; }
-          res.textContent=''; showPreview(p, wrap, res);
-        });
-      });
-      res.appendChild(rb);
-    });
-  }
-
   // ---- підказка «у клієнта ОПТ: …» ----
   // Значення беремо з ВИДИМОГО рядка «ОПТ» панелі клієнта (він є лише коли поле
   // заповнене — contact.con_oPT_2). Ідентифікатор панелі — лейбл «Прізвище»;
@@ -6504,37 +6456,16 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     }
     var hint=document.createElement('div'); hint.id='lk-tier-hint'; hint.setAttribute('data-sig',sig);
     var lbl=document.createElement('span'); lbl.className='t';
-    // «роздріб» повертає звичайні ціни (ядро розуміє tier:'retail')
-    function retailBtn(){
-      var b=document.createElement('button'); b.type='button'; b.className='lk-tier-opt no';
-      b.textContent='роздріб';
-      b.title='Повернути звичайну (роздрібну) ціну всім рядкам';
-      b.addEventListener('click',function(e){
-        e.preventDefault(); e.stopPropagation();
-        var res=document.getElementById('lk-tier-res'), w=document.getElementById('lk-tier-wrap');
-        if(!res||!w) return;
-        clearPrev(); res.className=''; res.textContent='рахую…';
-        invoke({mode:'preview', tier:'retail'}, function(p){
-          if(!p || !p.ok){ res.className='er'; res.textContent='✗ '+((p&&p.err)||'нема відповіді'); return; }
-          res.textContent=''; showPreview(p, w, res);
-          var pv=document.getElementById('lk-tier-prev');
-          if(pv){ try{ pv.scrollIntoView({block:'nearest',behavior:'smooth'}); }catch(_){} }
-        });
-      });
-      return b;
-    }
     if(re){
       lbl.textContent='👤 ОПТ-клієнт: '+opt;
       hint.appendChild(lbl);
       hint.appendChild(tierBtn('💱 поставити ці ціни', re, opt, 'go'));
-      hint.appendChild(retailBtn());
     }else{
       lbl.textContent='💱 Ціни за типом:';
       hint.appendChild(lbl);
       hint.appendChild(tierBtn('Великий опт', /велик/i, 'Великий опт'));
       hint.appendChild(tierBtn('середній опт', /середн/i, 'середній опт'));
       hint.appendChild(tierBtn('майстри', /майст/i, 'майстри'));
-      hint.appendChild(retailBtn());
     }
     anchorRow.insertAdjacentElement('afterend', hint);
   }
