@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.84
+// @version      2.85
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -5001,10 +5001,22 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     return orderKey()+'|'+(isWarnPayment()?'1':'0')+'|'+(document.documentElement.getAttribute('data-sd-order-items')||'');
   }
 
-  var dismissedSig='';                 // «✕»: не малювати той самий стан знову
+  // «✕» прибирає банер НАЗАВЖДИ для цієї заявки (з підтвердженням) — вибір
+  // менеджера памʼятається в localStorage і переживає перезавантаження.
+  var HIDE_KEY='lk_stockpay_hide_v1', HIDE_TTL=60*24*60*60*1000; // 60 днів
+  function hiddenMap(){ try{ return JSON.parse(localStorage.getItem(HIDE_KEY))||{}; }catch(e){ return {}; } }
+  function isHidden(){ var m=hiddenMap(); var r=m[orderKey()]; return !!(r && Date.now()-r<HIDE_TTL); }
+  function hideForever(){
+    try{
+      var m=hiddenMap(), lim=Date.now()-HIDE_TTL;
+      Object.keys(m).forEach(function(k){ if(!m[k] || m[k]<lim) delete m[k]; }); // чистка старих
+      m[orderKey()]=Date.now();
+      localStorage.setItem(HIDE_KEY, JSON.stringify(m));
+    }catch(e){}
+  }
+
   function render(low, sp){
     var sig=curSig();
-    if(sig===dismissedSig) return;     // менеджер закрив цей стан — не набридаємо
     var existing=document.getElementById('sd-stockpay-warn');
     if(existing && existing.getAttribute('data-sig')===sig) return; // вже намальовано для цього стану
     removeWarn();
@@ -5015,8 +5027,12 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 
     var xBtn=document.createElement('button');
     xBtn.className='sd-x'; xBtn.type='button'; xBtn.textContent='×';
-    xBtn.title='Сховати (зʼявиться знову, якщо зміняться товари чи оплата)';
-    xBtn.addEventListener('click',function(){ dismissedSig=sig; removeWarn(); });
+    xBtn.title='Прибрати попередження для цієї заявки (запитаю підтвердження)';
+    xBtn.addEventListener('click',function(){
+      if(!confirm('Точно прибрати попередження про наявність для цієї заявки?\nВоно більше не зʼявиться для неї.')) return;
+      hideForever();
+      removeWarn();
+    });
     box.appendChild(xBtn);
 
     var top=document.createElement('div');
@@ -5058,6 +5074,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     if(document.documentElement.classList.contains('sd-modal-open')) return; // не заважаємо модалці товару
     var sp=insertPoint();              // якір — таблиця товарів картки заявки (як у допродажах)
     if(!sp || !onOrderPage()){ removeWarn(); return; } // нема картки заявки → банера нема (і на списку теж)
+    if(isHidden()){ removeWarn(); return; }            // менеджер прибрав його для цієї заявки
     var low=lowStock();
     if(low===null) return;            // даних ще нема
     if(!low.length){ removeWarn(); return; }
