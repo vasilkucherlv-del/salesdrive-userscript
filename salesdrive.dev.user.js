@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.86
+// @version      2.87
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -6260,6 +6260,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     +'#lk-tier-res{display:inline-block;margin-left:10px;vertical-align:middle;font-weight:700}'
     +'#lk-tier-res.ok{color:#1B5E20}'
     +'#lk-tier-res.er{color:#B71C1C}'
+    +'#lk-tier-hint{display:inline-flex;align-items:center;gap:8px;margin-left:12px;'
+    +'  padding:3px 6px 3px 10px;background:#fff6e0;border:1px solid #e6c26a;border-radius:7px;vertical-align:middle}'
+    +'#lk-tier-hint .t{font:700 12.5px/1.4 Arial,sans-serif;color:#7d5a00}'
     +'#lk-tier-prev{margin:6px 0 0;padding:7px 10px;border-left:3px solid #00796B;background:#e9f5f3;'
     +'  border-radius:5px;max-width:760px}'
     +'#lk-tier-prev table{border-collapse:collapse;font:12.5px/1.45 Arial,sans-serif}'
@@ -6398,6 +6401,72 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     });
   }
 
+  // ---- підказка «у клієнта ОПТ: …» ----
+  // Значення беремо з ВИДИМОГО рядка «ОПТ» панелі клієнта (він є лише коли поле
+  // заповнене — contact.con_oPT_2). Ідентифікатор панелі — лейбл «Прізвище»;
+  // body.innerText не скануємо (пастка «читаєш власну плашку», CLAUDE.md).
+  function clientOptText(){
+    var pan=null, els=document.querySelectorAll('label,b,span,div');
+    for(var i=0;i<els.length;i++){
+      var e=els[i]; if(e.children.length) continue;
+      if(String(e.textContent||'').replace(/\u00A0/g,' ').trim()==='Прізвище'){ pan=e.closest('.panel'); break; }
+    }
+    if(!pan) return null;
+    var all=pan.querySelectorAll('*');
+    for(var k=0;k<all.length;k++){
+      var el=all[k]; if(el.children.length>1) continue;
+      var own=[].map.call(el.childNodes,function(n){ return n.nodeType===3?n.textContent:''; })
+        .join('').replace(/\u00A0/g,' ').trim();
+      if(own!=='ОПТ') continue;
+      var row=el.closest('.form-group')||el.parentElement; if(!row) return null;
+      var val=String(row.textContent||'').replace(/\u00A0/g,' ').replace(/\s+/g,' ')
+        .replace(/^\s*ОПТ\s*/,'').trim();
+      if(!val || val==='...' || val==='---' || val==='…') return null;
+      return val.slice(0,30);
+    }
+    return null;
+  }
+  // текст ОПТ → регекс типу ціни товарів (назви типів не хардкодимо)
+  function tierReOf(opt){
+    var t=String(opt||'').toLowerCase();
+    if(/майстр|майстер/.test(t)) return /майст/i;
+    if(/середн/.test(t)) return /середн/i;
+    if(/велик/.test(t)) return /велик/i;
+    return null;
+  }
+  function hintSync(){
+    var wrap=document.getElementById('lk-tier-wrap');
+    var old=document.getElementById('lk-tier-hint');
+    if(!wrap || !onOrderPage()){ if(old) old.remove(); return; }
+    var opt=clientOptText(), re=tierReOf(opt);
+    if(!re){ if(old) old.remove(); return; }
+    var sig=(location.hash||'')+'|'+opt;
+    if(old && old.getAttribute('data-sig')===sig) return;   // вже стоїть для цього стану
+    if(old) old.remove();
+    var hint=document.createElement('span'); hint.id='lk-tier-hint'; hint.setAttribute('data-sig',sig);
+    var lbl=document.createElement('span'); lbl.className='t'; lbl.textContent='👤 у клієнта ОПТ: '+opt;
+    var go=document.createElement('button'); go.type='button'; go.className='lk-tier-opt go';
+    go.textContent='поставити ці ціни';
+    go.title='Показати превʼю цін типу «'+opt+'» для всіх рядків (запис — після підтвердження)';
+    go.addEventListener('click',function(e){
+      e.preventDefault(); e.stopPropagation();
+      var res=document.getElementById('lk-tier-res'), w=document.getElementById('lk-tier-wrap');
+      if(!res||!w) return;
+      clearPrev(); res.className=''; res.textContent='рахую…';
+      invoke({mode:'list'}, function(d){
+        if(!d || !d.ok){ res.className='er'; res.textContent='✗ '+((d&&d.err)||'нема відповіді'); return; }
+        var hit=(d.tiers||[]).filter(function(x){ return re.test(x.name); })[0];
+        if(!hit){ res.className='er'; res.textContent='у товарів заявки немає цін типу «'+opt+'»'; return; }
+        invoke({mode:'preview', tier:hit.name}, function(p){
+          if(!p || !p.ok){ res.className='er'; res.textContent='✗ '+((p&&p.err)||'нема відповіді'); return; }
+          res.textContent=''; showPreview(p, w, res);   // далі — той самий шлях, що й кнопки типів
+        });
+      });
+    });
+    hint.appendChild(lbl); hint.appendChild(go);
+    (wrap.firstChild||wrap).appendChild(hint);
+  }
+
   function mount(){
     if(!onOrderPage()){ var old=document.getElementById('lk-tier-wrap'); if(old) old.remove(); return; }
     if(document.getElementById('lk-tier-wrap')) return;
@@ -6414,7 +6483,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   }
 
   var t=null;
-  function soon(){ clearTimeout(t); t=setTimeout(mount,300); }
+  function soon(){ clearTimeout(t); t=setTimeout(function(){ mount(); hintSync(); },300); }
   soon();
   window.addEventListener('lkdom', soon);
   window.addEventListener('hashchange', function(){ clearPrev(); soon(); });
