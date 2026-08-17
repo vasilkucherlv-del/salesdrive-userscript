@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.89
+// @version      2.90
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -2338,12 +2338,29 @@ function __sdPageMain() {
       var q = num(x.count != null ? x.count : (x.amount != null ? x.amount : x.quantity));
       return q > 0 ? q : 1;
     }
+    // Службовий рядок упізнаємо по БУДЬ-ЯКОМУ рядковому полю item (і вкладеного
+    // .product): маркетплейс міняв формат — назва не завжди в name/documentName.
+    // Той самий прийом, що в hasDiscountStr нижче.
+    function hasNPStr(o) {
+      try {
+        for (var k in o) {
+          if (typeof o[k] === "string" && /new\s*product/i.test(o[k])) return true;
+        }
+      } catch (e) {}
+      return false;
+    }
     function isNP(x) {
-      return /new\s*product/i.test(String((x && (x.name || x.documentName)) || ""));
+      return !!x && (hasNPStr(x) || (x.product && hasNPStr(x.product)));
     }
 
     var pseudo = items.filter(isNP);
-    if (!pseudo.length) return respond({ ok: false, err: "NEW PRODUCT не знайдено" });
+    if (!pseudo.length) {
+      // діагностика: показуємо, ЩО насправді лежить у рядках vm
+      var seen = items.slice(0, 6).map(function (x) {
+        return String((x && (x.name || x.documentName || (x.product && x.product.documentName))) || "?").slice(0, 30);
+      }).join(", ");
+      return respond({ ok: false, err: "NEW PRODUCT не знайдено" + (seen ? " (у заявці: " + seen + ")" : "") });
+    }
 
     // ціль = ТІЛЬКИ рядок акції («Разом/Вместе дешевле»), БЕЗ DISCOUNT-рядка:
     // маркетплейс інколи кладе в DISCOUNT теж додатню ціну (напр., 8,00) — її не рахуємо
@@ -6324,7 +6341,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     clearPrev();
     var box=document.createElement('div'); box.id='lk-tier-prev';
     var chg=(d.rows||[]).filter(function(r){ return r['new']!=null && !r.same; });
-    var head='<div><b>'+esc(d.tier)+'</b>: сума '+fN(d.oldTotal)+' → <b>'+fN(d.newTotal)+' ₴</b>'
+    var head='<div><b>'+esc(d.tier==='retail'?'роздріб':d.tier)+'</b>: сума '+fN(d.oldTotal)+' → <b>'+fN(d.newTotal)+' ₴</b>'
       +' · змінюється рядків: '+chg.length+'/'+(d.rows||[]).length
       +(d.miss?(' · <span class="miss">без цієї ціни: '+d.miss+'</span>'):'')+'</div>';
     var rowsHtml=(d.rows||[]).map(function(r){
@@ -6487,32 +6504,53 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     }
     var hint=document.createElement('div'); hint.id='lk-tier-hint'; hint.setAttribute('data-sig',sig);
     var lbl=document.createElement('span'); lbl.className='t';
+    // «роздріб» повертає звичайні ціни (ядро розуміє tier:'retail')
+    function retailBtn(){
+      var b=document.createElement('button'); b.type='button'; b.className='lk-tier-opt no';
+      b.textContent='роздріб';
+      b.title='Повернути звичайну (роздрібну) ціну всім рядкам';
+      b.addEventListener('click',function(e){
+        e.preventDefault(); e.stopPropagation();
+        var res=document.getElementById('lk-tier-res'), w=document.getElementById('lk-tier-wrap');
+        if(!res||!w) return;
+        clearPrev(); res.className=''; res.textContent='рахую…';
+        invoke({mode:'preview', tier:'retail'}, function(p){
+          if(!p || !p.ok){ res.className='er'; res.textContent='✗ '+((p&&p.err)||'нема відповіді'); return; }
+          res.textContent=''; showPreview(p, w, res);
+          var pv=document.getElementById('lk-tier-prev');
+          if(pv){ try{ pv.scrollIntoView({block:'nearest',behavior:'smooth'}); }catch(_){} }
+        });
+      });
+      return b;
+    }
     if(re){
       lbl.textContent='👤 ОПТ-клієнт: '+opt;
       hint.appendChild(lbl);
       hint.appendChild(tierBtn('💱 поставити ці ціни', re, opt, 'go'));
+      hint.appendChild(retailBtn());
     }else{
       lbl.textContent='💱 Ціни за типом:';
       hint.appendChild(lbl);
       hint.appendChild(tierBtn('Великий опт', /велик/i, 'Великий опт'));
       hint.appendChild(tierBtn('середній опт', /середн/i, 'середній опт'));
       hint.appendChild(tierBtn('майстри', /майст/i, 'майстри'));
+      hint.appendChild(retailBtn());
     }
     anchorRow.insertAdjacentElement('afterend', hint);
   }
 
+  // Кнопки під таблицею більше НЕМАЄ (Василь: дублювала плашку в колонці клієнта).
+  // Контейнер лишився — у ньому живуть повідомлення (#lk-tier-res) і превʼю
+  // (#lk-tier-prev), які відкриває плашка.
   function mount(){
     if(!onOrderPage()){ var old=document.getElementById('lk-tier-wrap'); if(old) old.remove(); return; }
     if(document.getElementById('lk-tier-wrap')) return;
     var tbl=findSpot(); if(!tbl) return;
     var wrap=document.createElement('div'); wrap.id='lk-tier-wrap';
-    var btn=document.createElement('button'); btn.type='button'; btn.id='lk-tier-btn';
-    btn.textContent='💱 Ціни за типом (опт / майстри)';
     var res=document.createElement('span'); res.id='lk-tier-res';
     var line=document.createElement('div');
-    line.appendChild(btn); line.appendChild(res);
+    line.appendChild(res);
     wrap.appendChild(line);
-    btn.addEventListener('click',function(e){ e.preventDefault(); e.stopPropagation(); run(btn,res,wrap); });
     tbl.parentElement.insertBefore(wrap, tbl.nextSibling);
   }
 
