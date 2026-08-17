@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.83
+// @version      2.84
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -6650,7 +6650,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   var KITS_URL='https://barcode-printer-production-2b32.up.railway.app/api/kits?token=nab_8Kx2pQ7mLr4tW9vZ';
   // робочі статуси = товар ще «висить» за заявкою (не кінцевий продаж, не відмова)
   var WORK=[1,2,9,15,21,36];
-  var TTL=10*60*1000, KITS_TTL=6*60*60*1000;
+  var TTL=3*60*1000, KITS_TTL=6*60*60*1000;   // 3 хв: свіжіший бейдж резерву й панель (запит Василя, 2.84)
   // спільний шлюз ліміту API + внутрішній список заявок (модуль lkApiBudget)
   function sdApiFetch(u,o){ return (window.sdApi? window.sdApi.fetch(u,o) : fetch(u,o)); }
   function sdOrders(qs,page){ return window.sdApi.orders(qs,page); }
@@ -6992,11 +6992,11 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     return norm(String(row.textContent||'').replace(/SKU/,''));
   }
 
-  // результат памʼятаємо 5 хв на код — щоб пульси DOM не перезапускали підрахунок
+  // результат памʼятаємо 2 хв на код — щоб пульси DOM не перезапускали підрахунок
   var mem={};
   function countCached(sku){
     var c=mem[sku];
-    if(c && Date.now()-c.t<5*60*1000) return Promise.resolve(c.v);
+    if(c && Date.now()-c.t<2*60*1000) return Promise.resolve(c.v);
     if(c && c.p) return c.p;                       // підрахунок уже йде
     var p=window.sdWhere.count(sku).then(function(v){ mem[sku]={t:Date.now(), v:v}; return v; })
       .catch(function(){ delete mem[sku]; return null; });
