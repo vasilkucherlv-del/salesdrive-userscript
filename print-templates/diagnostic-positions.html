@@ -1,0 +1,37 @@
+{# ---------------------------------------------------------------------------
+   ДІАГНОСТИЧНА друкована форма (тимчасова, друкувати один раз).
+   Показує, які змінні СРМ передає в шаблон і які поля має кожен масив —
+   з цього видно точне ім'я масиву позицій і чи є в ньому «Назва (UA)».
+   Нічого не змінює: тільки виводить перелік.
+   --------------------------------------------------------------------------- #}
+<div style="font:13px/1.5 Arial,sans-serif">
+  <h3 style="margin:0 0 10px">Змінні цього шаблону</h3>
+  <table border="1" cellpadding="5" cellspacing="0" width="100%" style="border-collapse:collapse">
+    <tr style="background:#eee">
+      <th align="left" width="220">Змінна</th>
+      <th align="left" width="120">Тип</th>
+      <th align="left">Поля першого елемента (для масивів)</th>
+    </tr>
+    {% for k, v in _context %}
+      {% if k != '_parent' and k != '_seq' and k != '_key' %}
+      <tr>
+        <td valign="top"><b>{{ k }}</b></td>
+        <td valign="top">{% if v is iterable %}масив, елементів: {{ v|length }}{% else %}значення{% endif %}</td>
+        <td valign="top">
+          {% if v is iterable %}
+            {% for item in v %}
+              {% if loop.first %}
+                {% if item is iterable %}
+                  {% for f, fv in item %}{{ f }}{% if not loop.last %} · {% endif %}{% endfor %}
+                {% else %}
+                  (простий список)
+                {% endif %}
+              {% endif %}
+            {% endfor %}
+          {% endif %}
+        </td>
+      </tr>
+      {% endif %}
+    {% endfor %}
+  </table>
+</div>
