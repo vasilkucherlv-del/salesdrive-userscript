@@ -1,0 +1,48 @@
+{# Шаблон таблиці з товарами: назва береться з «Назва (UA)».
+   Якщо в позиції такого поля немає — друкується звичайна назва (product.print_name),
+   тобто гірше не стане в жодному разі. #}
+<div class="line-height-20px">
+
+    <table border="0" cellspacing="0" cellpadding="5" width="100%" class="bordered width-170px" style="overflow-wrap: break-word;" autosize="1">
+        <tbody>
+
+        <tr>
+            <th class="td-border-bottom-left">№</th>
+            <th class="td-border-bottom-left">{{product_position_name_headline}}</th>
+            <th class="td-border-bottom-left">Од.</th>
+            <th class="td-border-bottom-left">К-ть</th>
+            <th class="td-border-bottom-left" width="100">Ціна, грн</th>
+            <th class="td-border-bottom-left" width="100">Сума, грн</th>
+        </tr>
+
+        {% for product in product_positions %}
+        <tr>
+            <td class="td-border-bottom-left" align="center">{{product.sequence_number}}</td>
+            <td class="td-border-bottom-left">{% if product.print_name_ua is defined and product.print_name_ua %}{{ product.print_name_ua }}{% elseif product.name_translate is defined and product.name_translate %}{{ product.name_translate }}{% elseif product.nameTranslate is defined and product.nameTranslate %}{{ product.nameTranslate }}{% elseif product.name_ua is defined and product.name_ua %}{{ product.name_ua }}{% else %}{{ product.print_name }}{% endif %}</td>
+            <td class="td-border-bottom-left" align="center">{{product.unit}}</td>
+            <td class="td-border-bottom-left not-break" align="center">{{product.qty}}</td>
+            <td class="td-border-bottom-left not-break" align="right">{{product.price}}</td>
+            <td class="td-border-bottom-left not-break" align="right">{{product.amount_without_discount}}</td>
+        </tr>
+        {% endfor %}
+
+        <tr>
+            <td colspan="5" align="right" bordercolor="#fff" class="border-none">Всього:</td>
+            <td class="td-border-bottom-left not-break" align="right">{{product_position_amount_without_discount_total}}</td>
+        </tr>
+
+        {% if product_position_discount_total_number > 0 %}
+        <tr>
+            <td colspan="5" align="right" bordercolor="#fff" class="border-none">Знижка:</td>
+            <td class="td-border-bottom-left not-break" align="right">{{product_position_discount_total}}</td>
+        </tr>
+        <tr>
+            <td colspan="5" align="right" bordercolor="#fff" class="border-none">Всього до сплати:</td>
+            <td class="td-border-bottom-left not-break" align="right">{{product_position_amount_total}}</td>
+        </tr>
+        {% endif %}
+
+        </tbody>
+    </table>
+
+</div>

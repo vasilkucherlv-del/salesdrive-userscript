@@ -1,0 +1,53 @@
+<div class="line-height-20px">
+
+    <table border="0" cellspacing="0" cellpadding="5" width="100%" class="bordered width-170px" style="overflow-wrap: break-word;" autosize="1">
+        <tbody>
+
+        <tr>
+            <th class="td-border-bottom-left">№</th>
+            <th class="td-border-bottom-left">{{product_position_name_headline}}</th>
+            <th class="td-border-bottom-left">Од.</th>
+            <th class="td-border-bottom-left">К-ть</th>
+            <th class="td-border-bottom-left" width="100">Ціна без ПДВ, грн</th>
+            <th class="td-border-bottom-left" width="100">Сума без ПДВ, грн</th>
+        </tr>
+
+        {% for product in product_positions %}
+        <tr>
+            <td class="td-border-bottom-left" align="center">{{product.sequence_number}}</td>
+            <td class="td-border-bottom-left">{{product.print_name}}</td>
+            <td class="td-border-bottom-left" align="center">{{product.unit}}</td>
+            <td class="td-border-bottom-left not-break" align="center">{{product.qty}}</td>
+            <td class="td-border-bottom-left not-break" align="right">{{product.price_without_vat}}</td>
+            <td class="td-border-bottom-left not-break" align="right">{{product.amount_without_discount_without_vat}}</td>
+        </tr>
+        {% endfor %}
+
+        {% if product_position_discount_total_number > 0 %}
+        <tr>
+            <td colspan="5" align="right" bordercolor="#fff" class="border-none">Сума з ПДВ:</td>
+            <td class="td-border-bottom-left not-break" align="right">{{product_position_amount_without_discount_total}}</td>
+        </tr>
+        <tr>
+            <td colspan="5" align="right" bordercolor="#fff" class="border-none">Знижка з ПДВ:</td>
+            <td class="td-border-bottom-left not-break" align="right">{{product_position_discount_total}}</td>
+        </tr>
+        {% endif %}
+
+        <tr>
+            <td colspan="5" align="right" bordercolor="#fff" class="border-none">До оплати без ПДВ:</td>
+            <td class="td-border-bottom-left not-break" align="right">{{product_position_amount_without_vat_total}}</td>
+        </tr>
+        <tr>
+            <td colspan="5" align="right" bordercolor="#fff" class="border-none">ПДВ:</td>
+            <td class="td-border-bottom-left not-break" align="right">{{product_position_vat_total}}</td>
+        </tr>
+        <tr>
+            <td colspan="5" align="right" bordercolor="#fff" class="border-none">До оплати з ПДВ:</td>
+            <td class="td-border-bottom-left not-break" align="right">{{product_position_amount_total}}</td>
+        </tr>
+
+        </tbody>
+    </table>
+
+</div>

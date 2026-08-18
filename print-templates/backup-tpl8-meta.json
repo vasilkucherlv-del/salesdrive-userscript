@@ -1,0 +1,12 @@
+{
+ "id": 8,
+ "documentType": "salesInvoice",
+ "isStandard": 1,
+ "name": "цвцв",
+ "sort": 8,
+ "languageId": 4,
+ "productCaption": "Найменування товарів / послуг",
+ "allOrganization": 1,
+ "isStandardProductTemplate": 0,
+ "organizations": []
+}

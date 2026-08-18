@@ -1,0 +1,85 @@
+<style>
+table.table-header td{
+    font-size: 18px;
+}
+</style>
+<table width="100%" class="table-header">
+    <tr>
+        <td align="left" valign="top" style="width: 190px; min-width: 190px;"><b>Постачальник:</b></td>
+        <td style="padding-bottom: 10px;" {% if logo %} valign="top" width="450px"{% else %} width="100%"{% endif %}>
+            {{organization_fullname}}
+            {% if account_number %}
+            	<br />р/р: {{account_number}}{% if account_bank_name %} у {{account_bank_name}}{% endif %}{% if account_bank_code %}, МФО: {{account_bank_code}}{% endif %}
+            {% endif %}
+            {% if organization_code %}<br />ЄДРПОУ: {{organization_code}}{% endif %}{% if nds and organization_nds_number %}, ІПН: {{organization_nds_number}}{% endif %}
+            {% if organization_address %}<br />Адреса: {{organization_address}}{% endif %}
+            {% if phone %}<br />Телефон: {{phone}}{% endif %}
+            {% if not nds %}<br>Не є платником ПДВ{% endif %}
+        </td>
+        {% if logo %}
+        <td align="right" valign="top"><img src="{{logo}}" style="max-width: 225px; max-height: 150px;"></td>
+        {% endif %}
+    </tr>
+    {% if payer_name %}
+    <tr>
+        <td align="left" valign="top"><b>Платник:</b></td>
+        <td style="padding-bottom: 10px;" {% if logo %} colspan="2"{% endif %}>{{payer_name}}
+            {% if payer_code %}<br />ЄДРПОУ: {{payer_code}}{% endif %}
+            {% if payer_nds and payer_nds_number %}<br />ІПН: {{payer_nds_number}}{% endif %}
+            {% if payer_account_number %}
+                <br />р/р: {{payer_account_number}}
+                {% if payer_account_bank_name %} в {{payer_account_bank_name}}{% endif %}{% if payer_account_bank_code %}, МФО: {{payer_account_bank_code}}{% endif %}
+            {% endif %}
+            {% if payer_address %}<br />Адреса: {{payer_address}}{% endif %}
+        </td>
+    </tr>
+    {% endif %}
+    {% if address_delivery %}
+        <tr>
+            <td align="left" valign="top"><b>Адреса доставки:</b></td>
+            <td style="padding-bottom: 10px;" {% if logo %}colspan="2"{% endif %}>
+                {{address_delivery}}
+            </td>
+        </tr>
+    {% endif %}
+    {% if base %}
+        <tr>
+            <td align="left" valign="top"><b>Підстава:</b></td>
+            <td style="padding-bottom: 10px;" {% if logo %}colspan="2"{% endif %}>
+                {{base}}
+            </td>
+        </tr>
+    {% endif %}
+</table>
+
+<div align="center" style="margin-top:14px; margin-bottom: 15px; font-size: 18px;"><strong>Видаткова накладна № {{document_number}} від {{document_date}} р.</strong></div>
+{{positions|raw}}
+
+<div style="margin-top:20px;">Разом прописом: {{text_total}}{% if nds %},<br />у т.ч. ПДВ: {{text_nds_total}}{% endif %}
+</div>
+
+<table width="100%" border="0" style="margin-top: 30px;">
+    <tbody>
+    <tr>
+        <td align="left" width="45%"><b>Від постачальника*</b></td>
+        <td width="10%"></td>
+        <td align="left" width="45%"><b>Отримав(ла)</b></td>
+    </tr>
+    <tr>
+        <td align="left" style="border-bottom: 1px solid;">
+        {% if signature %}
+            <img src="{{signature}}" width="{{sizeSignature}}">
+        {% else %}  
+            <br /><br /><br />
+        {% endif %}  
+        </td>
+        <td></td>
+        <td align="left" style="border-bottom: 1px solid;"><br /></td>
+    </tr>
+    <tr>
+        <td valign="top" style="font-size: 0.85em;"><br />* Відповідальний за здійснення господарської операції і правильність її оформлення</td>
+        <td></td>
+        <td valign="top" style="font-size: 0.85em;"><br />За довіреністю №___________ від ___________</td>
+    </tr>
+    </tbody>
+</table>
