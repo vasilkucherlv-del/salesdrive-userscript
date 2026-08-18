@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      2.91
+// @version      2.92
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -8874,6 +8874,10 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 try{ // SD-ізоляція: помилка цього модуля не зупинить решту
 (function lkAutoOrgByPayment(){
   'use strict';
+  // вікно сторінки: тут читаємо спільний прапорець черги select2 (__lkSelBusy).
+  // БЕЗ цього оголошення звернення до REALWIN у strict-режимі кидає ReferenceError
+  // і організація перестає підставлятися (баг 2.82-2.91).
+  var REALWIN=(typeof unsafeWindow!=='undefined'&&unsafeWindow)?unsafeWindow:window;
   // картка заявки З номером АБО сторінка СТВОРЕННЯ (#/order/create) — на створенні
   // організацію для самовивозу теж треба ставити (кнопка «➕ Самовивіз»)
   function onOrderPage(){ var h=location.hash||''; return /\/order\/create/.test(h) || /\/order\/\w+\/\d+/.test(h); }
