@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.92
+// @version      2.93
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -2800,7 +2800,30 @@ function __sdPageMain() {
       var src = priceSource(it);
       return (src && Array.isArray(src.priceTypes)) ? src.priceTypes : [];
     }
+    // ---- віртуальний тип «дрібний опт»: закупівельна × 1.35, до кратного 5 ----
+    // Закупівельної в рядку заявки немає (costPrice часто 0), але вона точно
+    // відновлюється з готових опт-цін товару: «Великий опт» = закуп × 1.2,
+    // «середній опт» = закуп × 1.25 (перевірено на живих товарах — оцінки збігаються).
+    var SMALL_K = 1.35;
+    function round5(v) { return Math.ceil((v - 1) / 5) * 5; }   // та сама формула, що для «майстрів»
+    function baseCost(it) {
+      var acc = [];
+      tiersOf(it).forEach(function (pt) {
+        var n = normName(pt.name), p = tierEff(pt);
+        if (!(p > 0)) return;
+        if (/велик/.test(n)) acc.push(p / 1.2);
+        else if (/середн/.test(n)) acc.push(p / 1.25);
+      });
+      if (!acc.length) return null;
+      var sum = 0; acc.forEach(function (x) { sum += x; });
+      return sum / acc.length;
+    }
+
     function priceForTier(it, tier) {
+      if (tier === "small") {                       // дрібний опт — рахуємо, а не беремо з прайсу
+        var b = baseCost(it);
+        return (b == null || !(b > 0)) ? null : round5(b * SMALL_K);
+      }
       if (tier === "retail") {
         var src = priceSource(it);
         var dp = Number(src && (src.defaultPrice != null ? src.defaultPrice : src.price));
@@ -6337,7 +6360,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     clearPrev();
     var box=document.createElement('div'); box.id='lk-tier-prev';
     var chg=(d.rows||[]).filter(function(r){ return r['new']!=null && !r.same; });
-    var head='<div><b>'+esc(d.tier==='retail'?'роздріб':d.tier)+'</b>: сума '+fN(d.oldTotal)+' → <b>'+fN(d.newTotal)+' ₴</b>'
+    var tierHuman = d.tier==='retail' ? 'роздріб' : (d.tier==='small' ? 'дрібний опт' : d.tier);
+    var head='<div><b>'+esc(tierHuman)+'</b>: сума '+fN(d.oldTotal)+' → <b>'+fN(d.newTotal)+' ₴</b>'
       +' · змінюється рядків: '+chg.length+'/'+(d.rows||[]).length
       +(d.miss?(' · <span class="miss">без цієї ціни: '+d.miss+'</span>'):'')+'</div>';
     var rowsHtml=(d.rows||[]).map(function(r){
@@ -6400,6 +6424,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   // текст ОПТ → регекс типу ціни товарів (назви типів не хардкодимо)
   function tierReOf(opt){
     var t=String(opt||'').toLowerCase();
+    if(/дрібн|дрибн|мілк|мелк/.test(t)) return 'small';   // рахункова ціна, не з прайсу
     if(/майстр|майстер/.test(t)) return /майст/i;
     if(/середн/.test(t)) return /середн/i;
     if(/велик/.test(t)) return /велик/i;
@@ -6411,6 +6436,15 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     if(!res||!w) return;
     clearPrev(); res.className=''; res.textContent='рахую…';
     try{ res.scrollIntoView({block:'nearest',behavior:'smooth'}); }catch(_){}
+    if(re==='small'){                       // дрібний опт: ядро рахує сам, список типів не потрібен
+      invoke({mode:'preview', tier:'small'}, function(p){
+        if(!p || !p.ok){ res.className='er'; res.textContent='✗ '+((p&&p.err)||'нема відповіді'); return; }
+        res.textContent=''; showPreview(p, w, res);
+        var pv0=document.getElementById('lk-tier-prev');
+        if(pv0){ try{ pv0.scrollIntoView({block:'nearest',behavior:'smooth'}); }catch(_){} }
+      });
+      return;
+    }
     invoke({mode:'list'}, function(d){
       if(!d || !d.ok){ res.className='er'; res.textContent='✗ '+((d&&d.err)||'нема відповіді'); return; }
       var hit=(d.tiers||[]).filter(function(x){ return re.test(x.name); })[0];
@@ -6466,6 +6500,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       hint.appendChild(tierBtn('Великий опт', /велик/i, 'Великий опт'));
       hint.appendChild(tierBtn('середній опт', /середн/i, 'середній опт'));
       hint.appendChild(tierBtn('майстри', /майст/i, 'майстри'));
+      hint.appendChild(tierBtn('дрібний опт', 'small', 'дрібний опт'));
     }
     anchorRow.insertAdjacentElement('afterend', hint);
   }
