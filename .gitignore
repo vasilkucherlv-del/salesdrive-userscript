@@ -3,3 +3,4 @@ e2e/*.png
 node_modules/
 package-lock.json
 package.json
+graphify-out/
