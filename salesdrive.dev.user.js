@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.95
+// @version      2.96
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -2618,6 +2618,8 @@ function __sdPageMain() {
 
     // ROZETKA рахується НЕ від собівартості, а від роздрібної ціни картки: +5% до цілого
     var ROZ_K = 1.05;
+    // коли попереджати про зростання собівартості: у гривнях АБО у відсотках
+    var COST_ALARM_UAH = 10, COST_ALARM_PCT = 5;
     // правила опту (lartek): 1.2 / 1.25 / 1.3-вгору-до-5
     function tiers(b) {
       return {
@@ -2678,15 +2680,39 @@ function __sdPageMain() {
           // роздріб у СРМ лежить у defaultPrice (як у lkComplectPrice і в ядрі sdTierPrice);
           // item.price у картці буває порожнє — саме через нього колонка писала «немає»
           var retail = num(item.defaultPrice) || num(item.price);
-          var p3 = retail > 0 ? Math.round(retail * ROZ_K) : null;
+
+          // СТАРА собівартість: окремого поля немає, але опт-ціни картки ставив цей же
+          // модуль із попередньої накладної (Великий опт = собів × 1.2, середній × 1.25),
+          // тож із них вона й відновлюється. Якщо опт-ціни правили руками — оцінка приблизна.
+          var _co = [], _o2 = ptOf(item, 2), _o5 = ptOf(item, 5);
+          if (_o2 > 0) _co.push(_o2 / 1.2);
+          if (_o5 > 0) _co.push(_o5 / 1.25);
+          var costOld = _co.length ? Math.round((_co.reduce(function (a, b) { return a + b; }, 0) / _co.length) * 100) / 100 : null;
+          var delta = costOld != null ? Math.round((x.base - costOld) * 100) / 100 : null;
+          var deltaPct = (costOld > 0 && delta != null) ? Math.round(delta / costOld * 1000) / 10 : null;
+          // тривога: підросло помітно в грошах АБО у відсотках (дешеві й дорогі товари)
+          var alarm = delta != null && (delta >= COST_ALARM_UAH || (deltaPct != null && deltaPct >= COST_ALARM_PCT));
+          // рекомендований роздріб — зберігаємо ТУ САМУ націнку, що була у товару
+          var markOld = (costOld > 0 && retail > 0) ? Math.round(retail / costOld * 100) / 100 : null;
+          var newRetail = (alarm && markOld > 0) ? Math.ceil((x.base * markOld - 1) / 5) * 5 : null;
+          // ROZETKA рахуємо від того роздробу, який буде після підняття (інакше розʼїдуться)
+          var retailForRoz = newRetail || retail;
+          var p3 = retailForRoz > 0 ? Math.round(retailForRoz * ROZ_K) : null;
           var row = { pid: x.pid, sku: x.sku || String(x.pid), name: x.name, base: x.base,
                       o2: ptOf(item, 2), o5: ptOf(item, 5), o7: ptOf(item, 7),
                       p2: t.p2, p5: t.p5, p7: t.p7,
                       retail: retail > 0 ? retail : null, o3: ptOf(item, 3), p3: p3,
+                      costOld: costOld, delta: delta, deltaPct: deltaPct, alarm: !!alarm,
+                      markOld: markOld, markNew: (x.base > 0 && retail > 0) ? Math.round(retail / x.base * 100) / 100 : null,
+                      newRetail: newRetail,
                       retailDbg: retail > 0 ? null : ("defaultPrice=" + item.defaultPrice + ", price=" + item.price) };
           if (mode !== "apply") { results.push(row); return; }   // preview: тільки читаємо
 
           var o = toPut(item), created = [];
+          // роздрібну ціну піднімаємо лише тоді, коли рахунок показав падіння маржі
+          // пишемо ТІЛЬКИ defaultPrice — саме там роздріб; item.price у картці порожнє
+          // і його призначення не підтверджене, тому не чіпаємо (щоб не зіпсувати картку)
+          if (newRetail != null && newRetail > 0) { o.defaultPrice = newRetail; row.retailSet = newRetail; }
           var pairs = [[2, t.p2], [5, t.p5], [7, t.p7]];
           if (p3 != null && p3 > 0) pairs.push([3, p3]);   // ROZETKA = роздріб + 5%
           pairs.forEach(function (pair) {
@@ -5837,6 +5863,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     +'td.lk-arropt-td .od{color:#7d8f8c;font-size:12.5px;margin-top:2px}'
     +'td.lk-arropt-td.er{color:#B71C1C;font-weight:700;font-size:13px;white-space:normal}'
     +'td.lk-arropt-td.blank{background:transparent;border-left:none}'
+    +'td.lk-roz-td .warn{color:#B71C1C;font-weight:800}'
+    +'td.lk-roz-td .od.warn{font-size:13px}'
     +'th.lk-arropt-td{font:700 13px/1.5 Arial,sans-serif;background:#e3f4f2;color:#00695c;'
     +'  padding:8px 16px;border-left:3px solid #00897B;white-space:nowrap}'
     +'td.lk-arropt-td .nw{display:flex;align-items:center}'
@@ -5873,7 +5901,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       th.textContent='Опт: Вел / Сер / Май';
       headRow.appendChild(th);
       var th2=document.createElement('th'); th2.className='lk-arropt-td lk-roz-th';
-      th2.textContent='Роздріб → ROZETKA';
+      th2.textContent='Собівартість · роздріб · ROZETKA';
       headRow.appendChild(th2);
     }
     var i=0;
@@ -5924,7 +5952,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       // друга колонка: роздрібна ціна картки і ROZETKA (+5% від роздробу)
       var td2=tr.querySelector('td.lk-roz-td');
       if(!td2){ td2=document.createElement('td'); td2.className='lk-arropt-td lk-roz-td'; tr.appendChild(td2); }
-      var sig2=[view.applied?1:0, r.retail==null?'':r.retail, r.o3==null?'':r.o3, r.p3==null?'':r.p3].join('|');
+      var sig2=[view.applied?1:0, r.retail==null?'':r.retail, r.o3==null?'':r.o3, r.p3==null?'':r.p3,
+                r.costOld==null?'':r.costOld, r.delta==null?'':r.delta, r.alarm?1:0,
+                r.newRetail||'', r.markOld==null?'':r.markOld, r.markNew==null?'':r.markNew].join('|');
       if(td2.getAttribute('data-sig')===sig2) return;
       td2.setAttribute('data-sig', sig2);
       td2.innerHTML=''; td2.classList.remove('er');
@@ -5934,14 +5964,39 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
         if(r.retailDbg) no.title='у картці товару: '+r.retailDbg;   // щоб причина була видна одразу
         td2.appendChild(no);
       }else{
+        // 1) собівартість: було → стало (стара відновлена з опт-цін картки)
+        if(r.costOld!=null){
+          var cl=document.createElement('div');
+          cl.className='od'+(r.alarm?' warn':'');
+          cl.textContent=(r.alarm?'⚠ ':'')+'собів. '+fmtN(r.costOld)+' → '+fmtN(r.base)
+            +(r.delta>0?(' (+'+fmtN(r.delta)+' грн'+(r.deltaPct!=null?', +'+fmtN(r.deltaPct)+'%':'')+')'):'');
+          cl.title='Стара собівартість — з опт-цін картки (Великий опт ÷ 1.2). Якщо їх правили руками, оцінка приблизна.';
+          td2.appendChild(cl);
+        }
+        // 2) роздріб: або спокійний рядок, або підказка «підніми»
         var rl1=document.createElement('div'); rl1.className='nw';
         var rt=document.createElement('span');
-        rt.textContent=(view.applied?'✓ ':'')+fmtN(r.retail)+' → '+r.p3;
+        if(r.newRetail){
+          rt.textContent=(view.applied?'✓ ':'')+'роздріб '+fmtN(r.retail)+' → '+r.newRetail;
+          rl1.classList.add('warn');
+        }else{
+          rt.textContent=(view.applied?'✓ ':'')+'роздріб '+fmtN(r.retail);
+        }
         rl1.appendChild(rt);
-        var rl2=document.createElement('div'); rl2.className='od';
-        rl2.textContent = r.o3==null ? 'ROZETKA не було — нова'
-                        : (Number(r.o3)===Number(r.p3) ? 'без змін' : ('було: '+fmtN(r.o3)));
-        td2.appendChild(rl1); td2.appendChild(rl2);
+        td2.appendChild(rl1);
+        // 3) націнка: як була і якою стане, якщо роздріб не чіпати
+        if(r.markOld!=null || r.markNew!=null){
+          var mk=document.createElement('div'); mk.className='od';
+          mk.textContent='націнка '+(r.markOld!=null?('×'+fmtN(r.markOld)):'—')
+            +(r.markNew!=null?(' → ×'+fmtN(r.markNew)):'')
+            +(r.newRetail?' (після підняття лишиться ×'+fmtN(r.markOld)+')':'');
+          td2.appendChild(mk);
+        }
+        // 4) ROZETKA
+        var rz=document.createElement('div'); rz.className='od';
+        rz.textContent='ROZETKA: '+(r.p3==null?'—':r.p3)
+          +(r.o3==null?' (не було)':(Number(r.o3)===Number(r.p3)?' (без змін)':(' (було '+fmtN(r.o3)+')')));
+        td2.appendChild(rz);
       }
       td2.title=(r.name||'')+' · ROZETKA = роздріб × 1.05, до цілого';
     });
