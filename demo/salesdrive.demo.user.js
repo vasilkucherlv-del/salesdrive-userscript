@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         SalesDrive — Допродажі + База знань (ДЕМО 2.94)
+// @name         SalesDrive — Допродажі + База знань (ДЕМО 2.95)
 // @namespace    lartek-komplektom-demo
-// @version      2.94
-// @description  ДЕМО-версія 2.94 для локальної перевірки: ставиться поряд з робочою і НЕ оновлюється автоматично. Усе те саме, що в робочій, плюс колонка «Роздріб → ROZETKA» у надходженні.
+// @version      2.95
+// @description  ДЕМО-версія 2.95 для локальної перевірки: ставиться поряд з робочою і НЕ оновлюється автоматично. Колонка «Роздріб → ROZETKA» у надходженні.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
 // @run-at       document-idle
@@ -2673,12 +2673,15 @@ function __sdPageMain() {
           var item = j.response && j.response.item;
           if (!item) throw new Error("картка товару недоступна");
           // роздрібна ціна картки товару і ROZETKA (тип 3): нова ROZETKA = роздріб + 5%
-          var retail = num(item.price);
+          // роздріб у СРМ лежить у defaultPrice (як у lkComplectPrice і в ядрі sdTierPrice);
+          // item.price у картці буває порожнє — саме через нього колонка писала «немає»
+          var retail = num(item.defaultPrice) || num(item.price);
           var p3 = retail > 0 ? Math.round(retail * ROZ_K) : null;
           var row = { pid: x.pid, sku: x.sku || String(x.pid), name: x.name, base: x.base,
                       o2: ptOf(item, 2), o5: ptOf(item, 5), o7: ptOf(item, 7),
                       p2: t.p2, p5: t.p5, p7: t.p7,
-                      retail: retail > 0 ? retail : null, o3: ptOf(item, 3), p3: p3 };
+                      retail: retail > 0 ? retail : null, o3: ptOf(item, 3), p3: p3,
+                      retailDbg: retail > 0 ? null : ("defaultPrice=" + item.defaultPrice + ", price=" + item.price) };
           if (mode !== "apply") { results.push(row); return; }   // preview: тільки читаємо
 
           var o = toPut(item), created = [];
@@ -5926,6 +5929,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       if(r.retail==null){
         var no=document.createElement('div'); no.className='od';
         no.textContent='роздрібної ціни немає';
+        if(r.retailDbg) no.title='у картці товару: '+r.retailDbg;   // щоб причина була видна одразу
         td2.appendChild(no);
       }else{
         var rl1=document.createElement('div'); rl1.className='nw';
