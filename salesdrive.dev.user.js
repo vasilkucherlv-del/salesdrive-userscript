@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.93
+// @version      2.94
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -2616,6 +2616,8 @@ function __sdPageMain() {
       return o;
     }
 
+    // ROZETKA рахується НЕ від собівартості, а від роздрібної ціни картки: +5% до цілого
+    var ROZ_K = 1.05;
     // правила опту (lartek): 1.2 / 1.25 / 1.3-вгору-до-5
     function tiers(b) {
       return {
@@ -2672,13 +2674,19 @@ function __sdPageMain() {
         .then(function (j) {
           var item = j.response && j.response.item;
           if (!item) throw new Error("картка товару недоступна");
+          // роздрібна ціна картки товару і ROZETKA (тип 3): нова ROZETKA = роздріб + 5%
+          var retail = num(item.price);
+          var p3 = retail > 0 ? Math.round(retail * ROZ_K) : null;
           var row = { pid: x.pid, sku: x.sku || String(x.pid), name: x.name, base: x.base,
                       o2: ptOf(item, 2), o5: ptOf(item, 5), o7: ptOf(item, 7),
-                      p2: t.p2, p5: t.p5, p7: t.p7 };
+                      p2: t.p2, p5: t.p5, p7: t.p7,
+                      retail: retail > 0 ? retail : null, o3: ptOf(item, 3), p3: p3 };
           if (mode !== "apply") { results.push(row); return; }   // preview: тільки читаємо
 
           var o = toPut(item), created = [];
-          [[2, t.p2], [5, t.p5], [7, t.p7]].forEach(function (pair) {
+          var pairs = [[2, t.p2], [5, t.p5], [7, t.p7]];
+          if (p3 != null && p3 > 0) pairs.push([3, p3]);   // ROZETKA = роздріб + 5%
+          pairs.forEach(function (pair) {
             var pr = null;
             (o.priceTypes || []).forEach(function (p) { if (Number(p.priceTypeId) === pair[0]) pr = p; });
             if (pr) { pr.price = money(pair[1]); pr.defaultPrice = pair[1]; }
@@ -5861,6 +5869,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       var th=document.createElement('th'); th.className='lk-arropt-td';
       th.textContent='Опт: Вел / Сер / Май';
       headRow.appendChild(th);
+      var th2=document.createElement('th'); th2.className='lk-arropt-td lk-roz-th';
+      th2.textContent='Роздріб → ROZETKA';
+      headRow.appendChild(th2);
     }
     var i=0;
     [].forEach.call(t.querySelectorAll('tr[ng-repeat^="invoiceItem"]'),function(tr){
@@ -5906,6 +5917,29 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
         : (changed?('було: '+fmtN(r.o2)+' / '+fmtN(r.o5)+' / '+fmtN(r.o7)):'без змін');
       td.appendChild(l1); td.appendChild(l2);
       td.title=(r.name||'')+(r.created&&r.created.length?(' · створено типи: '+r.created.join(',')):'');
+
+      // друга колонка: роздрібна ціна картки і ROZETKA (+5% від роздробу)
+      var td2=tr.querySelector('td.lk-roz-td');
+      if(!td2){ td2=document.createElement('td'); td2.className='lk-arropt-td lk-roz-td'; tr.appendChild(td2); }
+      var sig2=[view.applied?1:0, r.retail==null?'':r.retail, r.o3==null?'':r.o3, r.p3==null?'':r.p3].join('|');
+      if(td2.getAttribute('data-sig')===sig2) return;
+      td2.setAttribute('data-sig', sig2);
+      td2.innerHTML=''; td2.classList.remove('er');
+      if(r.retail==null){
+        var no=document.createElement('div'); no.className='od';
+        no.textContent='роздрібної ціни немає';
+        td2.appendChild(no);
+      }else{
+        var rl1=document.createElement('div'); rl1.className='nw';
+        var rt=document.createElement('span');
+        rt.textContent=(view.applied?'✓ ':'')+fmtN(r.retail)+' → '+r.p3;
+        rl1.appendChild(rt);
+        var rl2=document.createElement('div'); rl2.className='od';
+        rl2.textContent = r.o3==null ? 'ROZETKA не було — нова'
+                        : (Number(r.o3)===Number(r.p3) ? 'без змін' : ('було: '+fmtN(r.o3)));
+        td2.appendChild(rl1); td2.appendChild(rl2);
+      }
+      td2.title=(r.name||'')+' · ROZETKA = роздріб × 1.05, до цілого';
     });
     // не-товарні рядки (підсумок тощо) — порожня клітинка, щоб сітка не зʼїхала
     [].forEach.call(t.querySelectorAll('tr'),function(tr){
@@ -5915,11 +5949,13 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       if(!tr.cells || tr.cells.length<3) return;
       var td=document.createElement('td'); td.className='lk-arropt-td blank';
       tr.appendChild(td);
+      var td2=document.createElement('td'); td2.className='lk-arropt-td blank';
+      tr.appendChild(td2);
     });
   }
   function clearView(){
     view=null;
-    [].forEach.call(document.querySelectorAll('.lk-arropt-td'),function(n){ n.remove(); });
+    [].forEach.call(document.querySelectorAll('.lk-arropt-td, .lk-roz-td, .lk-roz-th'),function(n){ n.remove(); });
     var r=document.getElementById('lk-arropt-res'); if(r) r.remove();
   }
   function setView(rows, applied, rate){
