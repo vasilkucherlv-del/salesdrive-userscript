@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.00
+// @version      3.01
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -3134,7 +3134,17 @@ function __sdPageMain() {
     }
 
     function priceForTier(it, tier) {
-      if (tier === "small") {                       // дрібний опт — рахуємо, а не беремо з прайсу
+      if (tier === "small") {
+        // спершу СПРАВЖНЯ ціна типу «Дрібний опт» (у СРМ це тип 9) — вона є в багатьох
+        // товарів; рахунок ×1.35 лишається фолбеком для тих, де її не проставили
+        var list0 = tiersOf(it);
+        for (var q = 0; q < list0.length; q++) {
+          var nm0 = normName(list0[q].name);
+          if (/дрібн|дрибн/.test(nm0) || Number(list0[q].priceTypeId) === 9) {
+            var real = tierEff(list0[q]);
+            if (real > 0) return real;
+          }
+        }
         var b = baseCost(it);
         return (b == null || !(b > 0)) ? null : round5(b * SMALL_K);
       }
@@ -3939,6 +3949,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     +'  font:600 12.5px/1.5 sans-serif;white-space:nowrap}'
     +'.lkcp-chip .l{color:#7a869f;font-weight:700}'
     +'.lkcp-sum,.lkcp-chip{cursor:pointer}'
+    +'.lkcp-chip.part{opacity:.75;border-style:dashed}'
     +'.lkcp-sum:hover,.lkcp-chip:hover{filter:brightness(.97)}'
     +'.lkcp-sum.lkcp-copied,.lkcp-chip.lkcp-copied{outline:2px solid #2e7d32;background:#d7f0dc}'
     +'.lkcp-copied::after{content:" ✓";color:#2e7d32;font-weight:800}'
@@ -3983,7 +3994,16 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
         var row=null, c=String(sku).trim();
         if(rows) for(var i=0;i<rows.length;i++){ if(String(rows[i].sku).trim()===c){ row=rows[i]; break; } }
         if(!row && rows && rows.length) row=rows[0];
-        return row ? { retail:(row.defaultPrice!=null?Number(row.defaultPrice):null), pt:(row.priceType||{}) } : null;
+        if(!row) return null;
+        // ціни за типами приходять МАСИВОМ priceTypes:[{id,name,price}] — саме тут була
+        // помилка: читалось row.priceType (однина), словник виходив порожній і всі чипи
+        // тихо падали на роздрібну суму
+        var pt={};
+        if(Array.isArray(row.priceTypes)) row.priceTypes.forEach(function(x){
+          if(x && x.id!=null && Number(x.price)>0) pt[String(x.id)]=Number(x.price);
+        });
+        else if(row.priceType && typeof row.priceType==='object') pt=row.priceType;   // старий формат
+        return { retail:(row.defaultPrice!=null?Number(row.defaultPrice):null), pt:pt };
       })
       .catch(function(){ return null; });
   }
@@ -4241,12 +4261,12 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     });
     return out;
   }
-  // ціна складника за типом; якщо тип не заданий (0/нема) — беремо роздрібну
+  // ціна складника за типом; null — якщо саме цієї ціни в складника НЕМАЄ
+  // (раніше тут був фолбек на роздріб — через нього чипи показували суму роздробу)
   function tierValue(info, tierId){
-    if(!info) return 0;
-    var p = (tierId==='retail') ? info.retail : (info.pt && info.pt[tierId]);
-    if(!(p>0)) p = info.retail;
-    return (p>0) ? Number(p) : 0;
+    if(!info) return null;
+    var p = (tierId==='retail') ? info.retail : (info.pt && info.pt[String(tierId)]);
+    return (p>0) ? Number(p) : null;
   }
 
   function decorate(cell){
@@ -4293,9 +4313,18 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       var known=0;
       items.forEach(function(it){ if(it.sku in cache) known++; });
       var pend=(known<items.length);
-      function sumFor(tierId){ var s=0; items.forEach(function(it){ if(it.sku in cache) s+=tierValue(cache[it.sku],tierId)*it.qty; }); return s; }
+      function sumFor(tierId){
+        var s=0, miss=0;
+        items.forEach(function(it){
+          if(!(it.sku in cache)) return;
+          var v=tierValue(cache[it.sku],tierId);
+          if(v==null){ miss++; return; }
+          s+=v*it.qty;
+        });
+        return { sum:s, miss:miss };
+      }
       // роздрібна — головний зелений бейдж (клік копіює суму)
-      var retail=sumFor('retail');
+      var retail=sumFor('retail').sum;
       var badge=h.querySelector('.lkcp-sum');
       if(!badge){ badge=document.createElement('span'); badge.className='lkcp-sum';
         badge.title='Натисніть, щоб підставити суму в роздрібну ціну товару';
@@ -4316,10 +4345,13 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
         });
         var html='';
         ids.forEach(function(id){
-          var s=sumFor(id);
-          html+='<span class="lkcp-chip" data-copy="'+Math.round(s)+'" data-tier="'+esc(id)+'"'
-             +' title="Натисніть, щоб підставити суму в ціну «'+esc(TIER_NAMES[id])+'» цього товару">'
-             +'<span class="l">'+esc(TIER_NAMES[id])+'</span>'+fmtInt(s)+(pend?' …':'')+'</span>';
+          var r=sumFor(id);
+          var tip = r.miss
+            ? ('У '+r.miss+' складник(ів) немає ціни «'+TIER_NAMES[id]+'» — сума лише з тих, де вона є')
+            : ('Натисніть, щоб підставити суму в ціну «'+TIER_NAMES[id]+'» цього товару');
+          html+='<span class="lkcp-chip'+(r.miss?' part':'')+'" data-copy="'+Math.round(r.sum)+'" data-tier="'+esc(id)+'"'
+             +' title="'+esc(tip)+'">'
+             +'<span class="l">'+esc(TIER_NAMES[id])+'</span>'+fmtInt(r.sum)+(r.miss?' *':'')+(pend?' …':'')+'</span>';
         });
         if(box.getAttribute('data-sig')!==html){ box.setAttribute('data-sig', html); box.innerHTML=html; }
       } else if(box){ box.remove(); }   // режим перегляду — без чипів опт/майстри
