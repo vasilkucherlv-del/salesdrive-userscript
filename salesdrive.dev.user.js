@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.96
+// @version      2.97
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -2739,6 +2739,218 @@ function __sdPageMain() {
           results.push({ pid: x.pid, sku: x.sku || String(x.pid), name: x.name, base: x.base, err: String((e && e.message) || e) });
         })
         .then(function () { setTimeout(step, mode === "apply" ? 250 : 120); });   // не гатимо сервер
+    }
+    step();
+  });
+
+  // ---------- ПЕРЕРАХУНОК ЦІН КОМПЛЕКТІВ ПІСЛЯ НАДХОДЖЕННЯ ----------
+  // Модуль lkArrivalOpt шле подію sdKitRecalc зі списком комплектів, яких торкнулась
+  // накладна (склад комплектів приходить із kits-API — його вантажить модуль, бо там
+  // потрібен GM_xmlhttpRequest). Ядро рахує собівартість комплекту як суму собівартостей
+  // складників × кількість: для складника з накладної — НОВА ціна закупки, для решти —
+  // відновлена з їхніх опт-цін (Великий опт ÷ 1.2), як і для звичайних товарів.
+  // mode='preview' — лише читає; mode='apply' — пише ціни комплектів.
+  window.addEventListener("sdKitRecalc", function () {
+    var token = document.documentElement.getAttribute("data-sd-kit-token") || "";
+    var mode = document.documentElement.getAttribute("data-sd-kit-mode") || "preview";
+    var req = {};
+    try { req = JSON.parse(document.documentElement.getAttribute("data-sd-kit-req") || "{}") || {}; } catch (e) {}
+    function respond(o) {
+      o.token = token; o.mode = mode;
+      document.documentElement.setAttribute("data-sd-kit-result", JSON.stringify(o));
+      window.dispatchEvent(new Event("sdKitRecalcResult"));
+    }
+    function num(v) { var n = parseFloat(String(v == null ? "" : v).replace(/\s/g, "").replace(",", ".")); return isNaN(n) ? 0 : n; }
+    function money(n) { n = Math.round(Number(n) * 100) / 100; return n.toFixed(2).replace(".", ","); }
+    function r2(n) { return Math.round(Number(n) * 100) / 100; }
+
+    // собівартості з накладної збирає САМЕ ядро (модуль у пісочниці не має надійного
+    // доступу до Angular-скоупів): mode='costs' — швидка відповідь {sku: ціна × курс}
+    function invoiceCosts() {
+      var vm = null, out = {}, rate = 1;
+      try {
+        var els = document.querySelectorAll("[ng-click]");
+        for (var i = 0; i < els.length; i++) {
+          try {
+            var sc = window.angular.element(els[i]).scope();
+            while (sc && !sc.viewModel) sc = sc.$parent;
+            if (sc && sc.viewModel && sc.viewModel.item && sc.viewModel.item.documentItems) { vm = sc.viewModel; break; }
+          } catch (e) {}
+        }
+      } catch (e) {}
+      if (!vm) return null;
+      rate = num(vm.item.currencyRate) || 1;
+      (vm.item.documentItems || []).forEach(function (di) {
+        var sku = String((di.product && di.product.sku) || "").trim();
+        var pr = num(di.price);
+        if (sku && pr > 0) out[sku] = r2(pr * rate);
+      });
+      return out;
+    }
+    if (mode === "costs") {
+      var c0 = invoiceCosts();
+      return c0 ? respond({ ok: true, fresh: c0 }) : respond({ ok: false, err: "накладну не знайдено (viewModel)" });
+    }
+
+    var kits = Array.isArray(req.kits) ? req.kits : [];          // [{sku, name, comps:[{sku, qty}]}]
+    var fresh = (req.fresh && Object.keys(req.fresh).length) ? req.fresh : (invoiceCosts() || {});
+    if (!kits.length) return respond({ ok: false, err: "комплектів не передано" });
+
+    function csrfHead() {
+      var host = document.querySelector("[ng-app],[data-ng-app]") || document.querySelector(".ng-scope") || document.body;
+      var inj = window.angular.element(host).injector() || window.angular.element(document.documentElement).injector();
+      var cs = inj.get("CsrfService");
+      var H = { "Content-Type": "application/json;charset=utf-8", "Accept": "application/json" };
+      H[cs.getHeaderKey()] = cs.getCsrfToken();
+      return H;
+    }
+    function toPut(it) {
+      var o = JSON.parse(JSON.stringify(it));
+      delete o.restCount;
+      o.balances = Array.isArray(o.balances) ? o.balances : [];
+      if (o.price == null) o.price = "";
+      if (o.volume == null) o.volume = "";
+      else if (typeof o.volume === "number") o.volume = String(o.volume);
+      if (typeof o.discount === "number") o.discount = money(o.discount);
+      (o.priceTypes || []).forEach(function (p) {
+        p.priceTypeId = String(p.priceTypeId);
+        p.price = money(p.price);
+        if (typeof p.discount === "number") p.discount = money(p.discount);
+      });
+      return o;
+    }
+    function ptOf(item, id) {
+      var v = null;
+      (item.priceTypes || []).forEach(function (p) { if (Number(p.priceTypeId) === id) v = num(p.price); });
+      return v;
+    }
+    // собівартість картки, відновлена з її ж опт-цін (те саме правило, що для товарів)
+    function costFromCard(item) {
+      var acc = [], o2 = ptOf(item, 2), o5 = ptOf(item, 5);
+      if (o2 > 0) acc.push(o2 / 1.2);
+      if (o5 > 0) acc.push(o5 / 1.25);
+      if (!acc.length) return null;
+      var sum = 0; acc.forEach(function (x) { sum += x; });
+      return r2(sum / acc.length);
+    }
+    function tiers(b) {
+      return { p2: Math.round(b * 1.2), p5: Math.round(b * 1.25), p7: Math.ceil((b * 1.3 - 1) / 5) * 5 };
+    }
+
+    // sku → картка товару (кеш на час прогону, щоб не бити той самий товар двічі)
+    var cardCache = {};
+    function cardBySku(sku, preferKit) {
+      var key = String(sku) + (preferKit ? "#k" : "#p");
+      if (cardCache[key] !== undefined) return Promise.resolve(cardCache[key]);
+      return fetch("/products/data/?active=1&filter[sku]=" + encodeURIComponent(sku) + "&formId=1",
+        { credentials: "include", headers: { "Accept": "application/json" } })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (j) {
+          var b = j && (j.response || j), rows = (b && (b.data || b.rows)) || [];
+          var hit = null, hitKit = null;
+          rows.forEach(function (x) {
+            if (String(x.sku).trim() !== String(sku).trim()) return;
+            if (Number(x.isComplect) === 1) { if (!hitKit) hitKit = x; }
+            else if (!hit) hit = x;
+          });
+          var pick = preferKit ? (hitKit || hit) : (hit || hitKit);
+          if (!pick || pick.id == null) { cardCache[key] = null; return null; }
+          return fetch("/products/" + pick.id + "/?formId=1", { credentials: "include", headers: { "Accept": "application/json" } })
+            .then(function (r) { return r.ok ? r.json() : null; })
+            .then(function (jj) {
+              var item = jj && jj.response && jj.response.item;
+              cardCache[key] = item || null;
+              return cardCache[key];
+            });
+        })
+        .catch(function () { cardCache[key] = null; return null; });
+    }
+
+    var out = [], idx = 0;
+    function progress() {
+      document.documentElement.setAttribute("data-sd-kit-progress", idx + "/" + kits.length);
+      window.dispatchEvent(new Event("sdKitRecalcProgress"));
+    }
+
+    function handleKit(kit) {
+      var comps = kit.comps || [];
+      // собівартості складників: стара (з їхніх опт-цін) і нова (з накладної, якщо є)
+      return comps.reduce(function (chain, c) {
+        return chain.then(function (acc) {
+          return cardBySku(c.sku, false).then(function (card) {
+            var old = card ? costFromCard(card) : null;
+            var qty = num(c.qty) || 1;
+            var nw = (fresh[String(c.sku)] != null) ? num(fresh[String(c.sku)]) : old;
+            acc.push({ sku: c.sku, qty: qty, old: old, nw: nw,
+                       name: String((card && (card.documentName || card.name)) || c.name || "").slice(0, 40),
+                       fromInvoice: fresh[String(c.sku)] != null });
+            return acc;
+          });
+        });
+      }, Promise.resolve([])).then(function (parts) {
+        var missing = parts.filter(function (x) { return x.nw == null || !(x.nw > 0); });
+        if (missing.length) {
+          return { sku: kit.sku, name: kit.name, parts: parts,
+                   err: "немає даних по складнику: " + missing.map(function (m) { return m.sku; }).join(", ") };
+        }
+        var costNew = r2(parts.reduce(function (s2, x) { return s2 + x.nw * x.qty; }, 0));
+        var haveOld = parts.every(function (x) { return x.old != null && x.old > 0; });
+        var costOld = haveOld ? r2(parts.reduce(function (s2, x) { return s2 + x.old * x.qty; }, 0)) : null;
+        var t = tiers(costNew);
+        return cardBySku(kit.sku, true).then(function (kc) {
+          if (!kc) return { sku: kit.sku, name: kit.name, parts: parts, err: "картка комплекту не знайдена" };
+          var retail = num(kc.defaultPrice) || num(kc.price);
+          var delta = costOld != null ? r2(costNew - costOld) : null;
+          var deltaPct = (costOld > 0 && delta != null) ? Math.round(delta / costOld * 1000) / 10 : null;
+          var alarm = delta != null && (delta >= 10 || (deltaPct != null && deltaPct >= 5));
+          var markOld = (costOld > 0 && retail > 0) ? r2(retail / costOld) : null;
+          var newRetail = (alarm && markOld > 0) ? Math.ceil((costNew * markOld - 1) / 5) * 5 : null;
+          var p3 = (newRetail || retail) > 0 ? Math.round((newRetail || retail) * 1.05) : null;
+          var row = { sku: kit.sku, name: kit.name || String(kc.documentName || kc.name || "").slice(0, 60),
+                      pid: kc.id, parts: parts, costOld: costOld, costNew: costNew,
+                      delta: delta, deltaPct: deltaPct, alarm: !!alarm,
+                      retail: retail > 0 ? retail : null, markOld: markOld, newRetail: newRetail,
+                      o2: ptOf(kc, 2), o5: ptOf(kc, 5), o7: ptOf(kc, 7), o3: ptOf(kc, 3),
+                      p2: t.p2, p5: t.p5, p7: t.p7, p3: p3 };
+          if (mode !== "apply") return row;
+          if (req.skip && req.skip.indexOf(String(kit.sku)) >= 0) { row.skipped = true; return row; }
+
+          var o = toPut(kc), created = [];
+          if (newRetail != null && newRetail > 0) { o.defaultPrice = newRetail; row.retailSet = newRetail; }
+          var pairs = [[2, t.p2], [5, t.p5], [7, t.p7]];
+          if (p3 != null && p3 > 0) pairs.push([3, p3]);
+          pairs.forEach(function (pair) {
+            var pr = null;
+            (o.priceTypes || []).forEach(function (p) { if (Number(p.priceTypeId) === pair[0]) pr = p; });
+            if (pr) { pr.price = money(pair[1]); pr.defaultPrice = pair[1]; }
+            else {
+              if (!o.priceTypes) o.priceTypes = [];
+              o.priceTypes.push({ productId: o.id, priceTypeId: String(pair[0]), price: money(pair[1]),
+                                  currencyId: 0, discount: "0,00", percentDiscount: 0, defaultPrice: pair[1] });
+              created.push(pair[0]);
+            }
+          });
+          return fetch("/products/" + o.id + "/?formId=" + o.formId,
+            { method: "PUT", credentials: "include", headers: csrfHead(), body: JSON.stringify(o) })
+            .then(function (pr) {
+              if (pr.status !== 200) throw new Error("HTTP " + pr.status);
+              row.created = created;
+              return row;
+            });
+        });
+      }).catch(function (e) {
+        return { sku: kit.sku, name: kit.name, err: String(e && e.message || e).slice(0, 80) };
+      });
+    }
+
+    function step() {
+      progress();
+      if (idx >= kits.length) return respond({ ok: true, rows: out });
+      var kit = kits[idx++];
+      handleKit(kit).then(function (row) {
+        out.push(row);
+        setTimeout(step, mode === "apply" ? 250 : 120);   // не гатимо сервер
+      });
     }
     step();
   });
@@ -5834,10 +6046,15 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 /* ▲▲▲ МОДУЛЬ-END • lkArrivalCount ▲▲▲ */
 
 /* ▼▼▼ МОДУЛЬ-START • lkArrivalOpt — 💰 опт-ціни товарів із собівартості накладної ▼▼▼ */
-/* ===== Кнопка на «Надходженні товарів»: рахує з собівартості (ціна закупки × курс
-   валюти накладної) ціни Великий опт (×1.2), середній опт (×1.25), майстри (×1.3
-   вгору до 5) і показує їх КОЛОНКОЮ прямо біля кожного товару (нові жирним, «було»
-   дрібним). Запис у картки товарів — лише після «✅ Записати». Core: sdArrivalOpt. ===== */
+/* ===== Кнопки на «Надходженні товарів»:
+   1) «💰 Опт-ціни з собівартості» — рахує з собівартості (ціна закупки × курс валюти
+      накладної) ціни Великий опт (×1.2), середній опт (×1.25), майстри (×1.3 вгору до 5)
+      і показує їх КОЛОНКОЮ біля кожного товару; друга колонка — собівартість було→стало,
+      націнка і підказка «підніми роздріб», плюс ROZETKA (+5% від роздробу).
+   2) «🧩 Ціни комплектів» — знаходить комплекти, до складу яких входять товари накладної
+      (склад із kits-API), рахує їхню нову собівартість як суму складників і показує нові
+      ціни. Core: sdArrivalOpt і sdKitRecalc.
+   Запис у картки товарів/комплектів — лише після «✅ Записати». ===== */
 try{ // SD-ізоляція: помилка цього модуля не зупинить решту
 (function lkArrivalOpt(){
   'use strict';
@@ -5864,6 +6081,16 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     +'td.lk-arropt-td.er{color:#B71C1C;font-weight:700;font-size:13px;white-space:normal}'
     +'td.lk-arropt-td.blank{background:transparent;border-left:none}'
     +'td.lk-roz-td .warn{color:#B71C1C;font-weight:800}'
+    +'#lk-kits-res{margin:10px 0;padding:10px 12px;border:1px solid #b08cc7;border-left:4px solid #7b4fa0;'
+    +'  background:#f7f1fb;border-radius:6px;font:13px/1.6 Arial,sans-serif;color:#3b2350;'
+    +'  max-width:1100px;box-sizing:border-box;position:relative}'
+    +'#lk-kits-res .h{font-weight:700;color:#5c3080;margin-bottom:5px}'
+    +'#lk-kits-res .row{padding:3px 0;border-top:1px dashed #d9c7e6}'
+    +'#lk-kits-res .row.warn{color:#B71C1C;font-weight:700}'
+    +'#lk-kits-res .er{color:#B71C1C;font-size:12.5px;padding:2px 0}'
+    +'#lk-kits-res .act{margin-top:8px}'
+    +'#lk-kits-res .x{position:absolute;top:5px;right:9px;border:none;background:none;cursor:pointer;'
+    +'  font-size:17px;color:#5c3080}'
     +'td.lk-roz-td .od.warn{font-size:13px}'
     +'th.lk-arropt-td{font:700 13px/1.5 Arial,sans-serif;background:#e3f4f2;color:#00695c;'
     +'  padding:8px 16px;border-left:3px solid #00897B;white-space:nowrap}'
@@ -6144,6 +6371,173 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     }, function(p){ btn.textContent='💰 Читаю '+p+'…'; });
   }
 
+  // ---- комплекти: склад беремо з того самого kits-API і того самого кешу, що lkNaboryInline ----
+  var KITS_APP='https://barcode-printer-production-2b32.up.railway.app';
+  var KITS_TOKEN='nab_8Kx2pQ7mLr4tW9vZ';
+  var KITS_TTL=6*60*60*1000;
+  function fetchKits(){
+    var url=KITS_APP+'/api/kits?token='+encodeURIComponent(KITS_TOKEN);
+    return new Promise(function(resolve,reject){
+      function done(t){ try{ var d=JSON.parse(t); d.ok?resolve(d.kits||{}):reject(new Error(d.error||'no')); }catch(e){ reject(e); } }
+      if(typeof GM_xmlhttpRequest!=='undefined'){
+        GM_xmlhttpRequest({ method:'GET', url:url,
+          onload:function(r){ (r.status>=200&&r.status<300)?done(r.responseText):reject(new Error('HTTP '+r.status)); },
+          onerror:function(){ reject(new Error('net')); } });
+      } else { fetch(url).then(function(r){ return r.text(); }).then(done).catch(reject); }
+    });
+  }
+  function kitsData(){
+    // спершу спільний кеш (його наповнює lkNaboryInline) — щоб не смикати мережу зайвий раз
+    try{
+      var c=GM_getValue('lknb_cache2',null);
+      if(c){ var o=JSON.parse(c); if(o&&o.kits&&Date.now()-o.ts<KITS_TTL) return Promise.resolve(o.kits); }
+    }catch(_){}
+    return fetchKits().then(function(kits){
+      try{ GM_setValue('lknb_cache2', JSON.stringify({ts:Date.now(),kits:kits})); }catch(_){}
+      return kits;
+    });
+  }
+
+  // собівартості рядків накладної просимо в ЯДРА (воно має доступ до Angular-скоупів)
+  function invoiceCosts(){
+    return new Promise(function(resolve){
+      invokeKits('costs', [], {}, [], function(res){ resolve((res&&res.ok&&res.fresh)||{}); });
+    });
+  }
+
+  var kitView=null;   // {rows, applied}
+  function kitBox(){
+    var old=document.getElementById('lk-kits-res'); if(old) old.remove();
+    var box=document.createElement('div'); box.id='lk-kits-res';
+    var x=document.createElement('button'); x.className='x'; x.textContent='✕';
+    x.addEventListener('click',function(){ kitView=null; var b=document.getElementById('lk-kits-res'); if(b) b.remove(); });
+    box.appendChild(x);
+    var t=document.querySelector('table.document-invoice-products');
+    if(t&&t.parentElement) t.parentElement.insertBefore(box, t.nextSibling);
+    else document.body.appendChild(box);
+    return box;
+  }
+  function fmt(n){ return String(n==null?'—':n).replace('.',','); }
+
+  function renderKits(box, rows, applied){
+    box.querySelectorAll('.row,.h,.er,.act').forEach(function(n){ n.remove(); });
+    var h=document.createElement('div'); h.className='h';
+    h.textContent=(applied?'✓ Записано. ':'')+'Комплекти зі складниками з цієї накладної: '+rows.length;
+    box.appendChild(h);
+    rows.forEach(function(r){
+      if(r.err){
+        var e=document.createElement('div'); e.className='er';
+        e.textContent='✗ '+(r.sku||'')+' '+(r.name||'')+' — '+r.err;
+        box.appendChild(e); return;
+      }
+      var d=document.createElement('div'); d.className='row'+(r.alarm?' warn':'');
+      var cb=document.createElement('input'); cb.type='checkbox'; cb.checked=!r.skip;
+      cb.className='lk-arropt-chk';
+      cb.addEventListener('change',function(){ r.skip=!cb.checked; d.style.opacity=r.skip?'0.45':''; });
+      if(!applied) d.appendChild(cb);
+      var txt=document.createElement('span');
+      txt.textContent=(r.alarm?'⚠ ':'')+r.sku+' · '+String(r.name||'').slice(0,42)
+        +' — собів. '+fmt(r.costOld)+' → '+fmt(r.costNew)
+        +(r.delta!=null&&r.delta>0?(' (+'+fmt(r.delta)+' грн'+(r.deltaPct!=null?', +'+fmt(r.deltaPct)+'%':'')+')'):'')
+        +' | опт '+r.p2+' / '+r.p5+' / '+r.p7
+        +(r.newRetail?(' | роздріб '+fmt(r.retail)+' → '+r.newRetail):(r.retail?(' | роздріб '+fmt(r.retail)):''))
+        +(r.p3?(' | ROZETKA '+r.p3):'');
+      txt.title=(r.parts||[]).map(function(x){
+        return x.sku+' ×'+x.qty+': '+(x.fromInvoice?'з накладної ':'')+fmt(x.nw);
+      }).join('\n');
+      d.appendChild(txt);
+      box.appendChild(d);
+    });
+    if(applied) return;
+    var act=document.createElement('div'); act.className='act';
+    var ap=document.createElement('button'); ap.className='lk-arropt-btn'; ap.style.marginLeft='0';
+    var live=rows.filter(function(r){ return !r.err && !r.skip; });
+    ap.textContent='✅ Записати ціни комплектів ('+live.length+')';
+    ap.disabled=!live.length;
+    ap.addEventListener('click',function(ev){
+      ev.preventDefault(); ev.stopPropagation();
+      ap.disabled=true; ap.textContent='записую…';
+      var skip=rows.filter(function(r){ return r.skip; }).map(function(r){ return String(r.sku); });
+      invokeKits('apply', lastReq.kits, lastReq.fresh, skip, function(res){
+        if(!res||!res.ok){ ap.textContent='✗ '+((res&&res.err)||'нема відповіді'); return; }
+        kitView={rows:res.rows,applied:true};
+        renderKits(box, res.rows, true);
+      }, function(p){ ap.textContent='записую… '+p; });
+    });
+    act.appendChild(ap);
+    box.appendChild(act);
+  }
+
+  var lastReq={kits:[],fresh:{}};
+  function invokeKits(mode, kits, fresh, skip, onDone, onProg){
+    var token=String(Date.now())+'_k_'+Math.random().toString(36).slice(2);
+    var fin=false, tm=null;
+    function prog(){ if(onProg) onProg(document.documentElement.getAttribute('data-sd-kit-progress')||''); }
+    function cleanup(){ fin=true; PAGE.removeEventListener('sdKitRecalcResult',onRes);
+                        PAGE.removeEventListener('sdKitRecalcProgress',prog); clearTimeout(tm); }
+    function onRes(){
+      var raw=document.documentElement.getAttribute('data-sd-kit-result');
+      var d=null; try{ d=JSON.parse(raw); }catch(e){ return; }
+      if(!d || d.token!==token) return;
+      cleanup(); onDone(d);
+    }
+    PAGE.addEventListener('sdKitRecalcResult',onRes);
+    PAGE.addEventListener('sdKitRecalcProgress',prog);
+    document.documentElement.setAttribute('data-sd-kit-token',token);
+    document.documentElement.setAttribute('data-sd-kit-mode',mode);
+    document.documentElement.setAttribute('data-sd-kit-req',
+      JSON.stringify({kits:kits, fresh:fresh, skip:skip||[]}));
+    document.documentElement.removeAttribute('data-sd-kit-result');
+    PAGE.dispatchEvent(new Event('sdKitRecalc'));
+    tm=setTimeout(function(){ if(!fin){ cleanup(); onDone({ok:false,err:'ядро не відповіло'}); } }, 180000);
+  }
+
+  function runKits(btn){
+    if(!rowsCount()) return;
+    btn.disabled=true; var old=btn.textContent; btn.textContent='шукаю комплекти…';
+    var fresh=null;
+    Promise.all([invoiceCosts(), kitsData()]).then(function(pair){
+      fresh=pair[0]||{};
+      var kitsObj=pair[1]||{};
+      if(!Object.keys(fresh).length){
+        btn.disabled=false; btn.textContent=old;
+        var b0=kitBox(); var e0=document.createElement('div'); e0.className='er';
+        e0.textContent='✗ не вдалося прочитати ціни накладної';
+        b0.appendChild(e0); return;
+      }
+      var need=[];
+      Object.keys(kitsObj||{}).forEach(function(kitSku){
+        var info=kitsObj[kitSku]||{};
+        var comps=info.comps||[];
+        var touched=comps.some(function(c){ return fresh[String(c.sku).trim()]!=null; });
+        if(touched) need.push({ sku:kitSku, name:info.name||'',
+                                comps:comps.map(function(c){ return {sku:String(c.sku).trim(), qty:c.qty||1, name:c.name||''}; }) });
+      });
+      var box=kitBox();
+      if(!need.length){
+        var n=document.createElement('div'); n.className='h';
+        n.textContent='Жоден комплект не містить товарів цієї накладної.';
+        box.appendChild(n);
+        btn.disabled=false; btn.textContent=old; return;
+      }
+      lastReq={kits:need, fresh:fresh};
+      var h=document.createElement('div'); h.className='h';
+      h.textContent='рахую '+need.length+' комплект(ів)…';
+      box.appendChild(h);
+      invokeKits('preview', need, fresh, [], function(res){
+        btn.disabled=false; btn.textContent=old;
+        if(!res||!res.ok){ h.textContent='✗ '+((res&&res.err)||'нема відповіді'); return; }
+        kitView={rows:res.rows,applied:false};
+        renderKits(box, res.rows, false);
+      }, function(p){ h.textContent='рахую комплекти… '+p; });
+    }).catch(function(e){
+      btn.disabled=false; btn.textContent=old;
+      var box=kitBox(); var er=document.createElement('div'); er.className='er';
+      er.textContent='✗ склад комплектів недоступний: '+String(e&&e.message||e).slice(0,60);
+      box.appendChild(er);
+    });
+  }
+
   function sync(){
     var btn=document.querySelector('.lk-arropt-btn-main');
     if(!onPage()){ if(btn) btn.remove(); clearViewIfAny(); return; }
@@ -6158,8 +6552,19 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     btn.addEventListener('click',function(e){ e.preventDefault(); e.stopPropagation(); run(btn); });
     if(host) host.appendChild(btn);
     else{ var t=document.querySelector('table.document-invoice-products'); if(t&&t.parentElement) t.parentElement.insertBefore(btn,t); }
+
+    // друга кнопка: перерахунок комплектів, до складу яких входять товари накладної
+    var kb=document.createElement('button'); kb.type='button';
+    kb.className='lk-arropt-btn lk-arropt-btn-kits';
+    kb.textContent='🧩 Ціни комплектів';
+    kb.title='Знайти комплекти зі складниками з цієї накладної і перерахувати їхні ціни за новою закупкою';
+    kb.addEventListener('click',function(e){ e.preventDefault(); e.stopPropagation(); runKits(kb); });
+    if(host) host.appendChild(kb); else if(btn.parentElement) btn.parentElement.insertBefore(kb, btn.nextSibling);
   }
-  function clearViewIfAny(){ if(view||document.getElementById('lk-arropt-res')) clearView(); }
+  function clearViewIfAny(){
+    if(view||document.getElementById('lk-arropt-res')) clearView();
+    var kb=document.getElementById('lk-kits-res'); if(kb) kb.remove(); kitView=null;
+  }
 
   var t=null;
   function syncSoon(){ clearTimeout(t); t=setTimeout(sync,300); }
