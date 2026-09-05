@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.99
+// @version      3.00
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -2859,6 +2859,15 @@ function __sdPageMain() {
       return { p2: Math.round(b * 1.2), p5: Math.round(b * 1.25), p7: Math.ceil((b * 1.3 - 1) / 5) * 5 };
     }
 
+    // памʼять «вигоди набору»: {kitSku: {b: вигода, t: час}}
+    var BENEFIT_KEY = "lk_kitbenefit_v1";
+    function kitBenefit(save) {
+      try {
+        if (save) { localStorage.setItem(BENEFIT_KEY, JSON.stringify(save)); return save; }
+        return JSON.parse(localStorage.getItem(BENEFIT_KEY) || "{}") || {};
+      } catch (e) { return {}; }
+    }
+
     // sku → картка товару. Пошук id робить ПЕРЕВІРЕНИЙ _resolveIdViaApi (той самий
     // core-IIFE): у ньому і обовʼязковий заголовок when:"product/index" (без нього СРМ
     // віддає порожній список), і правильний шлях до рядків (response.meta.option.option),
@@ -2896,7 +2905,9 @@ function __sdPageMain() {
             var old = card ? costFromCard(card) : null;
             var qty = num(c.qty) || 1;
             var nw = (fresh[String(c.sku)] != null) ? num(fresh[String(c.sku)]) : old;
-            acc.push({ sku: c.sku, qty: qty, old: old, nw: nw,
+            // роздріб складника — щоб тримати «вигоду набору» сталою
+            var rt = card ? (num(card.defaultPrice) || num(card.price)) : 0;
+            acc.push({ sku: c.sku, qty: qty, old: old, nw: nw, retail: rt > 0 ? rt : null,
                        name: String((card && (card.documentName || card.name)) || c.name || "").slice(0, 40),
                        fromInvoice: fresh[String(c.sku)] != null });
             return acc;
@@ -2921,12 +2932,43 @@ function __sdPageMain() {
           var deltaPct = (costOld > 0 && delta != null) ? Math.round(delta / costOld * 1000) / 10 : null;
           var alarm = delta != null && (delta >= 10 || (deltaPct != null && deltaPct >= 5));
           var markOld = (costOld > 0 && retail > 0) ? r2(retail / costOld) : null;
-          var newRetail = (alarm && markOld > 0) ? Math.ceil((costNew * markOld - 1) / 5) * 5 : null;
+
+          // ---- друге правило: тримати «вигоду набору» відносно роздрібів складників ----
+          // Вигода = ціна набору ÷ сума роздрібних цін складників. Її запамʼятовуємо, бо
+          // інакше «поточна вигода × поточна сума» дала б ту саму ціну і ніколи не зросла б.
+          var retailSum = null, benefitNow = null, benefitSaved = null, byRetail = null;
+          var haveRetail = parts.every(function (x) { return x.retail != null && x.retail > 0; });
+          if (haveRetail) {
+            retailSum = r2(parts.reduce(function (s3, x) { return s3 + x.retail * x.qty; }, 0));
+            if (retailSum > 0 && retail > 0) benefitNow = r2(retail / retailSum);
+            var mem = kitBenefit();
+            var rec = mem[String(kit.sku)];
+            benefitSaved = (rec && rec.b > 0) ? rec.b : null;
+            if (benefitSaved == null && benefitNow != null) {          // перший раз — лише запамʼятовуємо
+              mem[String(kit.sku)] = { b: benefitNow, t: Date.now() };
+              kitBenefit(mem);
+              benefitSaved = benefitNow;
+            }
+            if (benefitSaved > 0 && retailSum > 0) byRetail = Math.ceil((retailSum * benefitSaved - 1) / 5) * 5;
+          }
+
+          // за закупкою (як було) і за роздрібами складників — беремо більший кандидат
+          var byCost = (markOld > 0) ? Math.ceil((costNew * markOld - 1) / 5) * 5 : null;
+          var cand = null, reason = "";
+          if (byCost != null && (cand == null || byCost > cand)) { cand = byCost; reason = "подорожчала закупка"; }
+          if (byRetail != null && (cand == null || byRetail > cand)) { cand = byRetail; reason = "складники подорожчали в роздріб"; }
+          // піднімаємо, лише коли кандидат помітно вищий за поточну ціну набору
+          var up = (cand != null && retail > 0) ? r2(cand - retail) : null;
+          var upAlarm = up != null && (up >= 10 || (retail > 0 && up / retail * 100 >= 5));
+          var newRetail = (alarm || upAlarm) && cand != null && cand > retail ? cand : null;
+          if (!newRetail) reason = "";
           var p3 = (newRetail || retail) > 0 ? Math.round((newRetail || retail) * 1.05) : null;
           var row = { sku: kit.sku, name: kit.name || String(kc.documentName || kc.name || "").slice(0, 60),
                       pid: kc.id, parts: parts, costOld: costOld, costNew: costNew,
                       delta: delta, deltaPct: deltaPct, alarm: !!alarm,
                       retail: retail > 0 ? retail : null, markOld: markOld, newRetail: newRetail,
+                      retailSum: retailSum, benefitNow: benefitNow, benefitSaved: benefitSaved,
+                      byCost: byCost, byRetail: byRetail, reason: reason,
                       o2: ptOf(kc, 2), o5: ptOf(kc, 5), o7: ptOf(kc, 7), o3: ptOf(kc, 3),
                       p2: t.p2, p5: t.p5, p7: t.p7, p3: p3 };
           if (mode !== "apply") return row;
@@ -2952,6 +2994,12 @@ function __sdPageMain() {
             .then(function (pr) {
               if (pr.status !== 200) throw new Error("HTTP " + pr.status);
               row.created = created;
+              // після запису фіксуємо вигоду вже від НОВОЇ ціни набору
+              if (retailSum > 0) {
+                var m2 = kitBenefit();
+                m2[String(kit.sku)] = { b: r2((newRetail || retail) / retailSum), t: Date.now() };
+                kitBenefit(m2);
+              }
               return row;
             });
         });
@@ -6104,6 +6152,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     +'#lk-kits-res .h{font-weight:700;color:#5c3080;margin-bottom:5px}'
     +'#lk-kits-res .row{padding:3px 0;border-top:1px dashed #d9c7e6}'
     +'#lk-kits-res .row.warn{color:#B71C1C;font-weight:700}'
+    +'#lk-kits-res .sub{color:#6b5580;font-weight:400;font-size:12px;padding-left:22px}'
     +'#lk-kits-res .er{color:#B71C1C;font-size:12.5px;padding:2px 0}'
     +'#lk-kits-res .act{margin-top:8px}'
     +'#lk-kits-res .x{position:absolute;top:5px;right:9px;border:none;background:none;cursor:pointer;'
@@ -6447,22 +6496,40 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
         e.textContent='✗ '+(r.sku||'')+' '+(r.name||'')+' — '+r.err;
         box.appendChild(e); return;
       }
-      var d=document.createElement('div'); d.className='row'+(r.alarm?' warn':'');
+      var d=document.createElement('div'); d.className='row'+((r.alarm||r.newRetail)?' warn':'');
       var cb=document.createElement('input'); cb.type='checkbox'; cb.checked=!r.skip;
       cb.className='lk-arropt-chk';
       cb.addEventListener('change',function(){ r.skip=!cb.checked; d.style.opacity=r.skip?'0.45':''; });
       if(!applied) d.appendChild(cb);
       var txt=document.createElement('span');
-      txt.textContent=(r.alarm?'⚠ ':'')+r.sku+' · '+String(r.name||'').slice(0,42)
+      txt.textContent=((r.alarm||r.newRetail)?'⚠ ':'')+r.sku+' · '+String(r.name||'').slice(0,42)
         +' — собів. '+fmt(r.costOld)+' → '+fmt(r.costNew)
         +(r.delta!=null&&r.delta>0?(' (+'+fmt(r.delta)+' грн'+(r.deltaPct!=null?', +'+fmt(r.deltaPct)+'%':'')+')'):'')
         +' | опт '+r.p2+' / '+r.p5+' / '+r.p7
         +(r.newRetail?(' | роздріб '+fmt(r.retail)+' → '+r.newRetail):(r.retail?(' | роздріб '+fmt(r.retail)):''))
         +(r.p3?(' | ROZETKA '+r.p3):'');
+      // другий рядок: складники в роздріб і вигода набору
+      var sub=null;
+      if(r.retailSum!=null){
+        sub=document.createElement('div'); sub.className='sub';
+        var pct=r.benefitNow!=null?Math.round((1-r.benefitNow)*1000)/10:null;
+        var was=r.benefitSaved!=null?Math.round((1-r.benefitSaved)*1000)/10:null;
+        function vygoda(v){
+          if(v==null) return '';
+          if(v>0.4) return 'набір дешевший на '+fmt(v)+'%';
+          if(v<-0.4) return '⚠ набір ДОРОЖЧИЙ за складники на '+fmt(-v)+'%';
+          return 'вигоди від набору немає (ціна як у складників)';
+        }
+        sub.textContent='складники в роздріб: '+fmt(r.retailSum)
+          +(pct!=null?(' · '+vygoda(pct)):'')
+          +(was!=null&&pct!=null&&Math.abs(was-pct)>0.5?(' (закладено було '+fmt(was)+'%)'):'')
+          +(r.reason?(' → підняти, бо '+r.reason):'');
+      }
       txt.title=(r.parts||[]).map(function(x){
         return x.sku+' ×'+x.qty+': '+(x.fromInvoice?'з накладної ':'')+fmt(x.nw);
       }).join('\n');
       d.appendChild(txt);
+      if(sub) d.appendChild(sub);
       box.appendChild(d);
     });
     if(applied) return;
