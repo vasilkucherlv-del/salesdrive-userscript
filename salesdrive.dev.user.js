@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      2.97
+// @version      2.99
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -2613,6 +2613,13 @@ function __sdPageMain() {
         p.price = money(p.price);
         if (typeof p.discount === "number") p.discount = money(p.discount);
       });
+      // КОМПЛЕКТИ: у GET склад приходить як complect[{productId, amount}], а на запис
+      // СРМ чекає поле count — без нього PUT падає з 422 «Необхідно заповнити "Count"».
+      if (Array.isArray(o.complect)) {
+        o.complect.forEach(function (c) {
+          if (c && c.count == null) c.count = (c.amount != null ? c.amount : 1);
+        });
+      }
       return o;
     }
 
@@ -2817,6 +2824,13 @@ function __sdPageMain() {
         p.price = money(p.price);
         if (typeof p.discount === "number") p.discount = money(p.discount);
       });
+      // КОМПЛЕКТИ: у GET склад приходить як complect[{productId, amount}], а на запис
+      // СРМ чекає поле count — без нього PUT падає з 422 «Необхідно заповнити "Count"».
+      if (Array.isArray(o.complect)) {
+        o.complect.forEach(function (c) {
+          if (c && c.count == null) c.count = (c.amount != null ? c.amount : 1);
+        });
+      }
       return o;
     }
     function ptOf(item, id) {
@@ -2829,33 +2843,34 @@ function __sdPageMain() {
       var acc = [], o2 = ptOf(item, 2), o5 = ptOf(item, 5);
       if (o2 > 0) acc.push(o2 / 1.2);
       if (o5 > 0) acc.push(o5 / 1.25);
-      if (!acc.length) return null;
-      var sum = 0; acc.forEach(function (x) { sum += x; });
-      return r2(sum / acc.length);
+      if (acc.length) {
+        var sum = 0; acc.forEach(function (x) { sum += x; });
+        return r2(sum / acc.length);
+      }
+      // опт-цін немає — пробуємо поле собівартості самої картки
+      var names = ["costPrice", "purchasePrice", "cost", "costPriceUAH"];
+      for (var i = 0; i < names.length; i++) {
+        var v = num(item[names[i]]);
+        if (v > 0) return r2(v);
+      }
+      return null;
     }
     function tiers(b) {
       return { p2: Math.round(b * 1.2), p5: Math.round(b * 1.25), p7: Math.ceil((b * 1.3 - 1) / 5) * 5 };
     }
 
-    // sku → картка товару (кеш на час прогону, щоб не бити той самий товар двічі)
+    // sku → картка товару. Пошук id робить ПЕРЕВІРЕНИЙ _resolveIdViaApi (той самий
+    // core-IIFE): у ньому і обовʼязковий заголовок when:"product/index" (без нього СРМ
+    // віддає порожній список), і правильний шлях до рядків (response.meta.option.option),
+    // і кеш. Свого пошуку тут НЕ тримаємо — саме він і зламав перший підхід.
     var cardCache = {};
     function cardBySku(sku, preferKit) {
       var key = String(sku) + (preferKit ? "#k" : "#p");
       if (cardCache[key] !== undefined) return Promise.resolve(cardCache[key]);
-      return fetch("/products/data/?active=1&filter[sku]=" + encodeURIComponent(sku) + "&formId=1",
-        { credentials: "include", headers: { "Accept": "application/json" } })
-        .then(function (r) { return r.ok ? r.json() : null; })
-        .then(function (j) {
-          var b = j && (j.response || j), rows = (b && (b.data || b.rows)) || [];
-          var hit = null, hitKit = null;
-          rows.forEach(function (x) {
-            if (String(x.sku).trim() !== String(sku).trim()) return;
-            if (Number(x.isComplect) === 1) { if (!hitKit) hitKit = x; }
-            else if (!hit) hit = x;
-          });
-          var pick = preferKit ? (hitKit || hit) : (hit || hitKit);
-          if (!pick || pick.id == null) { cardCache[key] = null; return null; }
-          return fetch("/products/" + pick.id + "/?formId=1", { credentials: "include", headers: { "Accept": "application/json" } })
+      return _resolveIdViaApi(String(sku).trim(), !!preferKit)
+        .then(function (pid) {
+          if (pid == null) { cardCache[key] = null; return null; }
+          return fetch("/products/" + pid + "/?formId=1", { credentials: "include", headers: { "Accept": "application/json" } })
             .then(function (r) { return r.ok ? r.json() : null; })
             .then(function (jj) {
               var item = jj && jj.response && jj.response.item;
@@ -2891,7 +2906,9 @@ function __sdPageMain() {
         var missing = parts.filter(function (x) { return x.nw == null || !(x.nw > 0); });
         if (missing.length) {
           return { sku: kit.sku, name: kit.name, parts: parts,
-                   err: "немає даних по складнику: " + missing.map(function (m) { return m.sku; }).join(", ") };
+                   err: "немає закупівельної ціни: " + missing.map(function (m) {
+                     return m.sku + (m.name ? (" «" + m.name + "»") : "");
+                   }).join("; ") + " — проставте цим товарам опт-ціни або собівартість" };
         }
         var costNew = r2(parts.reduce(function (s2, x) { return s2 + x.nw * x.qty; }, 0));
         var haveOld = parts.every(function (x) { return x.old != null && x.old > 0; });
