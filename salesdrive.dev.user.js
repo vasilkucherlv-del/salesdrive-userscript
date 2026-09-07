@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.04
+// @version      3.05
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -6231,6 +6231,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     +'#lk-kits-res .row{padding:3px 0;border-top:1px dashed #d9c7e6}'
     +'#lk-kits-res .row.warn{color:#B71C1C;font-weight:700}'
     +'#lk-kits-res .sub{color:#6b5580;font-weight:400;font-size:12px;padding-left:22px}'
+    +'#lk-kits-res a.lk-kit-link{color:#5c3080;text-decoration:underline;font-weight:inherit}'
+    +'#lk-kits-res a.lk-kit-link:hover{color:#3d1f57}'
+    +'#lk-kits-res .row.warn a.lk-kit-link{color:#B71C1C}'
     +'#lk-kits-res .er{color:#B71C1C;font-size:12.5px;padding:2px 0}'
     +'#lk-kits-res .act{margin-top:8px}'
     +'#lk-kits-res .x{position:absolute;top:5px;right:9px;border:none;background:none;cursor:pointer;'
@@ -6595,8 +6598,19 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       cb.addEventListener('change',function(){ r.skip=!cb.checked; d.style.opacity=r.skip?'0.45':''; });
       if(!applied) d.appendChild(cb);
       var txt=document.createElement('span');
-      txt.textContent=((r.alarm||r.newRetail)?'⚠ ':'')+r.sku+' · '+String(r.name||'').slice(0,42)
-        +' — собів. '+fmt(r.costOld)+' → '+fmt(r.costNew)
+      // код і назва — посилання на картку комплекту (нова вкладка, щоб не втратити накладну)
+      if(r.pid){
+        var mark=document.createTextNode((r.alarm||r.newRetail)?'⚠ ':'');
+        var a=document.createElement('a'); a.className='lk-kit-link';
+        a.href='/ua/index.html?formId=1#/product/update/'+r.pid;
+        a.target='_blank'; a.rel='noopener';
+        a.textContent=r.sku+' · '+String(r.name||'').slice(0,42);
+        a.title='Відкрити картку комплекту в новій вкладці';
+        a.addEventListener('click',function(e){ e.stopPropagation(); });
+        d.appendChild(mark); d.appendChild(a);
+      }
+      txt.textContent=(r.pid?'':(((r.alarm||r.newRetail)?'⚠ ':'')+r.sku+' · '+String(r.name||'').slice(0,42)))
+        +(r.pid?' — ':'')+(r.pid?'':' — ')+'собів. '+fmt(r.costOld)+' → '+fmt(r.costNew)
         +(r.delta!=null&&r.delta>0?(' (+'+fmt(r.delta)+' грн'+(r.deltaPct!=null?', +'+fmt(r.deltaPct)+'%':'')+')'):'')
         +' | опт '+r.p2+' / '+r.p5+' / '+r.p7
         +(r.newRetail?(' | роздріб '+fmt(r.retail)+' → '+r.newRetail):(r.retail?(' | роздріб '+fmt(r.retail)):''))
