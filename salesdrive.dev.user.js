@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.10
+// @version      3.11
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -7280,6 +7280,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 (function lkSupplierBalance(){
   'use strict';
   var CACHE_KEY='lk_supbal_v1', TTL=10*60*1000, MAX_PAGES=90;
+  var lastDocs=null;                      // [надходження, видаткові] останнього прогону
 
   var css=''
     +'.lk-sb-btn{display:inline-block;margin-left:10px;padding:4px 14px;border:none;border-radius:14px;'
@@ -7329,14 +7330,93 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   }
 
   function nameOf(d){
+    if(d.__supName) return d.__supName + (d.__supSure===false ? ' (за товарами, приблизно)' : ' (за товарами)');
     var c=d.counterparty;
     return (c && (c.title||c.name||c.fullName)) || ('контрагент #'+d.counterPartyId);
+  }
+
+  // ---- постачальник накладної за товарами (коли контрагент не заповнений) ----
+  // У товару постачальників може бути кілька, тож шукаємо СПІЛЬНОГО для всіх позицій
+  // накладної; якщо спільного немає — беремо найчастішого, але позначаємо як здогад.
+  var SUP_KEY='lk_supbysku_v1', SUP_TTL=24*60*60*1000;
+  var supCache=null;
+  function supLoad(){
+    if(supCache) return supCache;
+    try{ var c=JSON.parse(localStorage.getItem(SUP_KEY)||'null');
+         supCache=(c && Date.now()-c.ts<SUP_TTL && c.map) ? c.map : {}; }catch(_){ supCache={}; }
+    return supCache;
+  }
+  function supSave(){ try{ localStorage.setItem(SUP_KEY, JSON.stringify({ts:Date.now(), map:supCache||{}})); }catch(_){} }
+  function suppliersOf(sku){
+    var m=supLoad(), k=String(sku).trim();
+    if(m[k]) return Promise.resolve(m[k]);
+    return fetch('/products/data/?active=1&filter[sku]='+encodeURIComponent(k)+'&formId=1',
+      { credentials:'include', headers:{ 'accept':'application/json, text/plain, */*', 'when':'product/index' } })
+      .then(function(r){ return r.ok?r.json():null; })
+      .then(function(j){
+        var rows=(j&&j.response&&j.response.meta&&j.response.meta.option&&j.response.meta.option.option)||[];
+        var row=null; for(var i=0;i<rows.length;i++){ if(String(rows[i].sku).trim()===k){ row=rows[i]; break; } }
+        var names=[];
+        ((row&&row.productSupplier)||[]).forEach(function(ps){
+          var n=(ps&&ps.supplier&&ps.supplier.name)||ps&&ps.name;
+          if(n) names.push(String(n).trim());
+        });
+        m[k]=names; supSave();
+        return names;
+      })
+      .catch(function(){ m[k]=[]; return []; });
+  }
+  // визначити постачальника однієї накладної (по перших позиціях)
+  function supplierOfDoc(doc, maxItems){
+    var skus=[];
+    (doc.documentItems||[]).forEach(function(di){
+      var sk=String((di.product&&di.product.sku)||'').trim();
+      if(sk && skus.indexOf(sk)<0 && skus.length<(maxItems||2)) skus.push(sk);
+    });
+    if(!skus.length) return Promise.resolve(null);
+    return skus.reduce(function(ch, sk){
+      return ch.then(function(acc){ return suppliersOf(sk).then(function(ns){ acc.push(ns); return acc; }); });
+    }, Promise.resolve([])).then(function(lists){
+      var lists2=lists.filter(function(l){ return l && l.length; });
+      if(!lists2.length) return null;
+      // спільний для всіх
+      var common=lists2[0].slice();
+      lists2.forEach(function(l){ common=common.filter(function(n){ return l.indexOf(n)>=0; }); });
+      if(common.length===1) return { name:common[0], sure:true };
+      // інакше — найчастіший
+      var cnt={}; lists2.forEach(function(l){ l.forEach(function(n){ cnt[n]=(cnt[n]||0)+1; }); });
+      var best=null; Object.keys(cnt).forEach(function(n){ if(!best||cnt[n]>cnt[best]) best=n; });
+      return best ? { name:best, sure:false } : null;
+    });
+  }
+
+  // накладні без контрагента, за останні MONTHS місяців, розкидаємо за товарами
+  var MONTHS=12, MAX_DOCS=120;
+  function resolveMissing(arrivals, onProg){
+    var lim=Date.now()-MONTHS*30*24*60*60*1000;
+    var todo=arrivals.filter(function(d){
+      if(d.counterPartyId) return false;
+      var t=Date.parse((d.date||'')+'T00:00:00');
+      return isFinite(t) && t>=lim;
+    }).slice(0, MAX_DOCS);
+    var i=0;
+    function step(){
+      if(i>=todo.length) return Promise.resolve(todo.length);
+      var d=todo[i++];
+      if(onProg) onProg(i, todo.length);
+      return supplierOfDoc(d).then(function(sup){
+        if(sup) { d.__supName=sup.name; d.__supSure=sup.sure; }
+        return step();
+      });
+    }
+    return step();
   }
 
   function build(arrivals, sales){
     var by={}, noCp={n:0, sum:0};
     arrivals.forEach(function(d){
       var id=d.counterPartyId;
+      if(!id && d.__supName){ id='name:'+d.__supName; }        // визначено за товарами
       if(!id){ noCp.n++; noCp.sum+=Number(d.totalSum)||0; return; }
       by[id]=by[id]||{ id:id, name:nameOf(d), in:0, out:0, nIn:0, nOut:0 };
       by[id].in+=Number(d.totalSum)||0; by[id].nIn++;
@@ -7356,7 +7436,10 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   }
 
   function render(box, data){
-    box.querySelectorAll('table,.note,.h').forEach(function(n){ n.remove(); });
+    box.querySelectorAll('table,.note,.h,.lk-sb-btn').forEach(function(n){
+      if(n.className==='lk-sb-btn'||n.classList&&n.classList.contains('lk-sb-btn')){ if(n.parentNode&&n.parentNode!==document.querySelector('.lk-sb-bar')) n.parentNode.remove(); return; }
+      n.remove();
+    });
     var h=document.createElement('div'); h.className='h';
     h.textContent='Взаєморозрахунки: контрагентів зі зустрічним рухом — '+data.both.length;
     box.appendChild(h);
@@ -7377,8 +7460,27 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       });
       box.appendChild(t);
     }
+    if(data.noCp.n && lastDocs){
+      var act=document.createElement('div'); act.style.marginTop='8px';
+      var rb=document.createElement('button'); rb.type='button'; rb.className='lk-sb-btn'; rb.style.marginLeft='0';
+      rb.textContent='🔎 Визначити постачальників за товарами (останні 12 міс)';
+      rb.title='Для накладних без контрагента дивимось поле «Постачальник» у картках їхніх товарів';
+      rb.addEventListener('click',function(ev){
+        ev.preventDefault(); ev.stopPropagation();
+        rb.disabled=true;
+        resolveMissing(lastDocs[0], function(i,n){ rb.textContent='визначаю… '+i+'/'+n; })
+          .then(function(){
+            var d2=build(lastDocs[0], lastDocs[1]);
+            try{ localStorage.setItem(CACHE_KEY, JSON.stringify({ts:Date.now(), data:d2})); }catch(_){}
+            render(box, d2);
+          })
+          .catch(function(){ rb.textContent='✗ не вдалося'; rb.disabled=false; });
+      });
+      act.appendChild(rb); box.appendChild(act);
+    }
     var note=document.createElement('div'); note.className='note';
     note.textContent='«+» — вони завезли нам більше, ніж ми їм; «−» — ми відвантажили більше.'
+      +' Постачальник із позначкою «(за товарами)» визначений за полем «Постачальник» у картках товарів накладної.'
       +' Постачальників лише з надходженнями (без зустрічних видаткових): '+data.onlyIn+'.'
       +(data.noCp.n?(' Надходжень без контрагента: '+data.noCp.n+' на '+money(data.noCp.sum)+' ₴ — у баланс не враховані.'):'');
     box.appendChild(note);
@@ -7407,6 +7509,10 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     function onProg(kind,page,total){ prog[kind]=page+'/'+total; h.textContent='рахую… надходження '+(prog['arrival-product']||'—')+', видаткові '+(prog['sales-invoice']||'—'); }
     Promise.all([loadDocs('arrival-product',onProg), loadDocs('sales-invoice',onProg)])
       .then(function(res){
+        return res;
+      })
+      .then(function(res){
+        lastDocs=res;                     // щоб окрема кнопка могла дорахувати
         var data=build(res[0], res[1]);
         try{ localStorage.setItem(CACHE_KEY, JSON.stringify({ts:Date.now(), data:data})); }catch(_){}
         render(box, data);
