@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.05
+// @version      3.06
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -2767,6 +2767,8 @@ function __sdPageMain() {
             .then(function (pr) {
               if (pr.status !== 200) throw new Error("HTTP " + pr.status);
               row.created = created;
+              // ціни товару змінились — кеш складників на картках комплектів протух
+              try { localStorage.setItem("lkcp_bust_v1", String(Date.now())); } catch (e) {}
               results.push(row);
             });
         })
@@ -3040,6 +3042,7 @@ function __sdPageMain() {
             .then(function (pr) {
               if (pr.status !== 200) throw new Error("HTTP " + pr.status);
               row.created = created;
+              try { localStorage.setItem("lkcp_bust_v1", String(Date.now())); } catch (e) {}
               // після запису фіксуємо вигоду вже від НОВОЇ ціни набору
               if (retailSum > 0) {
                 var m2 = kitBenefit();
@@ -4011,8 +4014,11 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   var listeners=Object.create(null); // sku -> [fn(info)]
   var inflight=Object.create(null);
   var TIER_NAMES=null, tierBusy=false;
-  var TTL=2*60*60*1000;              // 2 год «свіжо» (старіше — тихо оновлюємо у фоні)
-  var PKEY='lkcp_prices_v1', NKEY='lkcp_tiernames_v1';
+  var TTL=20*60*1000;                // 20 хв «свіжо» (старіше — тихо оновлюємо у фоні):
+                                     // ціни складників міняються після кожної накладної
+  // v2: у v1 лежали записи, збережені до фікса 3.01 (там опт-цін не було — читалось
+  // row.priceType замість row.priceTypes), і вони показували чипи як 0
+  var PKEY='lkcp_prices_v2', NKEY='lkcp_tiernames_v1';
 
   function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
   function gGet(k){ try{ var s=GM_getValue(k,null); return s?((typeof s==='string')?JSON.parse(s):s):null; }catch(e){ return null; } }
@@ -4055,7 +4061,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   }
   // гарантувати ціну: свіжу лишаємо; стару/відсутню тихо тягнемо у фоні
   function ensurePrice(sku){
-    var fresh=(sku in cache) && (Date.now()-(tsMap[sku]||0) < TTL);
+    var bust=0; try{ bust=Number(localStorage.getItem('lkcp_bust_v1'))||0; }catch(_){}
+    var fresh=(sku in cache) && (Date.now()-(tsMap[sku]||0) < TTL) && (tsMap[sku]||0) > bust;
     if(fresh || inflight[sku]) return;
     inflight[sku]=1;
     fetchPrice(sku).then(function(info){
