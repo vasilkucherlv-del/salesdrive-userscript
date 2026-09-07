@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.08
+// @version      3.09
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -37,7 +37,8 @@
      • lkArrivalCount  — 📦 к-ть позицій та одиниць біля заголовка «Надходження товарів»
      • lkArrivalOpt    — 💰 опт-ціни товарів (×1.2/×1.25/×1.3↑5) із собівартості накладної
      • lkRoundPickup   — 🔟 заокруглення суми самовивозу вгору до 10 ₴ (99→100, 108→110)
-     • lkOrderTier     — 💱 перерахунок цін заявки за типом ціни (опт/майстри) одним кліком
+     • lkOrderTier     — 💱 перерахунок цін заявки за типом ціни (опт/майстри) одним кліком     • lkSupplierBalance — ⇄ взаєморозрахунки з постачальниками (сальдо по кожному)
+
      • lkNpDescr       — 📋 шаблони опису у формі ТТН Нової пошти (редаговані)
      • lkStockWhere    — 🔎 «Де товар»: у яких заявках висить код (з урахуванням комплектів)
      • lkCardReserve   — 🔒 «у роботі: N заявок · M шт» біля залишку в картці товару
@@ -7264,6 +7265,181 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 })();
 }catch(e){ try{ console.warn("[SD] модуль «lkOrderTier» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkOrderTier ▲▲▲ */
+
+/* ▼▼▼ МОДУЛЬ-START • lkSupplierBalance — ⇄ взаєморозрахунки з постачальниками ▼▼▼ */
+/* ===== Кнопка в розділі документів: рахує зустрічний рух по кожному контрагенту —
+   скільки він відвантажив нам (надходження) і скільки ми йому (видаткові накладні),
+   та показує сальдо. Для бартеру: віддали свій товар — отримали знижку/товар назад.
+   Дані — внутрішніми запитами СРМ (cookie, без публічного API й без його ліміту).
+   Нічого не пише: лише читає. ===== */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
+(function lkSupplierBalance(){
+  'use strict';
+  var CACHE_KEY='lk_supbal_v1', TTL=10*60*1000, MAX_PAGES=90;
+
+  var css=''
+    +'.lk-sb-btn{display:inline-block;margin-left:10px;padding:4px 14px;border:none;border-radius:14px;'
+    +'  background:#5D4037;color:#fff;font:700 13px/1.5 Arial,sans-serif;cursor:pointer;vertical-align:middle;white-space:nowrap}'
+    +'.lk-sb-btn:hover{background:#4a302a}'
+    +'.lk-sb-btn[disabled]{background:#9e9e9e;cursor:default}'
+    +'#lk-sb-box{margin:10px 0;padding:10px 12px;border:1px solid #bfa89f;border-left:4px solid #5D4037;'
+    +'  background:#faf6f4;border-radius:6px;font:13px/1.6 Arial,sans-serif;color:#3b2b26;'
+    +'  max-width:900px;box-sizing:border-box;position:relative}'
+    +'#lk-sb-box .h{font-weight:700;color:#4a302a;margin-bottom:6px}'
+    +'#lk-sb-box table{border-collapse:collapse;width:100%;font:13px/1.5 Arial,sans-serif}'
+    +'#lk-sb-box td,#lk-sb-box th{padding:4px 8px;border-top:1px solid #e6dad5;white-space:nowrap}'
+    +'#lk-sb-box th{font-weight:700;color:#6b4c42;text-align:left;border-top:none}'
+    +'#lk-sb-box td.n{text-align:right;font-family:ui-monospace,Menlo,Consolas,monospace}'
+    +'#lk-sb-box td.nm{white-space:normal}'
+    +'#lk-sb-box .plus{color:#1B5E20;font-weight:700}'
+    +'#lk-sb-box .minus{color:#B71C1C;font-weight:700}'
+    +'#lk-sb-box .note{color:#7a6157;font-size:12px;margin-top:7px}'
+    +'#lk-sb-box .x{position:absolute;top:5px;right:9px;border:none;background:none;cursor:pointer;'
+    +'  font-size:17px;color:#5D4037}';
+  var st=document.createElement('style'); st.textContent=css;
+  (document.head||document.documentElement).appendChild(st);
+
+  function onPage(){ return /#\/document\//.test(location.hash||''); }
+  function money(n){ return (Math.round(Number(n)||0)).toLocaleString('uk-UA'); }
+
+  // один список документів (усі сторінки) — внутрішнім запитом СРМ
+  function loadDocs(kind, onProg){
+    var url='/document-'+kind+'/index/?active=1&formId=1';
+    var out=[], page=1;
+    function step(){
+      return fetch(url+(page>1?('&page='+page):''), { credentials:'include',
+        headers:{ 'accept':'application/json, text/plain, */*' } })
+        .then(function(r){ return r.ok?r.json():null; })
+        .then(function(j){
+          if(!j) return out;
+          var b=j.response||j, rows=b.data||[];
+          out=out.concat(rows);
+          var pc=(b.pagination&&Number(b.pagination.pageCount))||1;
+          if(onProg) onProg(kind, page, Math.min(pc, MAX_PAGES));
+          if(page<pc && page<MAX_PAGES){ page++; return step(); }
+          return out;
+        })
+        .catch(function(){ return out; });
+    }
+    return step();
+  }
+
+  function nameOf(d){
+    var c=d.counterparty;
+    return (c && (c.title||c.name||c.fullName)) || ('контрагент #'+d.counterPartyId);
+  }
+
+  function build(arrivals, sales){
+    var by={}, noCp={n:0, sum:0};
+    arrivals.forEach(function(d){
+      var id=d.counterPartyId;
+      if(!id){ noCp.n++; noCp.sum+=Number(d.totalSum)||0; return; }
+      by[id]=by[id]||{ id:id, name:nameOf(d), in:0, out:0, nIn:0, nOut:0 };
+      by[id].in+=Number(d.totalSum)||0; by[id].nIn++;
+      if(!by[id].name || /^контрагент #/.test(by[id].name)) by[id].name=nameOf(d);
+    });
+    sales.forEach(function(d){
+      var id=d.counterPartyId; if(!id) return;
+      by[id]=by[id]||{ id:id, name:nameOf(d), in:0, out:0, nIn:0, nOut:0 };
+      by[id].out+=Number(d.totalSum)||0; by[id].nOut++;
+      if(!by[id].name || /^контрагент #/.test(by[id].name)) by[id].name=nameOf(d);
+    });
+    var all=Object.keys(by).map(function(k){ return by[k]; });
+    var both=all.filter(function(x){ return x.nIn>0 && x.nOut>0; });   // зустрічний рух = бартер
+    both.forEach(function(x){ x.saldo=Math.round((x.in-x.out)*100)/100; });
+    both.sort(function(a,b){ return Math.abs(b.saldo)-Math.abs(a.saldo); });
+    return { both:both, onlyIn:all.filter(function(x){ return x.nIn>0 && !x.nOut; }).length, noCp:noCp };
+  }
+
+  function render(box, data){
+    box.querySelectorAll('table,.note,.h').forEach(function(n){ n.remove(); });
+    var h=document.createElement('div'); h.className='h';
+    h.textContent='Взаєморозрахунки: контрагентів зі зустрічним рухом — '+data.both.length;
+    box.appendChild(h);
+    if(data.both.length){
+      var t=document.createElement('table');
+      t.innerHTML='<tr><th>Контрагент</th><th>Вони нам</th><th>Ми їм</th><th>Сальдо</th></tr>';
+      data.both.forEach(function(x){
+        var tr=document.createElement('tr');
+        var a='<a href="/ua/index.html?formId=1#/document/counterparty/update/'+x.id+'" target="_blank" rel="noopener">'+
+              String(x.name).replace(/[&<>"]/g,'')+'</a>';
+        var sal=x.saldo>0 ? ('<span class="plus">+'+money(x.saldo)+' ₴</span>')
+              : (x.saldo<0 ? ('<span class="minus">−'+money(-x.saldo)+' ₴</span>') : '0');
+        tr.innerHTML='<td class="nm">'+a+'</td>'
+          +'<td class="n">'+money(x.in)+' ₴ <span style="color:#8a7268">('+x.nIn+')</span></td>'
+          +'<td class="n">'+money(x.out)+' ₴ <span style="color:#8a7268">('+x.nOut+')</span></td>'
+          +'<td class="n">'+sal+'</td>';
+        t.appendChild(tr);
+      });
+      box.appendChild(t);
+    }
+    var note=document.createElement('div'); note.className='note';
+    note.textContent='«+» — вони завезли нам більше, ніж ми їм; «−» — ми відвантажили більше.'
+      +' Постачальників лише з надходженнями (без зустрічних видаткових): '+data.onlyIn+'.'
+      +(data.noCp.n?(' Надходжень без контрагента: '+data.noCp.n+' на '+money(data.noCp.sum)+' ₴ — у баланс не враховані.'):'');
+    box.appendChild(note);
+  }
+
+  function boxEl(){
+    var old=document.getElementById('lk-sb-box'); if(old) return old;
+    var box=document.createElement('div'); box.id='lk-sb-box';
+    var x=document.createElement('button'); x.className='x'; x.textContent='✕';
+    x.addEventListener('click',function(){ box.remove(); });
+    box.appendChild(x);
+    var host=document.querySelector('.panel-body, .white-main-container') || document.body;
+    host.insertBefore(box, host.firstChild);
+    return box;
+  }
+
+  function run(btn){
+    var box=boxEl();
+    var h=document.createElement('div'); h.className='h'; h.textContent='рахую…'; box.appendChild(h);
+    var cached=null;
+    try{ var c=JSON.parse(localStorage.getItem(CACHE_KEY)||'null');
+         if(c && Date.now()-c.ts<TTL) cached=c.data; }catch(_){}
+    if(cached){ render(box, cached); return; }
+    btn.disabled=true;
+    var prog={};
+    function onProg(kind,page,total){ prog[kind]=page+'/'+total; h.textContent='рахую… надходження '+(prog['arrival-product']||'—')+', видаткові '+(prog['sales-invoice']||'—'); }
+    Promise.all([loadDocs('arrival-product',onProg), loadDocs('sales-invoice',onProg)])
+      .then(function(res){
+        var data=build(res[0], res[1]);
+        try{ localStorage.setItem(CACHE_KEY, JSON.stringify({ts:Date.now(), data:data})); }catch(_){}
+        render(box, data);
+      })
+      .catch(function(e){ h.textContent='✗ не вдалося: '+String(e&&e.message||e).slice(0,60); })
+      .then(function(){ btn.disabled=false; });
+  }
+
+  function sync(){
+    var btn=document.querySelector('.lk-sb-btn');
+    if(!onPage()){
+      var bar0=document.querySelector('.lk-sb-bar'); if(bar0) bar0.remove();
+      var b=document.getElementById('lk-sb-box'); if(b) b.remove(); return;
+    }
+    if(btn) return;
+    // на списку документів заголовків немає — чіпляємось до головного контейнера
+    var host=document.querySelector('.white-main-container') || document.querySelector('.panel-body');
+    if(!host) return;
+    var bar=document.createElement('div'); bar.className='lk-sb-bar';
+    bar.style.cssText='margin:8px 0 4px';
+    btn=document.createElement('button'); btn.type='button'; btn.className='lk-sb-btn';
+    btn.style.marginLeft='0';
+    btn.textContent='⇄ Взаєморозрахунки';
+    btn.title='Скільки постачальник завіз нам і скільки ми відвантажили йому — сальдо по кожному';
+    btn.addEventListener('click',function(e){ e.preventDefault(); e.stopPropagation(); run(btn); });
+    bar.appendChild(btn);
+    host.insertBefore(bar, host.firstChild);
+  }
+
+  var t=null;
+  function soon(){ clearTimeout(t); t=setTimeout(sync,300); }
+  soon();
+  window.addEventListener('lkdom', soon);
+  window.addEventListener('hashchange', soon);
+})();
+}catch(e){ try{ console.warn("[SD] модуль «lkSupplierBalance» не запустився:", e); }catch(_){} }
+/* ▲▲▲ МОДУЛЬ-END • lkSupplierBalance ▲▲▲ */
 
 /* ▼▼▼ МОДУЛЬ-START • lkNpDescr — 📋 шаблони опису у формі ТТН Нової пошти ▼▼▼ */
 /* ===== У формі «Сформувати ТТН» поле «Опис» СРМ заповнює переліком усіх товарів —
