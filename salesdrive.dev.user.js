@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.06
+// @version      3.07
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -2728,13 +2728,20 @@ function __sdPageMain() {
           var newRetail = (alarm && markOld > 0) ? Math.ceil((x.base * markOld - 1) / 5) * 5 : null;
           // ROZETKA: не смикаємо наявну ціну без причини (01282: роздріб стоїть, а вона
           // стрибала 210 → 247), але ПРОСТАВЛЯЄМО там, де її ще немає.
+          // ДРІБНИЙ ОПТ (тип 9) — середина між «майстри» і роздрібом, до кратного 5.
+          // Правило виведено з карток товарів Василя: 097 (195+295)/2=245,
+          // 192 (176+245)/2=210, 061 (56+105)/2=80 — усі збіглися точно.
+          var retailForCalc = (newRetail != null && newRetail > 0) ? newRetail : retail;
+          var p9 = (t.p7 > 0 && retailForCalc > 0) ? Math.round(((t.p7 + retailForCalc) / 2) / 5) * 5 : null;
+          var oldSmall = ptOf(item, 9);
+
           var oldRoz = ptOf(item, 3);
           var p3 = null;
           if (newRetail != null && newRetail > 0) p3 = Math.round(newRetail * ROZ_K);        // роздріб піднявся
           else if (!(oldRoz > 0) && retail > 0) p3 = Math.round(retail * ROZ_K);             // ціни не було — ставимо
           var row = { pid: x.pid, sku: x.sku || String(x.pid), name: x.name, base: x.base,
-                      o2: ptOf(item, 2), o5: ptOf(item, 5), o7: ptOf(item, 7),
-                      p2: t.p2, p5: t.p5, p7: t.p7,
+                      o2: ptOf(item, 2), o5: ptOf(item, 5), o7: ptOf(item, 7), o9: oldSmall,
+                      p2: t.p2, p5: t.p5, p7: t.p7, p9: p9,
                       retail: retail > 0 ? retail : null, o3: ptOf(item, 3), p3: p3,
                       costOld: costOld, delta: delta, deltaPct: deltaPct, alarm: !!alarm,
                       skuKey: String(x.sku || ""),
@@ -2749,6 +2756,7 @@ function __sdPageMain() {
           // і його призначення не підтверджене, тому не чіпаємо (щоб не зіпсувати картку)
           if (newRetail != null && newRetail > 0) { o.defaultPrice = newRetail; row.retailSet = newRetail; }
           var pairs = [[2, t.p2], [5, t.p5], [7, t.p7]];
+          if (p9 != null && p9 > 0) pairs.push([9, p9]);   // Дрібний опт
           if (p3 != null && p3 > 0) pairs.push([3, p3]);   // ROZETKA = роздріб + 5%
           pairs.forEach(function (pair) {
             var pr = null;
@@ -6279,7 +6287,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     var headRow=t.querySelector('thead tr')||t.querySelector('tr');
     if(headRow && !headRow.querySelector('th.lk-arropt-td')){
       var th=document.createElement('th'); th.className='lk-arropt-td';
-      th.textContent='Опт: Вел / Сер / Май';
+      th.textContent='Опт: Вел / Сер / Май / Дрібн';
       headRow.appendChild(th);
       var th2=document.createElement('th'); th2.className='lk-arropt-td lk-roz-th';
       th2.textContent='Собівартість · роздріб · ROZETKA';
@@ -6294,7 +6302,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       // перемальовуємо ЛИШЕ коли дані клітинки справді змінились — інакше колонка
       // мигтіла: рендер ішов на кожен пульс DOM (~сотні разів на хвилину)
       var sig=[view.applied?1:0, (r&&r.err)||'', (r&&r.skipped)?1:0, (r&&r.skip)?1:0,
-               r?r.p2:'', r?r.p5:'', r?r.p7:'', r?r.o2:'', r?r.o5:'', r?r.o7:''].join('|');
+               r?r.p2:'', r?r.p5:'', r?r.p7:'', r?r.p9:'',
+               r?r.o2:'', r?r.o5:'', r?r.o7:'', r?r.o9:''].join('|');
       if(td.getAttribute('data-sig')===sig) return;
       td.setAttribute('data-sig', sig);
       td.classList.remove('er');
@@ -6305,7 +6314,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
         var sk=document.createElement('div'); sk.className='od'; sk.textContent='⏭ пропущено (без галочки)';
         td.appendChild(sk); td.title=r.name||''; return;
       }
-      var changed=(Number(r.o2)!==Number(r.p2))||(Number(r.o5)!==Number(r.p5))||(Number(r.o7)!==Number(r.p7));
+      var changed=(Number(r.o2)!==Number(r.p2))||(Number(r.o5)!==Number(r.p5))
+                ||(Number(r.o7)!==Number(r.p7))||(r.p9!=null&&Number(r.o9)!==Number(r.p9));
       var l1=document.createElement('div'); l1.className='nw';
       // галочка «оновлювати цей товар» (за замовчуванням увімкнена) — лише в перегляді
       if(!view.applied){
@@ -6321,12 +6331,13 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
         td.style.opacity=r.skip?'0.45':'';
       }
       var l1t=document.createElement('span');
-      l1t.textContent=(view.applied?'✓ ':'')+r.p2+' / '+r.p5+' / '+r.p7;
+      l1t.textContent=(view.applied?'✓ ':'')+r.p2+' / '+r.p5+' / '+r.p7+(r.p9!=null?(' / '+r.p9):'');
       l1.appendChild(l1t);
       var l2=document.createElement('div'); l2.className='od';
-      l2.textContent=r.o2==null&&r.o5==null&&r.o7==null
+      l2.textContent=r.o2==null&&r.o5==null&&r.o7==null&&r.o9==null
         ? 'типів цін не було — нові'
-        : (changed?('було: '+fmtN(r.o2)+' / '+fmtN(r.o5)+' / '+fmtN(r.o7)):'без змін');
+        : (changed?('було: '+fmtN(r.o2)+' / '+fmtN(r.o5)+' / '+fmtN(r.o7)
+                    +(r.p9!=null?(' / '+fmtN(r.o9)):'')):'без змін');
       td.appendChild(l1); td.appendChild(l2);
       td.title=(r.name||'')+(r.created&&r.created.length?(' · створено типи: '+r.created.join(',')):'');
 
