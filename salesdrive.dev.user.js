@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.03
+// @version      3.04
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -2670,7 +2670,25 @@ function __sdPageMain() {
     }
     function step() {
       progress();
-      if (idx >= items.length) return respond({ ok: true, rate: rate, rows: results });
+      if (idx >= items.length) {
+        // ПАМʼЯТЬ «собівартість ДО накладної»: після збереження документа СРМ перерахує
+        // costPrice, і стару ціну вже не дістати — а комплекти рахуються пізніше.
+        // Перегляд нічого не пише в СРМ, тож саме тут стан ще «до».
+        if (mode !== "apply") {
+          try {
+            var mem = {}; try { mem = JSON.parse(localStorage.getItem("lk_costold_v1") || "{}") || {}; } catch (e0) {}
+            var lim = Date.now() - 6 * 60 * 60 * 1000;
+            Object.keys(mem).forEach(function (k) { if (!mem[k] || (mem[k].ts || 0) < lim) delete mem[k]; });
+            var map = {};
+            results.forEach(function (r) { if (r.skuKey && r.costOld > 0) map[r.skuKey] = r.costOld; });
+            var _m = (location.hash || "").match(/arrival-product\/update\/(\d+)/);
+            var docKey = _m ? _m[1] : "doc";
+            if (Object.keys(map).length) mem[docKey] = { ts: Date.now(), map: map };
+            localStorage.setItem("lk_costold_v1", JSON.stringify(mem));
+          } catch (e1) {}
+        }
+        return respond({ ok: true, rate: rate, rows: results });
+      }
       var x = items[idx++];
       if (mode === "apply" && skip[String(x.pid)]) {
         results.push({ pid: x.pid, sku: x.sku || String(x.pid), name: x.name, base: x.base, skipped: true });
@@ -2719,6 +2737,7 @@ function __sdPageMain() {
                       p2: t.p2, p5: t.p5, p7: t.p7,
                       retail: retail > 0 ? retail : null, o3: ptOf(item, 3), p3: p3,
                       costOld: costOld, delta: delta, deltaPct: deltaPct, alarm: !!alarm,
+                      skuKey: String(x.sku || ""),
                       markOld: markOld, markNew: (x.base > 0 && retail > 0) ? Math.round(retail / x.base * 100) / 100 : null,
                       newRetail: newRetail,
                       retailDbg: retail > 0 ? null : ("defaultPrice=" + item.defaultPrice + ", price=" + item.price) };
@@ -2865,6 +2884,20 @@ function __sdPageMain() {
       return { p2: Math.round(b * 1.2), p5: Math.round(b * 1.25), p7: Math.ceil((b * 1.3 - 1) / 5) * 5 };
     }
 
+    // памʼять «собівартість ДО накладної» — її пише перегляд опт-цін (sdArrivalOpt)
+    function costBefore(sku) {
+      try {
+        var mem = JSON.parse(localStorage.getItem("lk_costold_v1") || "{}") || {};
+        var _m2 = (location.hash || "").match(/arrival-product\/update\/(\d+)/);
+        var docKey = _m2 ? _m2[1] : "doc";
+        var rec = mem[docKey];
+        if (!rec || !rec.map) return null;
+        if (Date.now() - (rec.ts || 0) > 6 * 60 * 60 * 1000) return null;
+        var v = num(rec.map[String(sku).trim()]);
+        return v > 0 ? v : null;
+      } catch (e) { return null; }
+    }
+
     // памʼять «вигоди набору»: {kitSku: {b: вигода, t: час}}
     var BENEFIT_KEY = "lk_kitbenefit_v1";
     function kitBenefit(save) {
@@ -2908,12 +2941,16 @@ function __sdPageMain() {
       return comps.reduce(function (chain, c) {
         return chain.then(function (acc) {
           return cardBySku(c.sku, false).then(function (card) {
-            var old = card ? costFromCard(card) : null;
+            // для складника з накладної беремо собівартість, зафіксовану ПЕРЕГЛЯДОМ
+            // (у картці вона вже перерахована СРМ і порівнювати нове з новим — марно)
+            var before = costBefore(c.sku);
+            var old = before != null ? before : (card ? costFromCard(card) : null);
             var qty = num(c.qty) || 1;
             var nw = (fresh[String(c.sku)] != null) ? num(fresh[String(c.sku)]) : old;
             // роздріб складника — щоб тримати «вигоду набору» сталою
             var rt = card ? (num(card.defaultPrice) || num(card.price)) : 0;
             acc.push({ sku: c.sku, qty: qty, old: old, nw: nw, retail: rt > 0 ? rt : null,
+                       oldFrom: before != null ? "до накладної" : "з картки",
                        name: String((card && (card.documentName || card.name)) || c.name || "").slice(0, 40),
                        fromInvoice: fresh[String(c.sku)] != null });
             return acc;
@@ -6532,6 +6569,20 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     var h=document.createElement('div'); h.className='h';
     h.textContent=(applied?'✓ Записано. ':'')+'Комплекти зі складниками з цієї накладної: '+rows.length;
     box.appendChild(h);
+    // якщо перегляд опт-цін ще не запускали — стару собівартість узяти нізвідки
+    var haveMem=false;
+    try{
+      var mem=JSON.parse(localStorage.getItem('lk_costold_v1')||'{}')||{};
+      var _m3=(location.hash||'').match(/arrival-product\/update\/(\d+)/);
+      var dk=_m3?_m3[1]:'doc';
+      haveMem=!!(mem[dk]&&mem[dk].map&&Object.keys(mem[dk].map).length);
+    }catch(_){}
+    if(!haveMem){
+      var wn=document.createElement('div'); wn.className='er';
+      wn.textContent='⚠ Спершу натисніть «💰 Опт-ціни з собівартості» — інакше стару '
+        +'собівартість складників узяти нізвідки (СРМ уже перерахувала її після збереження накладної).';
+      box.appendChild(wn);
+    }
     rows.forEach(function(r){
       if(r.err){
         var e=document.createElement('div'); e.className='er';
@@ -6568,7 +6619,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
           +(r.reason?(' → підняти, бо '+r.reason):'');
       }
       txt.title=(r.parts||[]).map(function(x){
-        return x.sku+' ×'+x.qty+': '+(x.fromInvoice?'з накладної ':'')+fmt(x.nw);
+        return x.sku+' ×'+x.qty+': '+(x.fromInvoice?'нова з накладної ':'')+fmt(x.nw)
+          +(x.old!=null?(' (було '+fmt(x.old)+(x.oldFrom?', '+x.oldFrom:'')+')'):'');
       }).join('\n');
       d.appendChild(txt);
       if(sub) d.appendChild(sub);
