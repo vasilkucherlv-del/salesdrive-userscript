@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.11
+// @version      3.12
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -7413,11 +7413,15 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   }
 
   function build(arrivals, sales){
-    var by={}, noCp={n:0, sum:0};
+    var by={}, noCp={n:0, sum:0, docs:[]};
     arrivals.forEach(function(d){
       var id=d.counterPartyId;
       if(!id && d.__supName){ id='name:'+d.__supName; }        // визначено за товарами
-      if(!id){ noCp.n++; noCp.sum+=Number(d.totalSum)||0; return; }
+      if(!id){
+        noCp.n++; noCp.sum+=Number(d.totalSum)||0;
+        if(noCp.docs.length<400) noCp.docs.push({ id:d.id, date:d.date, sum:Number(d.totalSum)||0 });
+        return;
+      }
       by[id]=by[id]||{ id:id, name:nameOf(d), in:0, out:0, nIn:0, nOut:0 };
       by[id].in+=Number(d.totalSum)||0; by[id].nIn++;
       if(!by[id].name || /^контрагент #/.test(by[id].name)) by[id].name=nameOf(d);
@@ -7436,6 +7440,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   }
 
   function render(box, data){
+    box.querySelectorAll('.lk-sb-list').forEach(function(n){ n.remove(); });
     box.querySelectorAll('table,.note,.h,.lk-sb-btn').forEach(function(n){
       if(n.className==='lk-sb-btn'||n.classList&&n.classList.contains('lk-sb-btn')){ if(n.parentNode&&n.parentNode!==document.querySelector('.lk-sb-bar')) n.parentNode.remove(); return; }
       n.remove();
@@ -7459,6 +7464,34 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
         t.appendChild(tr);
       });
       box.appendChild(t);
+    }
+    if(data.noCp.n && (data.noCp.docs||[]).length){
+      var act0=document.createElement('div'); act0.style.marginTop='8px';
+      var lb=document.createElement('button'); lb.type='button'; lb.className='lk-sb-btn'; lb.style.marginLeft='0';
+      lb.textContent='📋 Показати накладні без постачальника ('+data.noCp.n+')';
+      lb.title='Відкрий накладну, простав постачальника в СРМ — і вона одразу піде в баланс';
+      lb.addEventListener('click',function(ev){
+        ev.preventDefault(); ev.stopPropagation();
+        var old=box.querySelector('.lk-sb-list'); if(old){ old.remove(); return; }
+        var wrap=document.createElement('div'); wrap.className='lk-sb-list';
+        wrap.style.cssText='margin-top:8px;max-height:320px;overflow:auto;border-top:1px solid #e6dad5';
+        var t2=document.createElement('table');
+        t2.innerHTML='<tr><th>Дата</th><th>Сума</th><th>Накладна</th></tr>';
+        (data.noCp.docs||[]).slice(0,200).forEach(function(d){
+          var tr=document.createElement('tr');
+          tr.innerHTML='<td>'+(d.date||'')+'</td><td class="n">'+money(d.sum)+' ₴</td>'
+            +'<td><a href="/ua/index.html?formId=1#/document/arrival-product/update/'+d.id+'" target="_blank" rel="noopener">№'+d.id+' →</a></td>';
+          t2.appendChild(tr);
+        });
+        wrap.appendChild(t2);
+        if((data.noCp.docs||[]).length>200){
+          var more=document.createElement('div'); more.className='note';
+          more.textContent='показано перші 200 з '+data.noCp.n;
+          wrap.appendChild(more);
+        }
+        box.appendChild(wrap);
+      });
+      act0.appendChild(lb); box.appendChild(act0);
     }
     if(data.noCp.n && lastDocs){
       var act=document.createElement('div'); act.style.marginTop='8px';
