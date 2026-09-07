@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.09
+// @version      3.10
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -4027,7 +4027,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
                                      // ціни складників міняються після кожної накладної
   // v2: у v1 лежали записи, збережені до фікса 3.01 (там опт-цін не було — читалось
   // row.priceType замість row.priceTypes), і вони показували чипи як 0
-  var PKEY='lkcp_prices_v2', NKEY='lkcp_tiernames_v1';
+  var PKEY='lkcp_prices_v2', NKEY='lkcp_tiernames_v2';   // v2: у v1 не було нових типів цін
+  var TIER_TTL=24*60*60*1000;        // словник типів оновлюємо раз на добу — інакше
+                                     // доданий у СРМ тип («Дрібний опт») ніколи не зʼявиться
 
   function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
   function gGet(k){ try{ var s=GM_getValue(k,null); return s?((typeof s==='string')?JSON.parse(s):s):null; }catch(e){ return null; } }
@@ -4037,7 +4039,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   (function preload(){
     var o=gGet(PKEY);
     if(o) Object.keys(o).forEach(function(sku){ var e=o[sku]; if(e){ cache[sku]=e.i; tsMap[sku]=e.ts||0; } });
-    var n=gGet(NKEY); if(n && Object.keys(n).length) TIER_NAMES=n;
+    var n=gGet(NKEY);
+    if(n && n.map && Object.keys(n.map).length && Date.now()-(n.ts||0) < TIER_TTL) TIER_NAMES=n.map;
   })();
   var saveT=null;
   function savePricesSoon(){ clearTimeout(saveT); saveT=setTimeout(function(){
@@ -4096,7 +4099,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     fetch('/products/'+m[1]+'/?formId=1',{credentials:'include',headers:{'accept':'application/json, text/plain, */*','when':'product/index'}})
       .then(function(r){ return r.ok?r.json():null; })
       .then(function(j){ var pt=j&&j.response&&j.response.meta&&j.response.meta.priceTypes;
-        if(pt && typeof pt==='object' && Object.keys(pt).length){ TIER_NAMES=pt; gSet(NKEY,pt); updateTotals(); } })
+        if(pt && typeof pt==='object' && Object.keys(pt).length){
+          TIER_NAMES=pt; gSet(NKEY,{ts:Date.now(), map:pt}); updateTotals(); } })
       .catch(function(){})
       .then(function(){ tierBusy=false; });
   }
