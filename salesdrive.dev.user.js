@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.07
+// @version      3.08
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -5121,10 +5121,36 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       .catch(function () { return null; });
   }
   function fill(slots){
-    Object.keys(slots).forEach(function (code) {
-      infoOf(code).then(function (r) { apply(slots[code], r); })
+    var ps = Object.keys(slots).map(function (code) {
+      return infoOf(code).then(function (r) { apply(slots[code], r); slots[code].info = r; })
         .catch(function () {});           // рядок лишиться «…» — не валимо решту
     });
+    // сортуємо ОДИН раз, коли всі залишки вже відомі: у наявності — вгору
+    Promise.all(ps).then(function () { sortRows(slots); }).catch(function () {});
+  }
+  // 0 — є в наявності (більше шт вище), 1 — «немає», 2 — залишок невідомий
+  function rankOf(inf){
+    if (!inf || inf.found === false || !isFinite(inf.qty)) return 2;
+    return inf.qty > 0 ? 0 : 1;
+  }
+  function sortRows(slots){
+    var codes = Object.keys(slots);
+    if (codes.length < 2) return;
+    var box = null;
+    for (var i = 0; i < codes.length && !box; i++) if (slots[codes[i]].row) box = slots[codes[i]].row.parentNode;
+    if (!box) return;
+    var sorted = codes.slice().sort(function (a, b) {
+      var ra = rankOf(slots[a].info), rb = rankOf(slots[b].info);
+      if (ra !== rb) return ra - rb;
+      var qa = (slots[a].info && Number(slots[a].info.qty)) || 0;
+      var qb = (slots[b].info && Number(slots[b].info.qty)) || 0;
+      return qb - qa;
+    });
+    // якщо порядок і так правильний — DOM не чіпаємо (щоб не було зайвих мутацій)
+    var same = true;
+    for (var k = 0; k < sorted.length; k++) if (box.children[k] !== slots[sorted[k]].row) { same = false; break; }
+    if (same) return;
+    sorted.forEach(function (c) { if (slots[c].row) box.appendChild(slots[c].row); });
   }
   function apply(slot, r){
     if (!slot) return;
@@ -5168,7 +5194,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       r.appendChild(ph); r.appendChild(nm); r.appendChild(cd); r.appendChild(stk); r.appendChild(pr);
       r.addEventListener('click', function (e) { e.preventDefault(); e.stopPropagation(); openProduct(it.sku); });
       box.appendChild(r);
-      slots[String(it.sku)] = { img: img, no: no, stk: stk, pr: pr };
+      slots[String(it.sku)] = { img: img, no: no, stk: stk, pr: pr, row: r };
     });
 
     var at = anchorFor(root);
