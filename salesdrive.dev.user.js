@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.02
+// @version      3.03
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -2708,9 +2708,12 @@ function __sdPageMain() {
           // рекомендований роздріб — зберігаємо ТУ САМУ націнку, що була у товару
           var markOld = (costOld > 0 && retail > 0) ? Math.round(retail / costOld * 100) / 100 : null;
           var newRetail = (alarm && markOld > 0) ? Math.ceil((x.base * markOld - 1) / 5) * 5 : null;
-          // ROZETKA чіпаємо ЛИШЕ разом із підняттям роздробу: інакше вона стрибала там,
-          // де нічого не змінилось (01282: роздріб 235 стоїть, а ROZETKA 210 → 247).
-          var p3 = (newRetail != null && newRetail > 0) ? Math.round(newRetail * ROZ_K) : null;
+          // ROZETKA: не смикаємо наявну ціну без причини (01282: роздріб стоїть, а вона
+          // стрибала 210 → 247), але ПРОСТАВЛЯЄМО там, де її ще немає.
+          var oldRoz = ptOf(item, 3);
+          var p3 = null;
+          if (newRetail != null && newRetail > 0) p3 = Math.round(newRetail * ROZ_K);        // роздріб піднявся
+          else if (!(oldRoz > 0) && retail > 0) p3 = Math.round(retail * ROZ_K);             // ціни не було — ставимо
           var row = { pid: x.pid, sku: x.sku || String(x.pid), name: x.name, base: x.base,
                       o2: ptOf(item, 2), o5: ptOf(item, 5), o7: ptOf(item, 7),
                       p2: t.p2, p5: t.p5, p7: t.p7,
@@ -2965,7 +2968,10 @@ function __sdPageMain() {
           var upAlarm = up != null && (up >= 10 || (retail > 0 && up / retail * 100 >= 5));
           var newRetail = (alarm || upAlarm) && cand != null && cand > retail ? cand : null;
           if (!newRetail) reason = "";
-          var p3 = (newRetail || retail) > 0 ? Math.round((newRetail || retail) * 1.05) : null;
+          var oldRozK = ptOf(kc, 3);
+          var p3 = null;
+          if (newRetail != null && newRetail > 0) p3 = Math.round(newRetail * 1.05);
+          else if (!(oldRozK > 0) && retail > 0) p3 = Math.round(retail * 1.05);
           var row = { sku: kit.sku, name: kit.name || String(kc.documentName || kc.name || "").slice(0, 60),
                       pid: kc.id, parts: parts, costOld: costOld, costNew: costNew,
                       delta: delta, deltaPct: deltaPct, alarm: !!alarm,
