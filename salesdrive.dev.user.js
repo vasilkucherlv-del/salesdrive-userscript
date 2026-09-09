@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.16
+// @version      3.17
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -7287,7 +7287,12 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     // кнопку ставимо СУСІДОМ до нього і теж пускаємо ліворуч-плавом, інакше падає під поле
     +'.lk-skucopy.side{float:left;margin-top:5px}'
     // у рядку товару заявки — компактніша, щоб не розпирала рядок 45px
-    +'.lk-skucopy.sm{width:18px;height:18px;font-size:11px;margin-left:4px}';
+    +'.lk-skucopy.sm{width:18px;height:18px;font-size:11px;margin-left:4px}'
+    +'.lk-skulink{display:inline-flex;align-items:center;justify-content:center;'
+    +'  width:18px;height:18px;margin-left:3px;border:1px solid #b9c6d4;border-radius:5px;'
+    +'  background:#f2f6fa;color:#33556e;font:11px/1 Arial,sans-serif;text-decoration:none;'
+    +'  vertical-align:middle;user-select:none}'
+    +'.lk-skulink:hover{background:#e2ecf5;border-color:#8fa9c0;text-decoration:none}';
   var st=document.createElement('style'); st.textContent=css;
   (document.head||document.documentElement).appendChild(st);
 
@@ -7315,6 +7320,17 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     });
     return b;
   }
+
+  // офіційний пошук сайту (Horoshop): /katalog/search/?q=КОД — за кодом віддає саме цей товар
+  var SITE='https://lartek.com.ua/katalog/search/?q=';
+  function makeLink(code){
+    var a=document.createElement('a'); a.className='lk-skulink'; a.textContent='🌐';
+    a.target='_blank'; a.rel='noopener'; a.title='Відкрити товар на сайті';
+    setLink(a, code);
+    a.addEventListener('click',function(e){ e.stopPropagation(); });
+    return a;
+  }
+  function setLink(a, code){ a.setAttribute('data-code', code); a.href = SITE + encodeURIComponent(code); }
 
   function scan(){
     // 1) режим редагування картки: input[ng-model="viewModel.item.sku"]
@@ -7348,13 +7364,22 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       if(String(sp.getAttribute('ng-if')||'').indexOf('viewModel.enableId')<0) return;
       var m=/\(([^()]+)\)/.exec(String(sp.textContent||'').replace(/\s+/g,' '));
       if(!m) return;
+      var code=m[1];
       var nx=sp.nextElementSibling;
-      if(nx && nx.classList && nx.classList.contains('lk-skucopy')) return;
-      sp.insertAdjacentElement('afterend', makeBtn(function(){
+      if(nx && nx.classList && nx.classList.contains('lk-skucopy')){
+        // рядок уже оснащений; Angular міг підставити інший товар — оновлюємо лише адресу
+        var lnk=nx.nextElementSibling;
+        if(lnk && lnk.classList && lnk.classList.contains('lk-skulink')
+           && lnk.getAttribute('data-code')!==code) setLink(lnk, code);
+        return;
+      }
+      var btn=makeBtn(function(){
         // читаємо щоразу заново: Angular перевикористовує рядок під інший товар
         var t=/\(([^()]+)\)/.exec(String(sp.textContent||'').replace(/\s+/g,' '));
         return t?t[1]:'';
-      }, 'sm'));
+      }, 'sm');
+      sp.insertAdjacentElement('afterend', btn);
+      btn.insertAdjacentElement('afterend', makeLink(code));
     });
   }
 
