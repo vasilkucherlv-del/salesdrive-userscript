@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.18
+// @version      3.19
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -7456,33 +7456,51 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 /* ▲▲▲ МОДУЛЬ-END • lkSkuCopy ▲▲▲ */
 
 /* ▼▼▼ МОДУЛЬ-START • lkSupplierBalance — ⇄ взаєморозрахунки з постачальниками ▼▼▼ */
-/* ===== Кнопка в розділі документів: рахує зустрічний рух по кожному контрагенту —
-   скільки він відвантажив нам (надходження) і скільки ми йому (видаткові накладні),
-   та показує сальдо. Для бартеру: віддали свій товар — отримали знижку/товар назад.
-   Дані — внутрішніми запитами СРМ (cookie, без публічного API й без його ліміту).
-   Нічого не пише: лише читає. ===== */
+/* ===== Журнал обміну товаром із постачальниками. Записи вносить менеджер сам
+   («я віддав» / «вони віддали»), модуль лише зберігає їх і показує сальдо по
+   кожному постачальнику — від дати, з якої велено рахувати.
+   Документи НЕ сканує (стара версія перебирала 130 сторінок ~110 с і давала суми
+   за всю історію, до яких обмін не має стосунку). Запитів не робить, у СРМ не пише.
+   Дані лежать у localStorage цього браузера — тому є «копія» / «відновити». ===== */
 try{ // SD-ізоляція: помилка цього модуля не зупинить решту
 (function lkSupplierBalance(){
   'use strict';
-  var CACHE_KEY='lk_supbal_v1', TTL=10*60*1000, MAX_PAGES=90;
+  var KEY='lk_supbal_ops_v1';
 
   var css=''
     +'.lk-sb-btn{display:inline-block;margin-left:10px;padding:4px 14px;border:none;border-radius:14px;'
     +'  background:#5D4037;color:#fff;font:700 13px/1.5 Arial,sans-serif;cursor:pointer;vertical-align:middle;white-space:nowrap}'
     +'.lk-sb-btn:hover{background:#4a302a}'
-    +'.lk-sb-btn[disabled]{background:#9e9e9e;cursor:default}'
     +'#lk-sb-box{margin:10px 0;padding:10px 12px;border:1px solid #bfa89f;border-left:4px solid #5D4037;'
     +'  background:#faf6f4;border-radius:6px;font:13px/1.6 Arial,sans-serif;color:#3b2b26;'
     +'  max-width:900px;box-sizing:border-box;position:relative}'
     +'#lk-sb-box .h{font-weight:700;color:#4a302a;margin-bottom:6px}'
     +'#lk-sb-box table{border-collapse:collapse;width:100%;font:13px/1.5 Arial,sans-serif}'
-    +'#lk-sb-box td,#lk-sb-box th{padding:4px 8px;border-top:1px solid #e6dad5;white-space:nowrap}'
+    +'#lk-sb-box td,#lk-sb-box th{padding:4px 8px;border-top:1px solid #e6dad5}'
     +'#lk-sb-box th{font-weight:700;color:#6b4c42;text-align:left;border-top:none}'
-    +'#lk-sb-box td.n{text-align:right;font-family:ui-monospace,Menlo,Consolas,monospace}'
-    +'#lk-sb-box td.nm{white-space:normal}'
+    +'#lk-sb-box td.n{text-align:right;font-family:ui-monospace,Menlo,Consolas,monospace;white-space:nowrap}'
+    +'#lk-sb-box tr.sup{cursor:pointer}'
+    +'#lk-sb-box tr.sup:hover{background:#f2e9e5}'
     +'#lk-sb-box .plus{color:#1B5E20;font-weight:700}'
     +'#lk-sb-box .minus{color:#B71C1C;font-weight:700}'
     +'#lk-sb-box .note{color:#7a6157;font-size:12px;margin-top:7px}'
+    +'#lk-sb-box .ops{background:#fff;border:1px solid #e6dad5;border-radius:5px;margin:4px 0 8px;padding:4px 8px}'
+    +'#lk-sb-box .ops .row{display:flex;align-items:center;gap:8px;padding:2px 0;border-top:1px solid #f0e7e3}'
+    +'#lk-sb-box .ops .row:first-child{border-top:none}'
+    +'#lk-sb-box .ops .d{color:#7a6157;font-size:12px;min-width:80px}'
+    +'#lk-sb-box .ops .s{font-family:ui-monospace,Menlo,Consolas,monospace;min-width:90px;text-align:right}'
+    +'#lk-sb-box .ops .c{flex:1;color:#5b453e;font-size:12px}'
+    +'#lk-sb-box .ops .del{border:none;background:none;color:#B71C1C;cursor:pointer;font-size:14px}'
+    +'#lk-sb-box .form{margin-top:8px;padding-top:8px;border-top:1px dashed #d8c6bf;'
+    +'  display:flex;flex-wrap:wrap;gap:6px;align-items:center}'
+    +'#lk-sb-box input,#lk-sb-box select{border:1px solid #cbb8b0;border-radius:4px;padding:3px 6px;'
+    +'  font:13px/1.4 Arial,sans-serif;color:#3b2b26;background:#fff}'
+    +'#lk-sb-box input.sum{width:90px;text-align:right}'
+    +'#lk-sb-box input.note-in{flex:1;min-width:150px}'
+    +'#lk-sb-box .mini{padding:3px 10px;border:1px solid #bfa89f;border-radius:12px;background:#fff;'
+    +'  color:#5D4037;font:13px/1.4 Arial,sans-serif;cursor:pointer}'
+    +'#lk-sb-box .mini:hover{background:#f2e9e5}'
+    +'#lk-sb-box .mini.on{background:#5D4037;color:#fff;border-color:#5D4037}'
     +'#lk-sb-box .x{position:absolute;top:5px;right:9px;border:none;background:none;cursor:pointer;'
     +'  font-size:17px;color:#5D4037}';
   var st=document.createElement('style'); st.textContent=css;
@@ -7490,210 +7508,225 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 
   function onPage(){ return /#\/document\//.test(location.hash||''); }
   function money(n){ return (Math.round(Number(n)||0)).toLocaleString('uk-UA'); }
-
-  // один список документів (усі сторінки) — внутрішнім запитом СРМ
-  function loadDocs(kind, onProg){
-    var url='/document-'+kind+'/index/?active=1&formId=1';
-    var out=[], page=1;
-    function step(){
-      return fetch(url+(page>1?('&page='+page):''), { credentials:'include',
-        headers:{ 'accept':'application/json, text/plain, */*' } })
-        .then(function(r){ return r.ok?r.json():null; })
-        .then(function(j){
-          if(!j) return out;
-          var b=j.response||j, rows=b.data||[];
-          out=out.concat(rows);
-          var pc=(b.pagination&&Number(b.pagination.pageCount))||1;
-          if(onProg) onProg(kind, page, Math.min(pc, MAX_PAGES));
-          if(page<pc && page<MAX_PAGES){ page++; return step(); }
-          return out;
-        })
-        .catch(function(){ return out; });
-    }
-    return step();
+  function today(){
+    var d=new Date(), p=function(x){ return (x<10?'0':'')+x; };
+    return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate());
   }
+  function dmy(s){ var m=/^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s||'')); return m? m[3]+'.'+m[2]+'.'+m[1] : String(s||''); }
+  function num(v){ var n=parseFloat(String(v==null?'':v).replace(/\s/g,'').replace(',','.')); return isFinite(n)?n:0; }
 
-  function nameOf(d){
-    var c=d.counterparty;
-    return (c && (c.title||c.name||c.fullName)) || ('контрагент #'+d.counterPartyId);
-  }
-
-  function build(arrivals, sales){
-    var by={}, noCp={n:0, sum:0, docs:[]};
-    arrivals.forEach(function(d){
-      var id=d.counterPartyId;
-      if(!id){
-        noCp.n++; noCp.sum+=Number(d.totalSum)||0;
-        if(noCp.docs.length<400) noCp.docs.push({ id:d.id, date:d.date, sum:Number(d.totalSum)||0 });
-        return;
-      }
-      by[id]=by[id]||{ id:id, name:nameOf(d), in:0, out:0, nIn:0, nOut:0 };
-      by[id].in+=Number(d.totalSum)||0; by[id].nIn++;
-      if(!by[id].name || /^контрагент #/.test(by[id].name)) by[id].name=nameOf(d);
-    });
-    sales.forEach(function(d){
-      var id=d.counterPartyId; if(!id) return;
-      by[id]=by[id]||{ id:id, name:nameOf(d), in:0, out:0, nIn:0, nOut:0 };
-      by[id].out+=Number(d.totalSum)||0; by[id].nOut++;
-      if(!by[id].name || /^контрагент #/.test(by[id].name)) by[id].name=nameOf(d);
-    });
-    var all=Object.keys(by).map(function(k){ return by[k]; });
-    var both=all.filter(function(x){ return x.nIn>0 && x.nOut>0; });   // зустрічний рух = бартер
-    both.forEach(function(x){ x.saldo=Math.round((x.in-x.out)*100)/100; });
-    both.sort(function(a,b){ return Math.abs(b.saldo)-Math.abs(a.saldo); });
-    return { both:both, onlyIn:all.filter(function(x){ return x.nIn>0 && !x.nOut; }).length, noCp:noCp };
-  }
-
-  // ---- «мої постачальники обміну»: список, який веде сам Василь ----
-  var MY_KEY='lk_supbal_my_v1';
-  function myList(save){
+  function load(){
     try{
-      if(save){ localStorage.setItem(MY_KEY, JSON.stringify(save)); return save; }
-      return JSON.parse(localStorage.getItem(MY_KEY)||'[]')||[];
-    }catch(e){ return []; }
+      var o=JSON.parse(localStorage.getItem(KEY)||'{}')||{};
+      if(!Array.isArray(o.ops)) o.ops=[];
+      if(!Array.isArray(o.sups)) o.sups=[];
+      if(typeof o.start!=='string') o.start='';
+      return o;
+    }catch(e){ return {start:'',sups:[],ops:[]}; }
   }
-  function norm(x){ return String(x||'').replace(/\s+/g,' ').trim().toLowerCase(); }
-  function isMine(name){
-    var my=myList(); if(!my.length) return true;          // список порожній — показуємо всіх
-    var n=norm(name);
-    for(var i=0;i<my.length;i++){ if(n.indexOf(norm(my[i]))>=0) return true; }
-    return false;
-  }
-  function renderMy(box, onChange){
-    var old=box.querySelector('.lk-sb-my'); if(old) old.remove();
-    var wrap=document.createElement('div'); wrap.className='lk-sb-my';
-    wrap.style.cssText='margin:6px 0 10px;padding:6px 0;border-bottom:1px dashed #e0d0ca';
-    var lab=document.createElement('span');
-    lab.style.cssText='font-weight:700;color:#6b4c42;margin-right:8px';
-    lab.textContent='Мої постачальники обміну:';
-    wrap.appendChild(lab);
-    var my=myList();
-    if(!my.length){
-      var em=document.createElement('span'); em.style.color='#8a7268';
-      em.textContent='(не задані — показані всі) ';
-      wrap.appendChild(em);
-    }
-    my.forEach(function(n,i){
-      var chip=document.createElement('span');
-      chip.style.cssText='display:inline-block;margin:2px 6px 2px 0;padding:2px 8px;border-radius:10px;'
-        +'background:#efe3de;color:#4a302a;font-size:12.5px';
-      chip.textContent=n+' ';
-      var x=document.createElement('a'); x.href='#'; x.textContent='✕';
-      x.style.cssText='color:#8a4030;text-decoration:none;margin-left:4px';
-      x.addEventListener('click',function(e){ e.preventDefault(); var l=myList(); l.splice(i,1); myList(l); onChange(); });
-      chip.appendChild(x); wrap.appendChild(chip);
-    });
-    var inp=document.createElement('input'); inp.type='text'; inp.placeholder='назва постачальника';
-    inp.style.cssText='padding:3px 8px;border:1px solid #cbb8b1;border-radius:5px;font-size:13px;width:190px';
-    var add=document.createElement('button'); add.type='button'; add.className='lk-sb-btn';
-    add.textContent='+ додати'; add.style.cssText='margin-left:6px;padding:3px 10px';
-    function doAdd(){
-      var v=(inp.value||'').trim(); if(!v) return;
-      var l=myList(); if(l.indexOf(v)<0) l.push(v); myList(l); inp.value=''; onChange();
-    }
-    add.addEventListener('click',function(e){ e.preventDefault(); e.stopPropagation(); doAdd(); });
-    inp.addEventListener('keydown',function(e){ if(e.key==='Enter'){ e.preventDefault(); doAdd(); } });
-    wrap.appendChild(inp); wrap.appendChild(add);
-    box.appendChild(wrap);
+  function save(o){ try{ localStorage.setItem(KEY, JSON.stringify(o)); }catch(e){} }
+
+  // копіювання в буфер — тим самим способом, що й кнопка ⧉ (GM_setClipboard, далі execCommand)
+  function copy(txt){
+    try{ if(typeof GM_setClipboard!=='undefined'){ GM_setClipboard(String(txt)); return true; } }catch(e){}
+    try{
+      var ta=document.createElement('textarea');
+      ta.value=String(txt); ta.style.cssText='position:fixed;left:-9999px;top:0';
+      document.body.appendChild(ta); ta.select();
+      var ok=document.execCommand('copy'); ta.remove(); return ok;
+    }catch(e){ return false; }
   }
 
-  function render(box, data){
-    box.querySelectorAll('.lk-sb-list,.lk-sb-my').forEach(function(n){ n.remove(); });
-    box.querySelectorAll('table,.note,.h,.lk-sb-btn').forEach(function(n){
-      if(n.className==='lk-sb-btn'||n.classList&&n.classList.contains('lk-sb-btn')){ if(n.parentNode&&n.parentNode!==document.querySelector('.lk-sb-bar')) n.parentNode.remove(); return; }
-      n.remove();
+  // сальдо = «я віддав» − «вони віддали»: скільки постачальник винен нам
+  function totals(){
+    var o=load(), by={}, start=o.start||'';
+    o.sups.forEach(function(s){ by[s]={sup:s, give:0, take:0, ops:[]}; });
+    o.ops.forEach(function(op){
+      if(!op || !op.sup) return;
+      if(start && String(op.date||'')<start) return;
+      if(!by[op.sup]) by[op.sup]={sup:op.sup, give:0, take:0, ops:[]};
+      if(op.dir==='take') by[op.sup].take+=num(op.sum); else by[op.sup].give+=num(op.sum);
+      by[op.sup].ops.push(op);
     });
-    var h=document.createElement('div'); h.className='h';
-    var mine=data.both.filter(function(x){ return isMine(x.name); });
-    h.textContent=myList().length
-      ? ('Взаєморозрахунки з моїми постачальниками: '+mine.length+' з '+data.both.length)
-      : ('Взаєморозрахунки: контрагентів зі зустрічним рухом — '+data.both.length);
-    box.appendChild(h);
-    renderMy(box, function(){ render(box, data); });
-    data=Object.assign({}, data, { both:mine });
-    if(data.both.length){
-      var t=document.createElement('table');
-      t.innerHTML='<tr><th>Контрагент</th><th>Вони нам</th><th>Ми їм</th><th>Сальдо</th></tr>';
-      data.both.forEach(function(x){
-        var tr=document.createElement('tr');
-        var a='<a href="/ua/index.html?formId=1#/document/counterparty/update/'+x.id+'" target="_blank" rel="noopener">'+
-              String(x.name).replace(/[&<>"]/g,'')+'</a>';
-        var sal=x.saldo>0 ? ('<span class="plus">+'+money(x.saldo)+' ₴</span>')
-              : (x.saldo<0 ? ('<span class="minus">−'+money(-x.saldo)+' ₴</span>') : '0');
-        tr.innerHTML='<td class="nm">'+a+'</td>'
-          +'<td class="n">'+money(x.in)+' ₴ <span style="color:#8a7268">('+x.nIn+')</span></td>'
-          +'<td class="n">'+money(x.out)+' ₴ <span style="color:#8a7268">('+x.nOut+')</span></td>'
-          +'<td class="n">'+sal+'</td>';
-        t.appendChild(tr);
-      });
-      box.appendChild(t);
-    }
-    if(data.noCp.n && (data.noCp.docs||[]).length){
-      var act0=document.createElement('div'); act0.style.marginTop='8px';
-      var lb=document.createElement('button'); lb.type='button'; lb.className='lk-sb-btn'; lb.style.marginLeft='0';
-      lb.textContent='📋 Показати накладні без постачальника ('+data.noCp.n+')';
-      lb.title='Відкрий накладну, простав постачальника в СРМ — і вона одразу піде в баланс';
-      lb.addEventListener('click',function(ev){
-        ev.preventDefault(); ev.stopPropagation();
-        var old=box.querySelector('.lk-sb-list'); if(old){ old.remove(); return; }
-        var wrap=document.createElement('div'); wrap.className='lk-sb-list';
-        wrap.style.cssText='margin-top:8px;max-height:320px;overflow:auto;border-top:1px solid #e6dad5';
-        var t2=document.createElement('table');
-        t2.innerHTML='<tr><th>Дата</th><th>Сума</th><th>Накладна</th></tr>';
-        (data.noCp.docs||[]).slice(0,200).forEach(function(d){
-          var tr=document.createElement('tr');
-          tr.innerHTML='<td>'+(d.date||'')+'</td><td class="n">'+money(d.sum)+' ₴</td>'
-            +'<td><a href="/ua/index.html?formId=1#/document/arrival-product/update/'+d.id+'" target="_blank" rel="noopener">№'+d.id+' →</a></td>';
-          t2.appendChild(tr);
-        });
-        wrap.appendChild(t2);
-        if((data.noCp.docs||[]).length>200){
-          var more=document.createElement('div'); more.className='note';
-          more.textContent='показано перші 200 з '+data.noCp.n;
-          wrap.appendChild(more);
-        }
-        box.appendChild(wrap);
-      });
-      act0.appendChild(lb); box.appendChild(act0);
-    }
-    var note=document.createElement('div'); note.className='note';
-    note.textContent='«+» — вони завезли більше, ніж ми віддали; «−» — ми віддали більше.'
-      +(data.noCp.n?(' У '+data.noCp.n+' надходженнях постачальник не проставлений — вони не рахуються.'):'');
-    box.appendChild(note);
+    var rows=Object.keys(by).map(function(k){
+      var r=by[k]; r.saldo=r.give-r.take;
+      r.ops.sort(function(a,b){ return String(b.date||'').localeCompare(String(a.date||'')); });
+      return r;
+    });
+    rows.sort(function(a,b){ return Math.abs(b.saldo)-Math.abs(a.saldo); });
+    return rows;
   }
 
-  function boxEl(){
-    var old=document.getElementById('lk-sb-box'); if(old) return old;
-    var box=document.createElement('div'); box.id='lk-sb-box';
-    var x=document.createElement('button'); x.className='x'; x.textContent='✕';
+  var openSup=null;      // який постачальник розгорнутий
+  var draft={ dir:'give' };
+
+  function el(tag, cls, txt){
+    var e=document.createElement(tag);
+    if(cls) e.className=cls;
+    if(txt!=null) e.textContent=txt;
+    return e;
+  }
+  function saldoCell(v){
+    var td=el('td','n');
+    var s=el('span', v>0?'plus':(v<0?'minus':''), (v>0?'+':'')+money(v)+' ₴');
+    td.appendChild(s);
+    return td;
+  }
+
+  function render(box){
+    var o=load(), rows=totals();
+    box.textContent='';
+
+    var x=el('button','x','×'); x.type='button'; x.title='Сховати';
     x.addEventListener('click',function(){ box.remove(); });
     box.appendChild(x);
-    var host=document.querySelector('.panel-body, .white-main-container') || document.body;
-    host.insertBefore(box, host.firstChild);
-    return box;
+
+    box.appendChild(el('div','h','⇄ Взаєморозрахунки з постачальниками'));
+
+    // з якої дати рахувати
+    var line=el('div'); line.style.marginBottom='6px';
+    line.appendChild(document.createTextNode('Рахувати з: '));
+    var din=document.createElement('input'); din.type='date'; din.value=o.start||'';
+    din.addEventListener('change',function(){ var d=load(); d.start=din.value||''; save(d); render(box); });
+    line.appendChild(din);
+    if(o.start) line.appendChild(el('span','note',' операції до '+dmy(o.start)+' не рахуються'));
+    box.appendChild(line);
+
+    if(!rows.length){
+      box.appendChild(el('div','note','Записів ще немає. Додайте перший унизу: дата, постачальник, сума і напрям.'));
+    } else {
+      var tb=document.createElement('table');
+      var hr=document.createElement('tr');
+      ['Постачальник','Я віддав','Вони віддали','Сальдо'].forEach(function(t,i){
+        var th=el('th',i?'n':'',t); hr.appendChild(th);
+      });
+      tb.appendChild(hr);
+      var totG=0, totT=0;
+      rows.forEach(function(r){
+        totG+=r.give; totT+=r.take;
+        var tr=el('tr','sup');
+        tr.appendChild(el('td','',r.sup));
+        tr.appendChild(el('td','n',money(r.give)+' ₴'));
+        tr.appendChild(el('td','n',money(r.take)+' ₴'));
+        tr.appendChild(saldoCell(r.saldo));
+        tr.title='Показати операції';
+        tr.addEventListener('click',function(){ openSup = (openSup===r.sup? null : r.sup); render(box); });
+        tb.appendChild(tr);
+        if(openSup===r.sup){
+          var trd=document.createElement('tr');
+          var td=document.createElement('td'); td.colSpan=4;
+          var ops=el('div','ops');
+          if(!r.ops.length) ops.appendChild(el('div','note','операцій у цьому періоді немає'));
+          r.ops.forEach(function(op){
+            var row=el('div','row');
+            row.appendChild(el('span','d',dmy(op.date)));
+            row.appendChild(el('span','', op.dir==='take'?'вони віддали':'я віддав'));
+            row.appendChild(el('span','s',money(op.sum)+' ₴'));
+            row.appendChild(el('span','c',op.note||''));
+            var del=el('button','del','×'); del.type='button'; del.title='Видалити запис';
+            del.addEventListener('click',function(e){
+              e.stopPropagation();
+              var d=load(); d.ops=d.ops.filter(function(z){ return z.id!==op.id; }); save(d); render(box);
+            });
+            row.appendChild(del);
+            ops.appendChild(row);
+          });
+          td.appendChild(ops); trd.appendChild(td); tb.appendChild(trd);
+        }
+      });
+      var tr2=document.createElement('tr');
+      var thT=el('th','','Разом');
+      tr2.appendChild(thT);
+      tr2.appendChild(el('td','n',money(totG)+' ₴'));
+      tr2.appendChild(el('td','n',money(totT)+' ₴'));
+      tr2.appendChild(saldoCell(totG-totT));
+      tb.appendChild(tr2);
+      box.appendChild(tb);
+      box.appendChild(el('div','note','«+» — постачальник винен нам, «−» — ми винні йому. Рядок можна розгорнути й побачити операції.'));
+    }
+
+    // ---- форма нового запису ----
+    var f=el('div','form');
+    var fd=document.createElement('input'); fd.type='date'; fd.value=draft.date||today();
+    f.appendChild(fd);
+
+    var sel=document.createElement('select');
+    var names=o.sups.slice();
+    rows.forEach(function(r){ if(names.indexOf(r.sup)<0) names.push(r.sup); });
+    names.forEach(function(n){ var op=document.createElement('option'); op.value=n; op.textContent=n; sel.appendChild(op); });
+    var oNew=document.createElement('option'); oNew.value='__new'; oNew.textContent='+ новий постачальник…'; sel.appendChild(oNew);
+    if(draft.sup && names.indexOf(draft.sup)>=0) sel.value=draft.sup;
+    f.appendChild(sel);
+
+    var nameIn=document.createElement('input'); nameIn.type='text'; nameIn.placeholder='назва постачальника';
+    nameIn.style.width='170px';
+    nameIn.hidden = names.length>0 && sel.value!=='__new';
+    if(!names.length) sel.hidden=true;
+    sel.addEventListener('change',function(){ nameIn.hidden = sel.value!=='__new'; if(!nameIn.hidden) nameIn.focus(); });
+    f.appendChild(nameIn);
+
+    var sum=document.createElement('input'); sum.type='text'; sum.className='sum'; sum.placeholder='сума';
+    f.appendChild(sum);
+
+    var bGive=el('button','mini'+(draft.dir==='give'?' on':''),'я віддав'); bGive.type='button';
+    var bTake=el('button','mini'+(draft.dir==='take'?' on':''),'вони віддали'); bTake.type='button';
+    bGive.addEventListener('click',function(){ draft.dir='give'; bGive.classList.add('on'); bTake.classList.remove('on'); });
+    bTake.addEventListener('click',function(){ draft.dir='take'; bTake.classList.add('on'); bGive.classList.remove('on'); });
+    f.appendChild(bGive); f.appendChild(bTake);
+
+    var note=document.createElement('input'); note.type='text'; note.className='note-in'; note.placeholder='коментар (за що)';
+    f.appendChild(note);
+
+    var add=el('button','lk-sb-btn','+ запис'); add.type='button'; add.style.marginLeft='0';
+    add.addEventListener('click',function(){
+      var sup = (sel.hidden || sel.value==='__new') ? String(nameIn.value||'').trim() : sel.value;
+      var v = num(sum.value);
+      if(!sup){ nameIn.focus(); return; }
+      if(!(v>0)){ sum.focus(); return; }
+      var d=load();
+      if(d.sups.indexOf(sup)<0) d.sups.push(sup);
+      d.ops.push({ id:'o'+Date.now()+Math.floor(Math.random()*1000), date:fd.value||today(),
+                   sup:sup, sum:v, dir:draft.dir, note:String(note.value||'').trim() });
+      save(d);
+      draft.date=fd.value; draft.sup=sup;
+      render(box);
+    });
+    f.appendChild(add);
+    box.appendChild(f);
+
+    // ---- копія / відновлення: дані живуть лише в цьому браузері ----
+    var tools=el('div'); tools.style.cssText='margin-top:8px;display:flex;gap:6px;align-items:center';
+    var bCopy=el('button','mini','⤓ Копія'); bCopy.type='button';
+    bCopy.title='Скопіювати всі записи — щоб зберегти або перенести на інший компʼютер';
+    bCopy.addEventListener('click',function(){
+      if(copy(JSON.stringify(load()))){ bCopy.textContent='✓ скопійовано'; setTimeout(function(){ bCopy.textContent='⤓ Копія'; },1500); }
+    });
+    var bPaste=el('button','mini','⤒ Відновити'); bPaste.type='button';
+    bPaste.title='Вставити раніше скопійовані записи (замінить нинішні)';
+    bPaste.addEventListener('click',function(){
+      var raw=prompt('Вставте раніше скопійовані дані:');
+      if(!raw) return;
+      try{
+        var o2=JSON.parse(raw);
+        if(!o2 || !Array.isArray(o2.ops)) throw 0;
+        save({ start:String(o2.start||''), sups:Array.isArray(o2.sups)?o2.sups:[], ops:o2.ops });
+        render(box);
+      }catch(e){ alert('Не схоже на копію взаєморозрахунків.'); }
+    });
+    tools.appendChild(bCopy); tools.appendChild(bPaste);
+    tools.appendChild(el('span','note','записи зберігаються лише в цьому браузері'));
+    box.appendChild(tools);
   }
 
-  function run(btn){
-    var box=boxEl();
-    var h=document.createElement('div'); h.className='h'; h.textContent='рахую…'; box.appendChild(h);
-    var cached=null;
-    try{ var c=JSON.parse(localStorage.getItem(CACHE_KEY)||'null');
-         if(c && Date.now()-c.ts<TTL) cached=c.data; }catch(_){}
-    if(cached){ render(box, cached); return; }
-    btn.disabled=true;
-    var prog={};
-    function onProg(kind,page,total){ prog[kind]=page+'/'+total; h.textContent='рахую… надходження '+(prog['arrival-product']||'—')+', видаткові '+(prog['sales-invoice']||'—'); }
-    Promise.all([loadDocs('arrival-product',onProg), loadDocs('sales-invoice',onProg)])
-      .then(function(res){
-        return res;
-      })
-      .then(function(res){
-        var data=build(res[0], res[1]);
-        try{ localStorage.setItem(CACHE_KEY, JSON.stringify({ts:Date.now(), data:data})); }catch(_){}
-        render(box, data);
-      })
-      .catch(function(e){ h.textContent='✗ не вдалося: '+String(e&&e.message||e).slice(0,60); })
-      .then(function(){ btn.disabled=false; });
+  function toggle(){
+    var old=document.getElementById('lk-sb-box');
+    if(old){ old.remove(); return; }
+    var host=document.querySelector('.panel-body, .white-main-container') || document.body;
+    var box=document.createElement('div'); box.id='lk-sb-box';
+    var bar=document.querySelector('.lk-sb-bar');
+    if(bar && bar.parentNode) bar.parentNode.insertBefore(box, bar.nextSibling);
+    else host.insertBefore(box, host.firstChild);
+    render(box);
   }
 
   function sync(){
@@ -7711,8 +7744,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     btn=document.createElement('button'); btn.type='button'; btn.className='lk-sb-btn';
     btn.style.marginLeft='0';
     btn.textContent='⇄ Взаєморозрахунки';
-    btn.title='Скільки постачальник завіз нам і скільки ми відвантажили йому — сальдо по кожному';
-    btn.addEventListener('click',function(e){ e.preventDefault(); e.stopPropagation(); run(btn); });
+    btn.title='Журнал обміну з постачальниками: хто кому винен';
+    btn.addEventListener('click',function(e){ e.preventDefault(); e.stopPropagation(); toggle(); });
     bar.appendChild(btn);
     host.insertBefore(bar, host.firstChild);
   }
