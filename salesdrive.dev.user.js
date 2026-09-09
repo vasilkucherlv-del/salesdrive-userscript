@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.15
+// @version      3.16
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -7282,7 +7282,12 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     +'  background:#f2f6fa;color:#33556e;font:13px/1 Arial,sans-serif;cursor:pointer;'
     +'  vertical-align:middle;user-select:none}'
     +'.lk-skucopy:hover{background:#e2ecf5;border-color:#8fa9c0}'
-    +'.lk-skucopy.ok{background:#e6f4ea;border-color:#a5d6a7;color:#1B5E20}';
+    +'.lk-skucopy.ok{background:#e6f4ea;border-color:#a5d6a7;color:#1B5E20}'
+    // праворуч від поля SKU у картці: поле лежить у вузькому .inputWidth, тож
+    // кнопку ставимо СУСІДОМ до нього і теж пускаємо ліворуч-плавом, інакше падає під поле
+    +'.lk-skucopy.side{float:left;margin-top:5px}'
+    // у рядку товару заявки — компактніша, щоб не розпирала рядок 45px
+    +'.lk-skucopy.sm{width:18px;height:18px;font-size:11px;margin-left:4px}';
   var st=document.createElement('style'); st.textContent=css;
   (document.head||document.documentElement).appendChild(st);
 
@@ -7299,8 +7304,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     btn.classList.add('ok'); btn.textContent='✓';
     setTimeout(function(){ btn.classList.remove('ok'); btn.textContent='⧉'; }, 1200);
   }
-  function makeBtn(getVal){
-    var b=document.createElement('span'); b.className='lk-skucopy'; b.textContent='⧉';
+  function makeBtn(getVal, extra){
+    var b=document.createElement('span'); b.className='lk-skucopy'+(extra?' '+extra:''); b.textContent='⧉';
     b.title='Скопіювати SKU';
     b.addEventListener('click',function(e){
       e.preventDefault(); e.stopPropagation();
@@ -7314,10 +7319,12 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   function scan(){
     // 1) режим редагування картки: input[ng-model="viewModel.item.sku"]
     [].forEach.call(document.querySelectorAll('input[ng-model="viewModel.item.sku"]'), function(inp){
-      var host=inp.parentElement; if(!host) return;
-      if(host.querySelector('.lk-skucopy')) return;
+      var wrap=inp.parentElement; if(!wrap) return;
+      var row=wrap.parentElement||wrap;
+      if(row.querySelector('.lk-skucopy')) return;
       if(!inp.value) return;
-      host.appendChild(makeBtn(function(){ return inp.value; }));
+      // кнопка йде СУСІДОМ до .inputWidth — праворуч від поля, а не під ним
+      wrap.insertAdjacentElement('afterend', makeBtn(function(){ return inp.value; }, 'side'));
     });
     // 2) модалка перегляду (product-view-info): рядок із лейблом SKU
     [].forEach.call(document.querySelectorAll('[ng-include]'), function(root){
@@ -7334,6 +7341,20 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
           return t.replace(/⧉|✓/g,'').trim();
         }));
       });
+    });
+    // 3) рядок товару в заявці/документі: «Назва товару (01179)» —
+    //    span із ng-if по viewModel.enableId усередині items-to-order-name-product
+    [].forEach.call(document.querySelectorAll('span[ng-if]'), function(sp){
+      if(String(sp.getAttribute('ng-if')||'').indexOf('viewModel.enableId')<0) return;
+      var m=/\(([^()]+)\)/.exec(String(sp.textContent||'').replace(/\s+/g,' '));
+      if(!m) return;
+      var nx=sp.nextElementSibling;
+      if(nx && nx.classList && nx.classList.contains('lk-skucopy')) return;
+      sp.insertAdjacentElement('afterend', makeBtn(function(){
+        // читаємо щоразу заново: Angular перевикористовує рядок під інший товар
+        var t=/\(([^()]+)\)/.exec(String(sp.textContent||'').replace(/\s+/g,' '));
+        return t?t[1]:'';
+      }, 'sm'));
     });
   }
 
