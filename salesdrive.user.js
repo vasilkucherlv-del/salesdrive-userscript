@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      2.92
+// @version      3.18
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -37,7 +37,8 @@
      • lkArrivalCount  — 📦 к-ть позицій та одиниць біля заголовка «Надходження товарів»
      • lkArrivalOpt    — 💰 опт-ціни товарів (×1.2/×1.25/×1.3↑5) із собівартості накладної
      • lkRoundPickup   — 🔟 заокруглення суми самовивозу вгору до 10 ₴ (99→100, 108→110)
-     • lkOrderTier     — 💱 перерахунок цін заявки за типом ціни (опт/майстри) одним кліком
+     • lkOrderTier     — 💱 перерахунок цін заявки за типом ціни (опт/майстри) одним кліком     • lkSupplierBalance — ⇄ взаєморозрахунки з постачальниками (сальдо по кожному)
+
      • lkNpDescr       — 📋 шаблони опису у формі ТТН Нової пошти (редаговані)
      • lkStockWhere    — 🔎 «Де товар»: у яких заявках висить код (з урахуванням комплектів)
      • lkCardReserve   — 🔒 «у роботі: N заявок · M шт» біля залишку в картці товару
@@ -2613,9 +2614,20 @@ function __sdPageMain() {
         p.price = money(p.price);
         if (typeof p.discount === "number") p.discount = money(p.discount);
       });
+      // КОМПЛЕКТИ: у GET склад приходить як complect[{productId, amount}], а на запис
+      // СРМ чекає поле count — без нього PUT падає з 422 «Необхідно заповнити "Count"».
+      if (Array.isArray(o.complect)) {
+        o.complect.forEach(function (c) {
+          if (c && c.count == null) c.count = (c.amount != null ? c.amount : 1);
+        });
+      }
       return o;
     }
 
+    // ROZETKA рахується НЕ від собівартості, а від роздрібної ціни картки: +5% до цілого
+    var ROZ_K = 1.05;
+    // коли попереджати про зростання собівартості: у гривнях АБО у відсотках
+    var COST_ALARM_UAH = 10, COST_ALARM_PCT = 5;
     // правила опту (lartek): 1.2 / 1.25 / 1.3-вгору-до-5
     function tiers(b) {
       return {
@@ -2659,7 +2671,25 @@ function __sdPageMain() {
     }
     function step() {
       progress();
-      if (idx >= items.length) return respond({ ok: true, rate: rate, rows: results });
+      if (idx >= items.length) {
+        // ПАМʼЯТЬ «собівартість ДО накладної»: після збереження документа СРМ перерахує
+        // costPrice, і стару ціну вже не дістати — а комплекти рахуються пізніше.
+        // Перегляд нічого не пише в СРМ, тож саме тут стан ще «до».
+        if (mode !== "apply") {
+          try {
+            var mem = {}; try { mem = JSON.parse(localStorage.getItem("lk_costold_v1") || "{}") || {}; } catch (e0) {}
+            var lim = Date.now() - 6 * 60 * 60 * 1000;
+            Object.keys(mem).forEach(function (k) { if (!mem[k] || (mem[k].ts || 0) < lim) delete mem[k]; });
+            var map = {};
+            results.forEach(function (r) { if (r.skuKey && r.costOld > 0) map[r.skuKey] = r.costOld; });
+            var _m = (location.hash || "").match(/arrival-product\/update\/(\d+)/);
+            var docKey = _m ? _m[1] : "doc";
+            if (Object.keys(map).length) mem[docKey] = { ts: Date.now(), map: map };
+            localStorage.setItem("lk_costold_v1", JSON.stringify(mem));
+          } catch (e1) {}
+        }
+        return respond({ ok: true, rate: rate, rows: results });
+      }
       var x = items[idx++];
       if (mode === "apply" && skip[String(x.pid)]) {
         results.push({ pid: x.pid, sku: x.sku || String(x.pid), name: x.name, base: x.base, skipped: true });
@@ -2672,13 +2702,64 @@ function __sdPageMain() {
         .then(function (j) {
           var item = j.response && j.response.item;
           if (!item) throw new Error("картка товару недоступна");
+          // роздрібна ціна картки товару і ROZETKA (тип 3): нова ROZETKA = роздріб + 5%
+          // роздріб у СРМ лежить у defaultPrice (як у lkComplectPrice і в ядрі sdTierPrice);
+          // item.price у картці буває порожнє — саме через нього колонка писала «немає»
+          var retail = num(item.defaultPrice) || num(item.price);
+
+          // СТАРА собівартість: окремого поля немає, але опт-ціни картки ставив цей же
+          // модуль із попередньої накладної (Великий опт = собів × 1.2, середній × 1.25),
+          // тож із них вона й відновлюється. Якщо опт-ціни правили руками — оцінка приблизна.
+          // СТАРА собівартість: спершу поле картки costPrice — це факт, а не оцінка.
+          // Відновлення з опт-цін лишається фолбеком для товарів, де costPrice порожній.
+          // (Через це саме й проґавили 02429: опт-цін не було → зростання на 9,5 грн не побачили.)
+          var costOld = num(item.costPrice) > 0 ? Math.round(num(item.costPrice) * 100) / 100 : null;
+          if (costOld == null) {
+            var _co = [], _o2 = ptOf(item, 2), _o5 = ptOf(item, 5);
+            if (_o2 > 0) _co.push(_o2 / 1.2);
+            if (_o5 > 0) _co.push(_o5 / 1.25);
+            costOld = _co.length ? Math.round((_co.reduce(function (a, b) { return a + b; }, 0) / _co.length) * 100) / 100 : null;
+          }
+          var delta = costOld != null ? Math.round((x.base - costOld) * 100) / 100 : null;
+          var deltaPct = (costOld > 0 && delta != null) ? Math.round(delta / costOld * 1000) / 10 : null;
+          // тривога: підросло помітно в грошах АБО у відсотках (дешеві й дорогі товари)
+          var alarm = delta != null && (delta >= COST_ALARM_UAH || (deltaPct != null && deltaPct >= COST_ALARM_PCT));
+          // рекомендований роздріб — зберігаємо ТУ САМУ націнку, що була у товару
+          var markOld = (costOld > 0 && retail > 0) ? Math.round(retail / costOld * 100) / 100 : null;
+          var newRetail = (alarm && markOld > 0) ? Math.ceil((x.base * markOld - 1) / 5) * 5 : null;
+          // ROZETKA: не смикаємо наявну ціну без причини (01282: роздріб стоїть, а вона
+          // стрибала 210 → 247), але ПРОСТАВЛЯЄМО там, де її ще немає.
+          // ДРІБНИЙ ОПТ (тип 9) — середина між «майстри» і роздрібом, до кратного 5.
+          // Правило виведено з карток товарів Василя: 097 (195+295)/2=245,
+          // 192 (176+245)/2=210, 061 (56+105)/2=80 — усі збіглися точно.
+          var retailForCalc = (newRetail != null && newRetail > 0) ? newRetail : retail;
+          var p9 = (t.p7 > 0 && retailForCalc > 0) ? Math.round(((t.p7 + retailForCalc) / 2) / 5) * 5 : null;
+          var oldSmall = ptOf(item, 9);
+
+          var oldRoz = ptOf(item, 3);
+          var p3 = null;
+          if (newRetail != null && newRetail > 0) p3 = Math.round(newRetail * ROZ_K);        // роздріб піднявся
+          else if (!(oldRoz > 0) && retail > 0) p3 = Math.round(retail * ROZ_K);             // ціни не було — ставимо
           var row = { pid: x.pid, sku: x.sku || String(x.pid), name: x.name, base: x.base,
-                      o2: ptOf(item, 2), o5: ptOf(item, 5), o7: ptOf(item, 7),
-                      p2: t.p2, p5: t.p5, p7: t.p7 };
+                      o2: ptOf(item, 2), o5: ptOf(item, 5), o7: ptOf(item, 7), o9: oldSmall,
+                      p2: t.p2, p5: t.p5, p7: t.p7, p9: p9,
+                      retail: retail > 0 ? retail : null, o3: ptOf(item, 3), p3: p3,
+                      costOld: costOld, delta: delta, deltaPct: deltaPct, alarm: !!alarm,
+                      skuKey: String(x.sku || ""),
+                      markOld: markOld, markNew: (x.base > 0 && retail > 0) ? Math.round(retail / x.base * 100) / 100 : null,
+                      newRetail: newRetail,
+                      retailDbg: retail > 0 ? null : ("defaultPrice=" + item.defaultPrice + ", price=" + item.price) };
           if (mode !== "apply") { results.push(row); return; }   // preview: тільки читаємо
 
           var o = toPut(item), created = [];
-          [[2, t.p2], [5, t.p5], [7, t.p7]].forEach(function (pair) {
+          // роздрібну ціну піднімаємо лише тоді, коли рахунок показав падіння маржі
+          // пишемо ТІЛЬКИ defaultPrice — саме там роздріб; item.price у картці порожнє
+          // і його призначення не підтверджене, тому не чіпаємо (щоб не зіпсувати картку)
+          if (newRetail != null && newRetail > 0) { o.defaultPrice = newRetail; row.retailSet = newRetail; }
+          var pairs = [[2, t.p2], [5, t.p5], [7, t.p7]];
+          if (p9 != null && p9 > 0) pairs.push([9, p9]);   // Дрібний опт
+          if (p3 != null && p3 > 0) pairs.push([3, p3]);   // ROZETKA = роздріб + 5%
+          pairs.forEach(function (pair) {
             var pr = null;
             (o.priceTypes || []).forEach(function (p) { if (Number(p.priceTypeId) === pair[0]) pr = p; });
             if (pr) { pr.price = money(pair[1]); pr.defaultPrice = pair[1]; }
@@ -2695,6 +2776,8 @@ function __sdPageMain() {
             .then(function (pr) {
               if (pr.status !== 200) throw new Error("HTTP " + pr.status);
               row.created = created;
+              // ціни товару змінились — кеш складників на картках комплектів протух
+              try { localStorage.setItem("lkcp_bust_v1", String(Date.now())); } catch (e) {}
               results.push(row);
             });
         })
@@ -2702,6 +2785,295 @@ function __sdPageMain() {
           results.push({ pid: x.pid, sku: x.sku || String(x.pid), name: x.name, base: x.base, err: String((e && e.message) || e) });
         })
         .then(function () { setTimeout(step, mode === "apply" ? 250 : 120); });   // не гатимо сервер
+    }
+    step();
+  });
+
+  // ---------- ПЕРЕРАХУНОК ЦІН КОМПЛЕКТІВ ПІСЛЯ НАДХОДЖЕННЯ ----------
+  // Модуль lkArrivalOpt шле подію sdKitRecalc зі списком комплектів, яких торкнулась
+  // накладна (склад комплектів приходить із kits-API — його вантажить модуль, бо там
+  // потрібен GM_xmlhttpRequest). Ядро рахує собівартість комплекту як суму собівартостей
+  // складників × кількість: для складника з накладної — НОВА ціна закупки, для решти —
+  // відновлена з їхніх опт-цін (Великий опт ÷ 1.2), як і для звичайних товарів.
+  // mode='preview' — лише читає; mode='apply' — пише ціни комплектів.
+  window.addEventListener("sdKitRecalc", function () {
+    var token = document.documentElement.getAttribute("data-sd-kit-token") || "";
+    var mode = document.documentElement.getAttribute("data-sd-kit-mode") || "preview";
+    var req = {};
+    try { req = JSON.parse(document.documentElement.getAttribute("data-sd-kit-req") || "{}") || {}; } catch (e) {}
+    function respond(o) {
+      o.token = token; o.mode = mode;
+      document.documentElement.setAttribute("data-sd-kit-result", JSON.stringify(o));
+      window.dispatchEvent(new Event("sdKitRecalcResult"));
+    }
+    function num(v) { var n = parseFloat(String(v == null ? "" : v).replace(/\s/g, "").replace(",", ".")); return isNaN(n) ? 0 : n; }
+    function money(n) { n = Math.round(Number(n) * 100) / 100; return n.toFixed(2).replace(".", ","); }
+    function r2(n) { return Math.round(Number(n) * 100) / 100; }
+
+    // собівартості з накладної збирає САМЕ ядро (модуль у пісочниці не має надійного
+    // доступу до Angular-скоупів): mode='costs' — швидка відповідь {sku: ціна × курс}
+    function invoiceCosts() {
+      var vm = null, out = {}, rate = 1;
+      try {
+        var els = document.querySelectorAll("[ng-click]");
+        for (var i = 0; i < els.length; i++) {
+          try {
+            var sc = window.angular.element(els[i]).scope();
+            while (sc && !sc.viewModel) sc = sc.$parent;
+            if (sc && sc.viewModel && sc.viewModel.item && sc.viewModel.item.documentItems) { vm = sc.viewModel; break; }
+          } catch (e) {}
+        }
+      } catch (e) {}
+      if (!vm) return null;
+      rate = num(vm.item.currencyRate) || 1;
+      (vm.item.documentItems || []).forEach(function (di) {
+        var sku = String((di.product && di.product.sku) || "").trim();
+        var pr = num(di.price);
+        if (sku && pr > 0) out[sku] = r2(pr * rate);
+      });
+      return out;
+    }
+    if (mode === "costs") {
+      var c0 = invoiceCosts();
+      return c0 ? respond({ ok: true, fresh: c0 }) : respond({ ok: false, err: "накладну не знайдено (viewModel)" });
+    }
+
+    var kits = Array.isArray(req.kits) ? req.kits : [];          // [{sku, name, comps:[{sku, qty}]}]
+    var fresh = (req.fresh && Object.keys(req.fresh).length) ? req.fresh : (invoiceCosts() || {});
+    if (!kits.length) return respond({ ok: false, err: "комплектів не передано" });
+
+    function csrfHead() {
+      var host = document.querySelector("[ng-app],[data-ng-app]") || document.querySelector(".ng-scope") || document.body;
+      var inj = window.angular.element(host).injector() || window.angular.element(document.documentElement).injector();
+      var cs = inj.get("CsrfService");
+      var H = { "Content-Type": "application/json;charset=utf-8", "Accept": "application/json" };
+      H[cs.getHeaderKey()] = cs.getCsrfToken();
+      return H;
+    }
+    function toPut(it) {
+      var o = JSON.parse(JSON.stringify(it));
+      delete o.restCount;
+      o.balances = Array.isArray(o.balances) ? o.balances : [];
+      if (o.price == null) o.price = "";
+      if (o.volume == null) o.volume = "";
+      else if (typeof o.volume === "number") o.volume = String(o.volume);
+      if (typeof o.discount === "number") o.discount = money(o.discount);
+      (o.priceTypes || []).forEach(function (p) {
+        p.priceTypeId = String(p.priceTypeId);
+        p.price = money(p.price);
+        if (typeof p.discount === "number") p.discount = money(p.discount);
+      });
+      // КОМПЛЕКТИ: у GET склад приходить як complect[{productId, amount}], а на запис
+      // СРМ чекає поле count — без нього PUT падає з 422 «Необхідно заповнити "Count"».
+      if (Array.isArray(o.complect)) {
+        o.complect.forEach(function (c) {
+          if (c && c.count == null) c.count = (c.amount != null ? c.amount : 1);
+        });
+      }
+      return o;
+    }
+    function ptOf(item, id) {
+      var v = null;
+      (item.priceTypes || []).forEach(function (p) { if (Number(p.priceTypeId) === id) v = num(p.price); });
+      return v;
+    }
+    // собівартість картки, відновлена з її ж опт-цін (те саме правило, що для товарів)
+    function costFromCard(item) {
+      // спершу факт із картки, і лише потім оцінка з опт-цін
+      var direct = num(item.costPrice);
+      if (direct > 0) return r2(direct);
+      var acc = [], o2 = ptOf(item, 2), o5 = ptOf(item, 5);
+      if (o2 > 0) acc.push(o2 / 1.2);
+      if (o5 > 0) acc.push(o5 / 1.25);
+      if (acc.length) {
+        var sum = 0; acc.forEach(function (x) { sum += x; });
+        return r2(sum / acc.length);
+      }
+      return null;
+    }
+    function tiers(b) {
+      return { p2: Math.round(b * 1.2), p5: Math.round(b * 1.25), p7: Math.ceil((b * 1.3 - 1) / 5) * 5 };
+    }
+
+    // памʼять «собівартість ДО накладної» — її пише перегляд опт-цін (sdArrivalOpt)
+    function costBefore(sku) {
+      try {
+        var mem = JSON.parse(localStorage.getItem("lk_costold_v1") || "{}") || {};
+        var _m2 = (location.hash || "").match(/arrival-product\/update\/(\d+)/);
+        var docKey = _m2 ? _m2[1] : "doc";
+        var rec = mem[docKey];
+        if (!rec || !rec.map) return null;
+        if (Date.now() - (rec.ts || 0) > 6 * 60 * 60 * 1000) return null;
+        var v = num(rec.map[String(sku).trim()]);
+        return v > 0 ? v : null;
+      } catch (e) { return null; }
+    }
+
+    // памʼять «вигоди набору»: {kitSku: {b: вигода, t: час}}
+    var BENEFIT_KEY = "lk_kitbenefit_v1";
+    function kitBenefit(save) {
+      try {
+        if (save) { localStorage.setItem(BENEFIT_KEY, JSON.stringify(save)); return save; }
+        return JSON.parse(localStorage.getItem(BENEFIT_KEY) || "{}") || {};
+      } catch (e) { return {}; }
+    }
+
+    // sku → картка товару. Пошук id робить ПЕРЕВІРЕНИЙ _resolveIdViaApi (той самий
+    // core-IIFE): у ньому і обовʼязковий заголовок when:"product/index" (без нього СРМ
+    // віддає порожній список), і правильний шлях до рядків (response.meta.option.option),
+    // і кеш. Свого пошуку тут НЕ тримаємо — саме він і зламав перший підхід.
+    var cardCache = {};
+    function cardBySku(sku, preferKit) {
+      var key = String(sku) + (preferKit ? "#k" : "#p");
+      if (cardCache[key] !== undefined) return Promise.resolve(cardCache[key]);
+      return _resolveIdViaApi(String(sku).trim(), !!preferKit)
+        .then(function (pid) {
+          if (pid == null) { cardCache[key] = null; return null; }
+          return fetch("/products/" + pid + "/?formId=1", { credentials: "include", headers: { "Accept": "application/json" } })
+            .then(function (r) { return r.ok ? r.json() : null; })
+            .then(function (jj) {
+              var item = jj && jj.response && jj.response.item;
+              cardCache[key] = item || null;
+              return cardCache[key];
+            });
+        })
+        .catch(function () { cardCache[key] = null; return null; });
+    }
+
+    var out = [], idx = 0;
+    function progress() {
+      document.documentElement.setAttribute("data-sd-kit-progress", idx + "/" + kits.length);
+      window.dispatchEvent(new Event("sdKitRecalcProgress"));
+    }
+
+    function handleKit(kit) {
+      var comps = kit.comps || [];
+      // собівартості складників: стара (з їхніх опт-цін) і нова (з накладної, якщо є)
+      return comps.reduce(function (chain, c) {
+        return chain.then(function (acc) {
+          return cardBySku(c.sku, false).then(function (card) {
+            // для складника з накладної беремо собівартість, зафіксовану ПЕРЕГЛЯДОМ
+            // (у картці вона вже перерахована СРМ і порівнювати нове з новим — марно)
+            var before = costBefore(c.sku);
+            var old = before != null ? before : (card ? costFromCard(card) : null);
+            var qty = num(c.qty) || 1;
+            var nw = (fresh[String(c.sku)] != null) ? num(fresh[String(c.sku)]) : old;
+            // роздріб складника — щоб тримати «вигоду набору» сталою
+            var rt = card ? (num(card.defaultPrice) || num(card.price)) : 0;
+            acc.push({ sku: c.sku, qty: qty, old: old, nw: nw, retail: rt > 0 ? rt : null,
+                       oldFrom: before != null ? "до накладної" : "з картки",
+                       name: String((card && (card.documentName || card.name)) || c.name || "").slice(0, 40),
+                       fromInvoice: fresh[String(c.sku)] != null });
+            return acc;
+          });
+        });
+      }, Promise.resolve([])).then(function (parts) {
+        var missing = parts.filter(function (x) { return x.nw == null || !(x.nw > 0); });
+        if (missing.length) {
+          return { sku: kit.sku, name: kit.name, parts: parts,
+                   err: "немає закупівельної ціни: " + missing.map(function (m) {
+                     return m.sku + (m.name ? (" «" + m.name + "»") : "");
+                   }).join("; ") + " — проставте цим товарам опт-ціни або собівартість" };
+        }
+        var costNew = r2(parts.reduce(function (s2, x) { return s2 + x.nw * x.qty; }, 0));
+        var haveOld = parts.every(function (x) { return x.old != null && x.old > 0; });
+        var costOld = haveOld ? r2(parts.reduce(function (s2, x) { return s2 + x.old * x.qty; }, 0)) : null;
+        var t = tiers(costNew);
+        return cardBySku(kit.sku, true).then(function (kc) {
+          if (!kc) return { sku: kit.sku, name: kit.name, parts: parts, err: "картка комплекту не знайдена" };
+          var retail = num(kc.defaultPrice) || num(kc.price);
+          var delta = costOld != null ? r2(costNew - costOld) : null;
+          var deltaPct = (costOld > 0 && delta != null) ? Math.round(delta / costOld * 1000) / 10 : null;
+          var alarm = delta != null && (delta >= 10 || (deltaPct != null && deltaPct >= 5));
+          var markOld = (costOld > 0 && retail > 0) ? r2(retail / costOld) : null;
+
+          // ---- друге правило: тримати «вигоду набору» відносно роздрібів складників ----
+          // Вигода = ціна набору ÷ сума роздрібних цін складників. Її запамʼятовуємо, бо
+          // інакше «поточна вигода × поточна сума» дала б ту саму ціну і ніколи не зросла б.
+          var retailSum = null, benefitNow = null, benefitSaved = null, byRetail = null;
+          var haveRetail = parts.every(function (x) { return x.retail != null && x.retail > 0; });
+          if (haveRetail) {
+            retailSum = r2(parts.reduce(function (s3, x) { return s3 + x.retail * x.qty; }, 0));
+            if (retailSum > 0 && retail > 0) benefitNow = r2(retail / retailSum);
+            var mem = kitBenefit();
+            var rec = mem[String(kit.sku)];
+            benefitSaved = (rec && rec.b > 0) ? rec.b : null;
+            if (benefitSaved == null && benefitNow != null) {          // перший раз — лише запамʼятовуємо
+              mem[String(kit.sku)] = { b: benefitNow, t: Date.now() };
+              kitBenefit(mem);
+              benefitSaved = benefitNow;
+            }
+            if (benefitSaved > 0 && retailSum > 0) byRetail = Math.ceil((retailSum * benefitSaved - 1) / 5) * 5;
+          }
+
+          // за закупкою (як було) і за роздрібами складників — беремо більший кандидат
+          var byCost = (markOld > 0) ? Math.ceil((costNew * markOld - 1) / 5) * 5 : null;
+          var cand = null, reason = "";
+          if (byCost != null && (cand == null || byCost > cand)) { cand = byCost; reason = "подорожчала закупка"; }
+          if (byRetail != null && (cand == null || byRetail > cand)) { cand = byRetail; reason = "складники подорожчали в роздріб"; }
+          // піднімаємо, лише коли кандидат помітно вищий за поточну ціну набору
+          var up = (cand != null && retail > 0) ? r2(cand - retail) : null;
+          var upAlarm = up != null && (up >= 10 || (retail > 0 && up / retail * 100 >= 5));
+          var newRetail = (alarm || upAlarm) && cand != null && cand > retail ? cand : null;
+          if (!newRetail) reason = "";
+          var oldRozK = ptOf(kc, 3);
+          var p3 = null;
+          if (newRetail != null && newRetail > 0) p3 = Math.round(newRetail * 1.05);
+          else if (!(oldRozK > 0) && retail > 0) p3 = Math.round(retail * 1.05);
+          var row = { sku: kit.sku, name: kit.name || String(kc.documentName || kc.name || "").slice(0, 60),
+                      pid: kc.id, parts: parts, costOld: costOld, costNew: costNew,
+                      delta: delta, deltaPct: deltaPct, alarm: !!alarm,
+                      retail: retail > 0 ? retail : null, markOld: markOld, newRetail: newRetail,
+                      retailSum: retailSum, benefitNow: benefitNow, benefitSaved: benefitSaved,
+                      byCost: byCost, byRetail: byRetail, reason: reason,
+                      o2: ptOf(kc, 2), o5: ptOf(kc, 5), o7: ptOf(kc, 7), o3: ptOf(kc, 3),
+                      p2: t.p2, p5: t.p5, p7: t.p7, p3: p3 };
+          if (mode !== "apply") return row;
+          if (req.skip && req.skip.indexOf(String(kit.sku)) >= 0) { row.skipped = true; return row; }
+
+          var o = toPut(kc), created = [];
+          if (newRetail != null && newRetail > 0) { o.defaultPrice = newRetail; row.retailSet = newRetail; }
+          var pairs = [[2, t.p2], [5, t.p5], [7, t.p7]];
+          if (p3 != null && p3 > 0) pairs.push([3, p3]);
+          pairs.forEach(function (pair) {
+            var pr = null;
+            (o.priceTypes || []).forEach(function (p) { if (Number(p.priceTypeId) === pair[0]) pr = p; });
+            if (pr) { pr.price = money(pair[1]); pr.defaultPrice = pair[1]; }
+            else {
+              if (!o.priceTypes) o.priceTypes = [];
+              o.priceTypes.push({ productId: o.id, priceTypeId: String(pair[0]), price: money(pair[1]),
+                                  currencyId: 0, discount: "0,00", percentDiscount: 0, defaultPrice: pair[1] });
+              created.push(pair[0]);
+            }
+          });
+          return fetch("/products/" + o.id + "/?formId=" + o.formId,
+            { method: "PUT", credentials: "include", headers: csrfHead(), body: JSON.stringify(o) })
+            .then(function (pr) {
+              if (pr.status !== 200) throw new Error("HTTP " + pr.status);
+              row.created = created;
+              try { localStorage.setItem("lkcp_bust_v1", String(Date.now())); } catch (e) {}
+              // після запису фіксуємо вигоду вже від НОВОЇ ціни набору
+              if (retailSum > 0) {
+                var m2 = kitBenefit();
+                m2[String(kit.sku)] = { b: r2((newRetail || retail) / retailSum), t: Date.now() };
+                kitBenefit(m2);
+              }
+              return row;
+            });
+        });
+      }).catch(function (e) {
+        return { sku: kit.sku, name: kit.name, err: String(e && e.message || e).slice(0, 80) };
+      });
+    }
+
+    function step() {
+      progress();
+      if (idx >= kits.length) return respond({ ok: true, rows: out });
+      var kit = kits[idx++];
+      handleKit(kit).then(function (row) {
+        out.push(row);
+        setTimeout(step, mode === "apply" ? 250 : 120);   // не гатимо сервер
+      });
     }
     step();
   });
@@ -2800,7 +3172,40 @@ function __sdPageMain() {
       var src = priceSource(it);
       return (src && Array.isArray(src.priceTypes)) ? src.priceTypes : [];
     }
+    // ---- віртуальний тип «дрібний опт»: закупівельна × 1.35, до кратного 5 ----
+    // Закупівельної в рядку заявки немає (costPrice часто 0), але вона точно
+    // відновлюється з готових опт-цін товару: «Великий опт» = закуп × 1.2,
+    // «середній опт» = закуп × 1.25 (перевірено на живих товарах — оцінки збігаються).
+    var SMALL_K = 1.35;
+    function round5(v) { return Math.ceil((v - 1) / 5) * 5; }   // та сама формула, що для «майстрів»
+    function baseCost(it) {
+      var acc = [];
+      tiersOf(it).forEach(function (pt) {
+        var n = normName(pt.name), p = tierEff(pt);
+        if (!(p > 0)) return;
+        if (/велик/.test(n)) acc.push(p / 1.2);
+        else if (/середн/.test(n)) acc.push(p / 1.25);
+      });
+      if (!acc.length) return null;
+      var sum = 0; acc.forEach(function (x) { sum += x; });
+      return sum / acc.length;
+    }
+
     function priceForTier(it, tier) {
+      if (tier === "small") {
+        // спершу СПРАВЖНЯ ціна типу «Дрібний опт» (у СРМ це тип 9) — вона є в багатьох
+        // товарів; рахунок ×1.35 лишається фолбеком для тих, де її не проставили
+        var list0 = tiersOf(it);
+        for (var q = 0; q < list0.length; q++) {
+          var nm0 = normName(list0[q].name);
+          if (/дрібн|дрибн/.test(nm0) || Number(list0[q].priceTypeId) === 9) {
+            var real = tierEff(list0[q]);
+            if (real > 0) return real;
+          }
+        }
+        var b = baseCost(it);
+        return (b == null || !(b > 0)) ? null : round5(b * SMALL_K);
+      }
       if (tier === "retail") {
         var src = priceSource(it);
         var dp = Number(src && (src.defaultPrice != null ? src.defaultPrice : src.price));
@@ -3602,6 +4007,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     +'  font:600 12.5px/1.5 sans-serif;white-space:nowrap}'
     +'.lkcp-chip .l{color:#7a869f;font-weight:700}'
     +'.lkcp-sum,.lkcp-chip{cursor:pointer}'
+    +'.lkcp-chip.part{opacity:.75;border-style:dashed}'
     +'.lkcp-sum:hover,.lkcp-chip:hover{filter:brightness(.97)}'
     +'.lkcp-sum.lkcp-copied,.lkcp-chip.lkcp-copied{outline:2px solid #2e7d32;background:#d7f0dc}'
     +'.lkcp-copied::after{content:" ✓";color:#2e7d32;font-weight:800}'
@@ -3617,8 +4023,13 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   var listeners=Object.create(null); // sku -> [fn(info)]
   var inflight=Object.create(null);
   var TIER_NAMES=null, tierBusy=false;
-  var TTL=2*60*60*1000;              // 2 год «свіжо» (старіше — тихо оновлюємо у фоні)
-  var PKEY='lkcp_prices_v1', NKEY='lkcp_tiernames_v1';
+  var TTL=20*60*1000;                // 20 хв «свіжо» (старіше — тихо оновлюємо у фоні):
+                                     // ціни складників міняються після кожної накладної
+  // v2: у v1 лежали записи, збережені до фікса 3.01 (там опт-цін не було — читалось
+  // row.priceType замість row.priceTypes), і вони показували чипи як 0
+  var PKEY='lkcp_prices_v2', NKEY='lkcp_tiernames_v2';   // v2: у v1 не було нових типів цін
+  var TIER_TTL=24*60*60*1000;        // словник типів оновлюємо раз на добу — інакше
+                                     // доданий у СРМ тип («Дрібний опт») ніколи не зʼявиться
 
   function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
   function gGet(k){ try{ var s=GM_getValue(k,null); return s?((typeof s==='string')?JSON.parse(s):s):null; }catch(e){ return null; } }
@@ -3628,7 +4039,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   (function preload(){
     var o=gGet(PKEY);
     if(o) Object.keys(o).forEach(function(sku){ var e=o[sku]; if(e){ cache[sku]=e.i; tsMap[sku]=e.ts||0; } });
-    var n=gGet(NKEY); if(n && Object.keys(n).length) TIER_NAMES=n;
+    var n=gGet(NKEY);
+    if(n && n.map && Object.keys(n.map).length && Date.now()-(n.ts||0) < TIER_TTL) TIER_NAMES=n.map;
   })();
   var saveT=null;
   function savePricesSoon(){ clearTimeout(saveT); saveT=setTimeout(function(){
@@ -3646,13 +4058,23 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
         var row=null, c=String(sku).trim();
         if(rows) for(var i=0;i<rows.length;i++){ if(String(rows[i].sku).trim()===c){ row=rows[i]; break; } }
         if(!row && rows && rows.length) row=rows[0];
-        return row ? { retail:(row.defaultPrice!=null?Number(row.defaultPrice):null), pt:(row.priceType||{}) } : null;
+        if(!row) return null;
+        // ціни за типами приходять МАСИВОМ priceTypes:[{id,name,price}] — саме тут була
+        // помилка: читалось row.priceType (однина), словник виходив порожній і всі чипи
+        // тихо падали на роздрібну суму
+        var pt={};
+        if(Array.isArray(row.priceTypes)) row.priceTypes.forEach(function(x){
+          if(x && x.id!=null && Number(x.price)>0) pt[String(x.id)]=Number(x.price);
+        });
+        else if(row.priceType && typeof row.priceType==='object') pt=row.priceType;   // старий формат
+        return { retail:(row.defaultPrice!=null?Number(row.defaultPrice):null), pt:pt };
       })
       .catch(function(){ return null; });
   }
   // гарантувати ціну: свіжу лишаємо; стару/відсутню тихо тягнемо у фоні
   function ensurePrice(sku){
-    var fresh=(sku in cache) && (Date.now()-(tsMap[sku]||0) < TTL);
+    var bust=0; try{ bust=Number(localStorage.getItem('lkcp_bust_v1'))||0; }catch(_){}
+    var fresh=(sku in cache) && (Date.now()-(tsMap[sku]||0) < TTL) && (tsMap[sku]||0) > bust;
     if(fresh || inflight[sku]) return;
     inflight[sku]=1;
     fetchPrice(sku).then(function(info){
@@ -3677,7 +4099,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     fetch('/products/'+m[1]+'/?formId=1',{credentials:'include',headers:{'accept':'application/json, text/plain, */*','when':'product/index'}})
       .then(function(r){ return r.ok?r.json():null; })
       .then(function(j){ var pt=j&&j.response&&j.response.meta&&j.response.meta.priceTypes;
-        if(pt && typeof pt==='object' && Object.keys(pt).length){ TIER_NAMES=pt; gSet(NKEY,pt); updateTotals(); } })
+        if(pt && typeof pt==='object' && Object.keys(pt).length){
+          TIER_NAMES=pt; gSet(NKEY,{ts:Date.now(), map:pt}); updateTotals(); } })
       .catch(function(){})
       .then(function(){ tierBusy=false; });
   }
@@ -3904,12 +4327,12 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     });
     return out;
   }
-  // ціна складника за типом; якщо тип не заданий (0/нема) — беремо роздрібну
+  // ціна складника за типом; null — якщо саме цієї ціни в складника НЕМАЄ
+  // (раніше тут був фолбек на роздріб — через нього чипи показували суму роздробу)
   function tierValue(info, tierId){
-    if(!info) return 0;
-    var p = (tierId==='retail') ? info.retail : (info.pt && info.pt[tierId]);
-    if(!(p>0)) p = info.retail;
-    return (p>0) ? Number(p) : 0;
+    if(!info) return null;
+    var p = (tierId==='retail') ? info.retail : (info.pt && info.pt[String(tierId)]);
+    return (p>0) ? Number(p) : null;
   }
 
   function decorate(cell){
@@ -3956,9 +4379,18 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       var known=0;
       items.forEach(function(it){ if(it.sku in cache) known++; });
       var pend=(known<items.length);
-      function sumFor(tierId){ var s=0; items.forEach(function(it){ if(it.sku in cache) s+=tierValue(cache[it.sku],tierId)*it.qty; }); return s; }
+      function sumFor(tierId){
+        var s=0, miss=0;
+        items.forEach(function(it){
+          if(!(it.sku in cache)) return;
+          var v=tierValue(cache[it.sku],tierId);
+          if(v==null){ miss++; return; }
+          s+=v*it.qty;
+        });
+        return { sum:s, miss:miss };
+      }
       // роздрібна — головний зелений бейдж (клік копіює суму)
-      var retail=sumFor('retail');
+      var retail=sumFor('retail').sum;
       var badge=h.querySelector('.lkcp-sum');
       if(!badge){ badge=document.createElement('span'); badge.className='lkcp-sum';
         badge.title='Натисніть, щоб підставити суму в роздрібну ціну товару';
@@ -3979,10 +4411,13 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
         });
         var html='';
         ids.forEach(function(id){
-          var s=sumFor(id);
-          html+='<span class="lkcp-chip" data-copy="'+Math.round(s)+'" data-tier="'+esc(id)+'"'
-             +' title="Натисніть, щоб підставити суму в ціну «'+esc(TIER_NAMES[id])+'» цього товару">'
-             +'<span class="l">'+esc(TIER_NAMES[id])+'</span>'+fmtInt(s)+(pend?' …':'')+'</span>';
+          var r=sumFor(id);
+          var tip = r.miss
+            ? ('У '+r.miss+' складник(ів) немає ціни «'+TIER_NAMES[id]+'» — сума лише з тих, де вона є')
+            : ('Натисніть, щоб підставити суму в ціну «'+TIER_NAMES[id]+'» цього товару');
+          html+='<span class="lkcp-chip'+(r.miss?' part':'')+'" data-copy="'+Math.round(r.sum)+'" data-tier="'+esc(id)+'"'
+             +' title="'+esc(tip)+'">'
+             +'<span class="l">'+esc(TIER_NAMES[id])+'</span>'+fmtInt(r.sum)+(r.miss?' *':'')+(pend?' …':'')+'</span>';
         });
         if(box.getAttribute('data-sig')!==html){ box.setAttribute('data-sig', html); box.innerHTML=html; }
       } else if(box){ box.remove(); }   // режим перегляду — без чипів опт/майстри
@@ -4691,10 +5126,36 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       .catch(function () { return null; });
   }
   function fill(slots){
-    Object.keys(slots).forEach(function (code) {
-      infoOf(code).then(function (r) { apply(slots[code], r); })
+    var ps = Object.keys(slots).map(function (code) {
+      return infoOf(code).then(function (r) { apply(slots[code], r); slots[code].info = r; })
         .catch(function () {});           // рядок лишиться «…» — не валимо решту
     });
+    // сортуємо ОДИН раз, коли всі залишки вже відомі: у наявності — вгору
+    Promise.all(ps).then(function () { sortRows(slots); }).catch(function () {});
+  }
+  // 0 — є в наявності (більше шт вище), 1 — «немає», 2 — залишок невідомий
+  function rankOf(inf){
+    if (!inf || inf.found === false || !isFinite(inf.qty)) return 2;
+    return inf.qty > 0 ? 0 : 1;
+  }
+  function sortRows(slots){
+    var codes = Object.keys(slots);
+    if (codes.length < 2) return;
+    var box = null;
+    for (var i = 0; i < codes.length && !box; i++) if (slots[codes[i]].row) box = slots[codes[i]].row.parentNode;
+    if (!box) return;
+    var sorted = codes.slice().sort(function (a, b) {
+      var ra = rankOf(slots[a].info), rb = rankOf(slots[b].info);
+      if (ra !== rb) return ra - rb;
+      var qa = (slots[a].info && Number(slots[a].info.qty)) || 0;
+      var qb = (slots[b].info && Number(slots[b].info.qty)) || 0;
+      return qb - qa;
+    });
+    // якщо порядок і так правильний — DOM не чіпаємо (щоб не було зайвих мутацій)
+    var same = true;
+    for (var k = 0; k < sorted.length; k++) if (box.children[k] !== slots[sorted[k]].row) { same = false; break; }
+    if (same) return;
+    sorted.forEach(function (c) { if (slots[c].row) box.appendChild(slots[c].row); });
   }
   function apply(slot, r){
     if (!slot) return;
@@ -4738,7 +5199,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       r.appendChild(ph); r.appendChild(nm); r.appendChild(cd); r.appendChild(stk); r.appendChild(pr);
       r.addEventListener('click', function (e) { e.preventDefault(); e.stopPropagation(); openProduct(it.sku); });
       box.appendChild(r);
-      slots[String(it.sku)] = { img: img, no: no, stk: stk, pr: pr };
+      slots[String(it.sku)] = { img: img, no: no, stk: stk, pr: pr, row: r };
     });
 
     var at = anchorFor(root);
@@ -5774,10 +6235,15 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 /* ▲▲▲ МОДУЛЬ-END • lkArrivalCount ▲▲▲ */
 
 /* ▼▼▼ МОДУЛЬ-START • lkArrivalOpt — 💰 опт-ціни товарів із собівартості накладної ▼▼▼ */
-/* ===== Кнопка на «Надходженні товарів»: рахує з собівартості (ціна закупки × курс
-   валюти накладної) ціни Великий опт (×1.2), середній опт (×1.25), майстри (×1.3
-   вгору до 5) і показує їх КОЛОНКОЮ прямо біля кожного товару (нові жирним, «було»
-   дрібним). Запис у картки товарів — лише після «✅ Записати». Core: sdArrivalOpt. ===== */
+/* ===== Кнопки на «Надходженні товарів»:
+   1) «💰 Опт-ціни з собівартості» — рахує з собівартості (ціна закупки × курс валюти
+      накладної) ціни Великий опт (×1.2), середній опт (×1.25), майстри (×1.3 вгору до 5)
+      і показує їх КОЛОНКОЮ біля кожного товару; друга колонка — собівартість було→стало,
+      націнка і підказка «підніми роздріб», плюс ROZETKA (+5% від роздробу).
+   2) «🧩 Ціни комплектів» — знаходить комплекти, до складу яких входять товари накладної
+      (склад із kits-API), рахує їхню нову собівартість як суму складників і показує нові
+      ціни. Core: sdArrivalOpt і sdKitRecalc.
+   Запис у картки товарів/комплектів — лише після «✅ Записати». ===== */
 try{ // SD-ізоляція: помилка цього модуля не зупинить решту
 (function lkArrivalOpt(){
   'use strict';
@@ -5803,6 +6269,22 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     +'td.lk-arropt-td .od{color:#7d8f8c;font-size:12.5px;margin-top:2px}'
     +'td.lk-arropt-td.er{color:#B71C1C;font-weight:700;font-size:13px;white-space:normal}'
     +'td.lk-arropt-td.blank{background:transparent;border-left:none}'
+    +'td.lk-roz-td .warn{color:#B71C1C;font-weight:800}'
+    +'#lk-kits-res{margin:10px 0;padding:10px 12px;border:1px solid #b08cc7;border-left:4px solid #7b4fa0;'
+    +'  background:#f7f1fb;border-radius:6px;font:13px/1.6 Arial,sans-serif;color:#3b2350;'
+    +'  max-width:1100px;box-sizing:border-box;position:relative}'
+    +'#lk-kits-res .h{font-weight:700;color:#5c3080;margin-bottom:5px}'
+    +'#lk-kits-res .row{padding:3px 0;border-top:1px dashed #d9c7e6}'
+    +'#lk-kits-res .row.warn{color:#B71C1C;font-weight:700}'
+    +'#lk-kits-res .sub{color:#6b5580;font-weight:400;font-size:12px;padding-left:22px}'
+    +'#lk-kits-res a.lk-kit-link{color:#5c3080;text-decoration:underline;font-weight:inherit}'
+    +'#lk-kits-res a.lk-kit-link:hover{color:#3d1f57}'
+    +'#lk-kits-res .row.warn a.lk-kit-link{color:#B71C1C}'
+    +'#lk-kits-res .er{color:#B71C1C;font-size:12.5px;padding:2px 0}'
+    +'#lk-kits-res .act{margin-top:8px}'
+    +'#lk-kits-res .x{position:absolute;top:5px;right:9px;border:none;background:none;cursor:pointer;'
+    +'  font-size:17px;color:#5c3080}'
+    +'td.lk-roz-td .od.warn{font-size:13px}'
     +'th.lk-arropt-td{font:700 13px/1.5 Arial,sans-serif;background:#e3f4f2;color:#00695c;'
     +'  padding:8px 16px;border-left:3px solid #00897B;white-space:nowrap}'
     +'td.lk-arropt-td .nw{display:flex;align-items:center}'
@@ -5836,8 +6318,11 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     var headRow=t.querySelector('thead tr')||t.querySelector('tr');
     if(headRow && !headRow.querySelector('th.lk-arropt-td')){
       var th=document.createElement('th'); th.className='lk-arropt-td';
-      th.textContent='Опт: Вел / Сер / Май';
+      th.textContent='Опт: Вел / Сер / Май / Дрібн';
       headRow.appendChild(th);
+      var th2=document.createElement('th'); th2.className='lk-arropt-td lk-roz-th';
+      th2.textContent='Собівартість · роздріб · ROZETKA';
+      headRow.appendChild(th2);
     }
     var i=0;
     [].forEach.call(t.querySelectorAll('tr[ng-repeat^="invoiceItem"]'),function(tr){
@@ -5848,7 +6333,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       // перемальовуємо ЛИШЕ коли дані клітинки справді змінились — інакше колонка
       // мигтіла: рендер ішов на кожен пульс DOM (~сотні разів на хвилину)
       var sig=[view.applied?1:0, (r&&r.err)||'', (r&&r.skipped)?1:0, (r&&r.skip)?1:0,
-               r?r.p2:'', r?r.p5:'', r?r.p7:'', r?r.o2:'', r?r.o5:'', r?r.o7:''].join('|');
+               r?r.p2:'', r?r.p5:'', r?r.p7:'', r?r.p9:'',
+               r?r.o2:'', r?r.o5:'', r?r.o7:'', r?r.o9:''].join('|');
       if(td.getAttribute('data-sig')===sig) return;
       td.setAttribute('data-sig', sig);
       td.classList.remove('er');
@@ -5859,7 +6345,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
         var sk=document.createElement('div'); sk.className='od'; sk.textContent='⏭ пропущено (без галочки)';
         td.appendChild(sk); td.title=r.name||''; return;
       }
-      var changed=(Number(r.o2)!==Number(r.p2))||(Number(r.o5)!==Number(r.p5))||(Number(r.o7)!==Number(r.p7));
+      var changed=(Number(r.o2)!==Number(r.p2))||(Number(r.o5)!==Number(r.p5))
+                ||(Number(r.o7)!==Number(r.p7))||(r.p9!=null&&Number(r.o9)!==Number(r.p9));
       var l1=document.createElement('div'); l1.className='nw';
       // галочка «оновлювати цей товар» (за замовчуванням увімкнена) — лише в перегляді
       if(!view.applied){
@@ -5875,14 +6362,67 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
         td.style.opacity=r.skip?'0.45':'';
       }
       var l1t=document.createElement('span');
-      l1t.textContent=(view.applied?'✓ ':'')+r.p2+' / '+r.p5+' / '+r.p7;
+      l1t.textContent=(view.applied?'✓ ':'')+r.p2+' / '+r.p5+' / '+r.p7+(r.p9!=null?(' / '+r.p9):'');
       l1.appendChild(l1t);
       var l2=document.createElement('div'); l2.className='od';
-      l2.textContent=r.o2==null&&r.o5==null&&r.o7==null
+      l2.textContent=r.o2==null&&r.o5==null&&r.o7==null&&r.o9==null
         ? 'типів цін не було — нові'
-        : (changed?('було: '+fmtN(r.o2)+' / '+fmtN(r.o5)+' / '+fmtN(r.o7)):'без змін');
+        : (changed?('було: '+fmtN(r.o2)+' / '+fmtN(r.o5)+' / '+fmtN(r.o7)
+                    +(r.p9!=null?(' / '+fmtN(r.o9)):'')):'без змін');
       td.appendChild(l1); td.appendChild(l2);
       td.title=(r.name||'')+(r.created&&r.created.length?(' · створено типи: '+r.created.join(',')):'');
+
+      // друга колонка: роздрібна ціна картки і ROZETKA (+5% від роздробу)
+      var td2=tr.querySelector('td.lk-roz-td');
+      if(!td2){ td2=document.createElement('td'); td2.className='lk-arropt-td lk-roz-td'; tr.appendChild(td2); }
+      var sig2=[view.applied?1:0, r.retail==null?'':r.retail, r.o3==null?'':r.o3, r.p3==null?'':r.p3,
+                r.costOld==null?'':r.costOld, r.delta==null?'':r.delta, r.alarm?1:0,
+                r.newRetail||'', r.markOld==null?'':r.markOld, r.markNew==null?'':r.markNew].join('|');
+      if(td2.getAttribute('data-sig')===sig2) return;
+      td2.setAttribute('data-sig', sig2);
+      td2.innerHTML=''; td2.classList.remove('er');
+      if(r.retail==null){
+        var no=document.createElement('div'); no.className='od';
+        no.textContent='роздрібної ціни немає';
+        if(r.retailDbg) no.title='у картці товару: '+r.retailDbg;   // щоб причина була видна одразу
+        td2.appendChild(no);
+      }else{
+        // 1) собівартість: було → стало (стара відновлена з опт-цін картки)
+        if(r.costOld!=null){
+          var cl=document.createElement('div');
+          cl.className='od'+(r.alarm?' warn':'');
+          cl.textContent=(r.alarm?'⚠ ':'')+'собів. '+fmtN(r.costOld)+' → '+fmtN(r.base)
+            +(r.delta>0?(' (+'+fmtN(r.delta)+' грн'+(r.deltaPct!=null?', +'+fmtN(r.deltaPct)+'%':'')+')'):'');
+          cl.title='Стара собівартість — з опт-цін картки (Великий опт ÷ 1.2). Якщо їх правили руками, оцінка приблизна.';
+          td2.appendChild(cl);
+        }
+        // 2) роздріб: або спокійний рядок, або підказка «підніми»
+        var rl1=document.createElement('div'); rl1.className='nw';
+        var rt=document.createElement('span');
+        if(r.newRetail){
+          rt.textContent=(view.applied?'✓ ':'')+'роздріб '+fmtN(r.retail)+' → '+r.newRetail;
+          rl1.classList.add('warn');
+        }else{
+          rt.textContent=(view.applied?'✓ ':'')+'роздріб '+fmtN(r.retail);
+        }
+        rl1.appendChild(rt);
+        td2.appendChild(rl1);
+        // 3) націнка: як була і якою стане, якщо роздріб не чіпати
+        if(r.markOld!=null || r.markNew!=null){
+          var mk=document.createElement('div'); mk.className='od';
+          mk.textContent='націнка '+(r.markOld!=null?('×'+fmtN(r.markOld)):'—')
+            +(r.markNew!=null?(' → ×'+fmtN(r.markNew)):'')
+            +(r.newRetail?' (після підняття лишиться ×'+fmtN(r.markOld)+')':'');
+          td2.appendChild(mk);
+        }
+        // 4) ROZETKA
+        var rz=document.createElement('div'); rz.className='od';
+        rz.textContent = r.p3==null
+          ? ('ROZETKA: без змін'+(r.o3!=null?(' ('+fmtN(r.o3)+')'):' (немає)'))
+          : ('ROZETKA: '+r.p3+(r.o3==null?' (нова)':(Number(r.o3)===Number(r.p3)?' (без змін)':(' (було '+fmtN(r.o3)+')'))));
+        td2.appendChild(rz);
+      }
+      td2.title=(r.name||'')+' · ROZETKA = роздріб × 1.05, до цілого';
     });
     // не-товарні рядки (підсумок тощо) — порожня клітинка, щоб сітка не зʼїхала
     [].forEach.call(t.querySelectorAll('tr'),function(tr){
@@ -5892,11 +6432,13 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       if(!tr.cells || tr.cells.length<3) return;
       var td=document.createElement('td'); td.className='lk-arropt-td blank';
       tr.appendChild(td);
+      var td2=document.createElement('td'); td2.className='lk-arropt-td blank';
+      tr.appendChild(td2);
     });
   }
   function clearView(){
     view=null;
-    [].forEach.call(document.querySelectorAll('.lk-arropt-td'),function(n){ n.remove(); });
+    [].forEach.call(document.querySelectorAll('.lk-arropt-td, .lk-roz-td, .lk-roz-th'),function(n){ n.remove(); });
     var r=document.getElementById('lk-arropt-res'); if(r) r.remove();
   }
   function setView(rows, applied, rate){
@@ -6026,6 +6568,217 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     }, function(p){ btn.textContent='💰 Читаю '+p+'…'; });
   }
 
+  // ---- комплекти: склад беремо з того самого kits-API і того самого кешу, що lkNaboryInline ----
+  var KITS_APP='https://barcode-printer-production-2b32.up.railway.app';
+  var KITS_TOKEN='nab_8Kx2pQ7mLr4tW9vZ';
+  var KITS_TTL=6*60*60*1000;
+  function fetchKits(){
+    var url=KITS_APP+'/api/kits?token='+encodeURIComponent(KITS_TOKEN);
+    return new Promise(function(resolve,reject){
+      function done(t){ try{ var d=JSON.parse(t); d.ok?resolve(d.kits||{}):reject(new Error(d.error||'no')); }catch(e){ reject(e); } }
+      if(typeof GM_xmlhttpRequest!=='undefined'){
+        GM_xmlhttpRequest({ method:'GET', url:url,
+          onload:function(r){ (r.status>=200&&r.status<300)?done(r.responseText):reject(new Error('HTTP '+r.status)); },
+          onerror:function(){ reject(new Error('net')); } });
+      } else { fetch(url).then(function(r){ return r.text(); }).then(done).catch(reject); }
+    });
+  }
+  function kitsData(){
+    // спершу спільний кеш (його наповнює lkNaboryInline) — щоб не смикати мережу зайвий раз
+    try{
+      var c=GM_getValue('lknb_cache2',null);
+      if(c){ var o=JSON.parse(c); if(o&&o.kits&&Date.now()-o.ts<KITS_TTL) return Promise.resolve(o.kits); }
+    }catch(_){}
+    return fetchKits().then(function(kits){
+      try{ GM_setValue('lknb_cache2', JSON.stringify({ts:Date.now(),kits:kits})); }catch(_){}
+      return kits;
+    });
+  }
+
+  // собівартості рядків накладної просимо в ЯДРА (воно має доступ до Angular-скоупів)
+  function invoiceCosts(){
+    return new Promise(function(resolve){
+      invokeKits('costs', [], {}, [], function(res){ resolve((res&&res.ok&&res.fresh)||{}); });
+    });
+  }
+
+  var kitView=null;   // {rows, applied}
+  function kitBox(){
+    var old=document.getElementById('lk-kits-res'); if(old) old.remove();
+    var box=document.createElement('div'); box.id='lk-kits-res';
+    var x=document.createElement('button'); x.className='x'; x.textContent='✕';
+    x.addEventListener('click',function(){ kitView=null; var b=document.getElementById('lk-kits-res'); if(b) b.remove(); });
+    box.appendChild(x);
+    var t=document.querySelector('table.document-invoice-products');
+    if(t&&t.parentElement) t.parentElement.insertBefore(box, t.nextSibling);
+    else document.body.appendChild(box);
+    return box;
+  }
+  function fmt(n){ return String(n==null?'—':n).replace('.',','); }
+
+  function renderKits(box, rows, applied){
+    box.querySelectorAll('.row,.h,.er,.act').forEach(function(n){ n.remove(); });
+    var h=document.createElement('div'); h.className='h';
+    h.textContent=(applied?'✓ Записано. ':'')+'Комплекти зі складниками з цієї накладної: '+rows.length;
+    box.appendChild(h);
+    // якщо перегляд опт-цін ще не запускали — стару собівартість узяти нізвідки
+    var haveMem=false;
+    try{
+      var mem=JSON.parse(localStorage.getItem('lk_costold_v1')||'{}')||{};
+      var _m3=(location.hash||'').match(/arrival-product\/update\/(\d+)/);
+      var dk=_m3?_m3[1]:'doc';
+      haveMem=!!(mem[dk]&&mem[dk].map&&Object.keys(mem[dk].map).length);
+    }catch(_){}
+    if(!haveMem){
+      var wn=document.createElement('div'); wn.className='er';
+      wn.textContent='⚠ Спершу натисніть «💰 Опт-ціни з собівартості» — інакше стару '
+        +'собівартість складників узяти нізвідки (СРМ уже перерахувала її після збереження накладної).';
+      box.appendChild(wn);
+    }
+    rows.forEach(function(r){
+      if(r.err){
+        var e=document.createElement('div'); e.className='er';
+        e.textContent='✗ '+(r.sku||'')+' '+(r.name||'')+' — '+r.err;
+        box.appendChild(e); return;
+      }
+      var d=document.createElement('div'); d.className='row'+((r.alarm||r.newRetail)?' warn':'');
+      var cb=document.createElement('input'); cb.type='checkbox'; cb.checked=!r.skip;
+      cb.className='lk-arropt-chk';
+      cb.addEventListener('change',function(){ r.skip=!cb.checked; d.style.opacity=r.skip?'0.45':''; });
+      if(!applied) d.appendChild(cb);
+      var txt=document.createElement('span');
+      // код і назва — посилання на картку комплекту (нова вкладка, щоб не втратити накладну)
+      if(r.pid){
+        var mark=document.createTextNode((r.alarm||r.newRetail)?'⚠ ':'');
+        var a=document.createElement('a'); a.className='lk-kit-link';
+        a.href='/ua/index.html?formId=1#/product/update/'+r.pid;
+        a.target='_blank'; a.rel='noopener';
+        a.textContent=r.sku+' · '+String(r.name||'').slice(0,42);
+        a.title='Відкрити картку комплекту в новій вкладці';
+        a.addEventListener('click',function(e){ e.stopPropagation(); });
+        d.appendChild(mark); d.appendChild(a);
+      }
+      txt.textContent=(r.pid?'':(((r.alarm||r.newRetail)?'⚠ ':'')+r.sku+' · '+String(r.name||'').slice(0,42)))
+        +(r.pid?' — ':'')+(r.pid?'':' — ')+'собів. '+fmt(r.costOld)+' → '+fmt(r.costNew)
+        +(r.delta!=null&&r.delta>0?(' (+'+fmt(r.delta)+' грн'+(r.deltaPct!=null?', +'+fmt(r.deltaPct)+'%':'')+')'):'')
+        +' | опт '+r.p2+' / '+r.p5+' / '+r.p7
+        +(r.newRetail?(' | роздріб '+fmt(r.retail)+' → '+r.newRetail):(r.retail?(' | роздріб '+fmt(r.retail)):''))
+        +(r.p3?(' | ROZETKA '+r.p3):'');
+      // другий рядок: складники в роздріб і вигода набору
+      var sub=null;
+      if(r.retailSum!=null){
+        sub=document.createElement('div'); sub.className='sub';
+        var pct=r.benefitNow!=null?Math.round((1-r.benefitNow)*1000)/10:null;
+        var was=r.benefitSaved!=null?Math.round((1-r.benefitSaved)*1000)/10:null;
+        function vygoda(v){
+          if(v==null) return '';
+          if(v>0.4) return 'набір дешевший на '+fmt(v)+'%';
+          if(v<-0.4) return '⚠ набір ДОРОЖЧИЙ за складники на '+fmt(-v)+'%';
+          return 'вигоди від набору немає (ціна як у складників)';
+        }
+        sub.textContent='складники в роздріб: '+fmt(r.retailSum)
+          +(pct!=null?(' · '+vygoda(pct)):'')
+          +(was!=null&&pct!=null&&Math.abs(was-pct)>0.5?(' (закладено було '+fmt(was)+'%)'):'')
+          +(r.reason?(' → підняти, бо '+r.reason):'');
+      }
+      txt.title=(r.parts||[]).map(function(x){
+        return x.sku+' ×'+x.qty+': '+(x.fromInvoice?'нова з накладної ':'')+fmt(x.nw)
+          +(x.old!=null?(' (було '+fmt(x.old)+(x.oldFrom?', '+x.oldFrom:'')+')'):'');
+      }).join('\n');
+      d.appendChild(txt);
+      if(sub) d.appendChild(sub);
+      box.appendChild(d);
+    });
+    if(applied) return;
+    var act=document.createElement('div'); act.className='act';
+    var ap=document.createElement('button'); ap.className='lk-arropt-btn'; ap.style.marginLeft='0';
+    var live=rows.filter(function(r){ return !r.err && !r.skip; });
+    ap.textContent='✅ Записати ціни комплектів ('+live.length+')';
+    ap.disabled=!live.length;
+    ap.addEventListener('click',function(ev){
+      ev.preventDefault(); ev.stopPropagation();
+      ap.disabled=true; ap.textContent='записую…';
+      var skip=rows.filter(function(r){ return r.skip; }).map(function(r){ return String(r.sku); });
+      invokeKits('apply', lastReq.kits, lastReq.fresh, skip, function(res){
+        if(!res||!res.ok){ ap.textContent='✗ '+((res&&res.err)||'нема відповіді'); return; }
+        kitView={rows:res.rows,applied:true};
+        renderKits(box, res.rows, true);
+      }, function(p){ ap.textContent='записую… '+p; });
+    });
+    act.appendChild(ap);
+    box.appendChild(act);
+  }
+
+  var lastReq={kits:[],fresh:{}};
+  function invokeKits(mode, kits, fresh, skip, onDone, onProg){
+    var token=String(Date.now())+'_k_'+Math.random().toString(36).slice(2);
+    var fin=false, tm=null;
+    function prog(){ if(onProg) onProg(document.documentElement.getAttribute('data-sd-kit-progress')||''); }
+    function cleanup(){ fin=true; PAGE.removeEventListener('sdKitRecalcResult',onRes);
+                        PAGE.removeEventListener('sdKitRecalcProgress',prog); clearTimeout(tm); }
+    function onRes(){
+      var raw=document.documentElement.getAttribute('data-sd-kit-result');
+      var d=null; try{ d=JSON.parse(raw); }catch(e){ return; }
+      if(!d || d.token!==token) return;
+      cleanup(); onDone(d);
+    }
+    PAGE.addEventListener('sdKitRecalcResult',onRes);
+    PAGE.addEventListener('sdKitRecalcProgress',prog);
+    document.documentElement.setAttribute('data-sd-kit-token',token);
+    document.documentElement.setAttribute('data-sd-kit-mode',mode);
+    document.documentElement.setAttribute('data-sd-kit-req',
+      JSON.stringify({kits:kits, fresh:fresh, skip:skip||[]}));
+    document.documentElement.removeAttribute('data-sd-kit-result');
+    PAGE.dispatchEvent(new Event('sdKitRecalc'));
+    tm=setTimeout(function(){ if(!fin){ cleanup(); onDone({ok:false,err:'ядро не відповіло'}); } }, 180000);
+  }
+
+  function runKits(btn){
+    if(!rowsCount()) return;
+    btn.disabled=true; var old=btn.textContent; btn.textContent='шукаю комплекти…';
+    var fresh=null;
+    Promise.all([invoiceCosts(), kitsData()]).then(function(pair){
+      fresh=pair[0]||{};
+      var kitsObj=pair[1]||{};
+      if(!Object.keys(fresh).length){
+        btn.disabled=false; btn.textContent=old;
+        var b0=kitBox(); var e0=document.createElement('div'); e0.className='er';
+        e0.textContent='✗ не вдалося прочитати ціни накладної';
+        b0.appendChild(e0); return;
+      }
+      var need=[];
+      Object.keys(kitsObj||{}).forEach(function(kitSku){
+        var info=kitsObj[kitSku]||{};
+        var comps=info.comps||[];
+        var touched=comps.some(function(c){ return fresh[String(c.sku).trim()]!=null; });
+        if(touched) need.push({ sku:kitSku, name:info.name||'',
+                                comps:comps.map(function(c){ return {sku:String(c.sku).trim(), qty:c.qty||1, name:c.name||''}; }) });
+      });
+      var box=kitBox();
+      if(!need.length){
+        var n=document.createElement('div'); n.className='h';
+        n.textContent='Жоден комплект не містить товарів цієї накладної.';
+        box.appendChild(n);
+        btn.disabled=false; btn.textContent=old; return;
+      }
+      lastReq={kits:need, fresh:fresh};
+      var h=document.createElement('div'); h.className='h';
+      h.textContent='рахую '+need.length+' комплект(ів)…';
+      box.appendChild(h);
+      invokeKits('preview', need, fresh, [], function(res){
+        btn.disabled=false; btn.textContent=old;
+        if(!res||!res.ok){ h.textContent='✗ '+((res&&res.err)||'нема відповіді'); return; }
+        kitView={rows:res.rows,applied:false};
+        renderKits(box, res.rows, false);
+      }, function(p){ h.textContent='рахую комплекти… '+p; });
+    }).catch(function(e){
+      btn.disabled=false; btn.textContent=old;
+      var box=kitBox(); var er=document.createElement('div'); er.className='er';
+      er.textContent='✗ склад комплектів недоступний: '+String(e&&e.message||e).slice(0,60);
+      box.appendChild(er);
+    });
+  }
+
   function sync(){
     var btn=document.querySelector('.lk-arropt-btn-main');
     if(!onPage()){ if(btn) btn.remove(); clearViewIfAny(); return; }
@@ -6040,8 +6793,19 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     btn.addEventListener('click',function(e){ e.preventDefault(); e.stopPropagation(); run(btn); });
     if(host) host.appendChild(btn);
     else{ var t=document.querySelector('table.document-invoice-products'); if(t&&t.parentElement) t.parentElement.insertBefore(btn,t); }
+
+    // друга кнопка: перерахунок комплектів, до складу яких входять товари накладної
+    var kb=document.createElement('button'); kb.type='button';
+    kb.className='lk-arropt-btn lk-arropt-btn-kits';
+    kb.textContent='🧩 Ціни комплектів';
+    kb.title='Знайти комплекти зі складниками з цієї накладної і перерахувати їхні ціни за новою закупкою';
+    kb.addEventListener('click',function(e){ e.preventDefault(); e.stopPropagation(); runKits(kb); });
+    if(host) host.appendChild(kb); else if(btn.parentElement) btn.parentElement.insertBefore(kb, btn.nextSibling);
   }
-  function clearViewIfAny(){ if(view||document.getElementById('lk-arropt-res')) clearView(); }
+  function clearViewIfAny(){
+    if(view||document.getElementById('lk-arropt-res')) clearView();
+    var kb=document.getElementById('lk-kits-res'); if(kb) kb.remove(); kitView=null;
+  }
 
   var t=null;
   function syncSoon(){ clearTimeout(t); t=setTimeout(sync,300); }
@@ -6337,7 +7101,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     clearPrev();
     var box=document.createElement('div'); box.id='lk-tier-prev';
     var chg=(d.rows||[]).filter(function(r){ return r['new']!=null && !r.same; });
-    var head='<div><b>'+esc(d.tier==='retail'?'роздріб':d.tier)+'</b>: сума '+fN(d.oldTotal)+' → <b>'+fN(d.newTotal)+' ₴</b>'
+    var tierHuman = d.tier==='retail' ? 'роздріб' : (d.tier==='small' ? 'дрібний опт' : d.tier);
+    var head='<div><b>'+esc(tierHuman)+'</b>: сума '+fN(d.oldTotal)+' → <b>'+fN(d.newTotal)+' ₴</b>'
       +' · змінюється рядків: '+chg.length+'/'+(d.rows||[]).length
       +(d.miss?(' · <span class="miss">без цієї ціни: '+d.miss+'</span>'):'')+'</div>';
     var rowsHtml=(d.rows||[]).map(function(r){
@@ -6400,6 +7165,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   // текст ОПТ → регекс типу ціни товарів (назви типів не хардкодимо)
   function tierReOf(opt){
     var t=String(opt||'').toLowerCase();
+    if(/дрібн|дрибн|мілк|мелк/.test(t)) return 'small';   // рахункова ціна, не з прайсу
     if(/майстр|майстер/.test(t)) return /майст/i;
     if(/середн/.test(t)) return /середн/i;
     if(/велик/.test(t)) return /велик/i;
@@ -6411,6 +7177,15 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     if(!res||!w) return;
     clearPrev(); res.className=''; res.textContent='рахую…';
     try{ res.scrollIntoView({block:'nearest',behavior:'smooth'}); }catch(_){}
+    if(re==='small'){                       // дрібний опт: ядро рахує сам, список типів не потрібен
+      invoke({mode:'preview', tier:'small'}, function(p){
+        if(!p || !p.ok){ res.className='er'; res.textContent='✗ '+((p&&p.err)||'нема відповіді'); return; }
+        res.textContent=''; showPreview(p, w, res);
+        var pv0=document.getElementById('lk-tier-prev');
+        if(pv0){ try{ pv0.scrollIntoView({block:'nearest',behavior:'smooth'}); }catch(_){} }
+      });
+      return;
+    }
     invoke({mode:'list'}, function(d){
       if(!d || !d.ok){ res.className='er'; res.textContent='✗ '+((d&&d.err)||'нема відповіді'); return; }
       var hit=(d.tiers||[]).filter(function(x){ return re.test(x.name); })[0];
@@ -6466,6 +7241,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       hint.appendChild(tierBtn('Великий опт', /велик/i, 'Великий опт'));
       hint.appendChild(tierBtn('середній опт', /середн/i, 'середній опт'));
       hint.appendChild(tierBtn('майстри', /майст/i, 'майстри'));
+      hint.appendChild(tierBtn('дрібний опт', 'small', 'дрібний опт'));
     }
     anchorRow.insertAdjacentElement('afterend', hint);
   }
@@ -6493,6 +7269,462 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 })();
 }catch(e){ try{ console.warn("[SD] модуль «lkOrderTier» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkOrderTier ▲▲▲ */
+
+/* ▼▼▼ МОДУЛЬ-START • lkSkuCopy — ⧉ копіювати SKU одним кліком ▼▼▼ */
+/* ===== Біля поля SKU в картці товару (і в режимі редагування, і в модалці перегляду)
+   зʼявляється кнопка ⧉ — клік копіює код у буфер. Нічого не змінює. ===== */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
+(function lkSkuCopy(){
+  'use strict';
+  var css=''
+    +'.lk-skucopy{display:inline-flex;align-items:center;justify-content:center;'
+    +'  width:22px;height:22px;margin-left:6px;border:1px solid #b9c6d4;border-radius:5px;'
+    +'  background:#f2f6fa;color:#33556e;font:13px/1 Arial,sans-serif;cursor:pointer;'
+    +'  vertical-align:middle;user-select:none}'
+    +'.lk-skucopy:hover{background:#e2ecf5;border-color:#8fa9c0}'
+    +'.lk-skucopy.ok{background:#e6f4ea;border-color:#a5d6a7;color:#1B5E20}'
+    // праворуч від поля SKU у картці: поле лежить у вузькому .inputWidth, тож
+    // кнопку ставимо СУСІДОМ до нього і теж пускаємо ліворуч-плавом, інакше падає під поле
+    +'.lk-skucopy.side{float:left;margin-top:5px}'
+    // у рядку товару заявки — компактніша, щоб не розпирала рядок 45px
+    +'.lk-skucopy.sm{width:18px;height:18px;font-size:11px;margin-left:4px}'
+    +'.lk-skulink{display:inline-flex;align-items:center;justify-content:center;'
+    +'  width:18px;height:18px;margin-left:3px;border:1px solid #b9c6d4;border-radius:5px;'
+    +'  background:#f2f6fa;color:#33556e;font:11px/1 Arial,sans-serif;text-decoration:none;'
+    +'  vertical-align:middle;user-select:none}'
+    +'.lk-skulink:hover{background:#e2ecf5;border-color:#8fa9c0;text-decoration:none}';
+  var st=document.createElement('style'); st.textContent=css;
+  (document.head||document.documentElement).appendChild(st);
+
+  function copy(txt){
+    try{ if(typeof GM_setClipboard!=='undefined'){ GM_setClipboard(String(txt)); return true; } }catch(e){}
+    try{
+      var ta=document.createElement('textarea');
+      ta.value=String(txt); ta.style.cssText='position:fixed;left:-9999px;top:0';
+      document.body.appendChild(ta); ta.select();
+      var ok=document.execCommand('copy'); ta.remove(); return ok;
+    }catch(e){ return false; }
+  }
+  function flash(btn){
+    btn.classList.add('ok'); btn.textContent='✓';
+    setTimeout(function(){ btn.classList.remove('ok'); btn.textContent='⧉'; }, 1200);
+  }
+  function makeBtn(getVal, extra){
+    var b=document.createElement('span'); b.className='lk-skucopy'+(extra?' '+extra:''); b.textContent='⧉';
+    b.title='Скопіювати SKU';
+    b.addEventListener('click',function(e){
+      e.preventDefault(); e.stopPropagation();
+      var v=String(getVal()||'').trim();
+      if(!v) return;
+      if(copy(v)) flash(b);
+    });
+    return b;
+  }
+
+  /* ---- адреса товару на сайті ----
+     Беремо ПОЛЕ КАРТКИ «Сторінка на сайті» (viewModel.item.href) — внутрішнім
+     запитом /products/<id>/ (cookie, публічного API не чіпає). Пошук по коду
+     давав хибні влучання, тож він лишився тільки як запáсний варіант для товарів
+     без заповненої сторінки. Знайдене кладемо в localStorage на тиждень —
+     адреса змінюється дуже рідко, а кеш спільний для всіх вкладок. */
+  var SITE='https://lartek.com.ua/katalog/search/?q=';
+  var HKEY='lk_skuhref_v1', HTTL=7*24*60*60*1000, pending={};
+  function hrefMap(){ try{ return JSON.parse(localStorage.getItem(HKEY)||'{}')||{}; }catch(e){ return {}; } }
+  function hrefGet(code){
+    var r=hrefMap()[code];
+    return (r && Date.now()-r.ts<HTTL) ? String(r.h||'') : undefined; // undefined = ще не знаємо
+  }
+  function hrefPut(code,h){
+    try{ var m=hrefMap(); m[code]={ts:Date.now(),h:h||''}; localStorage.setItem(HKEY,JSON.stringify(m)); }catch(e){}
+  }
+  function jget(url,when){
+    return fetch(url,{credentials:'include',headers:{'accept':'application/json, text/plain, */*','when':when}})
+      .then(function(r){ return r.ok? r.json() : null; });
+  }
+  // productId уже лежить у знімку заявки, який ядро кладе на <html> — без зайвого запиту
+  function pidFromOrder(code){
+    try{
+      var raw=document.documentElement.getAttribute('data-sd-order-items'); if(!raw) return null;
+      var arr=JSON.parse(raw), pid=null;
+      arr.forEach(function(it){
+        var cs=it.codes||[]; if(cs.indexOf(String(code))<0) return;
+        var last=cs[cs.length-1];               // productId у списку кодів завжди останній
+        if(/^\d+$/.test(last) && last!==String(code)) pid=last;
+      });
+      return pid;
+    }catch(e){ return null; }
+  }
+  function loadHref(code){
+    if(pending[code]) return; pending[code]=1;
+    var pid=pidFromOrder(code);
+    // заголовок "when" обовʼязковий, рядки лежать у response.meta.option.option[]
+    var step = pid ? Promise.resolve(pid)
+      : jget('/products/data/?active=1&filter[sku]='+encodeURIComponent(code)+'&formId=1','product/index')
+        .then(function(j){
+          var rows=(j&&j.response&&j.response.meta&&j.response.meta.option&&j.response.meta.option.option)||[];
+          var row=rows.filter(function(x){ return String(x.sku)===String(code) && !x.isComplect; })[0]
+                 || rows.filter(function(x){ return String(x.sku)===String(code); })[0] || rows[0];
+          return row && row.id!=null ? row.id : null;
+        });
+    step.then(function(id){
+      if(id==null) return null;
+      return jget('/products/'+id+'/?formId=1','product/update');
+    }).then(function(j){
+      var h=j && j.response && j.response.item && j.response.item.href;
+      hrefPut(code, (typeof h==='string' && /^https?:/i.test(h)) ? h : '');
+      delete pending[code]; soon();
+    }).catch(function(){ delete pending[code]; });
+  }
+  function makeLink(code, url){
+    var a=document.createElement('a'); a.className='lk-skulink'; a.textContent='🌐';
+    a.target='_blank'; a.rel='noopener';
+    a.title = url ? 'Відкрити товар на сайті' : 'Сторінку на сайті не заповнено — відкрити пошук';
+    a.setAttribute('data-code', code);
+    a.href = url || (SITE + encodeURIComponent(code));
+    a.addEventListener('click',function(e){ e.stopPropagation(); });
+    return a;
+  }
+
+  function scan(){
+    // 1) режим редагування картки: input[ng-model="viewModel.item.sku"]
+    [].forEach.call(document.querySelectorAll('input[ng-model="viewModel.item.sku"]'), function(inp){
+      var wrap=inp.parentElement; if(!wrap) return;
+      var row=wrap.parentElement||wrap;
+      if(row.querySelector('.lk-skucopy')) return;
+      if(!inp.value) return;
+      // кнопка йде СУСІДОМ до .inputWidth — праворуч від поля, а не під ним
+      wrap.insertAdjacentElement('afterend', makeBtn(function(){ return inp.value; }, 'side'));
+    });
+    // 2) модалка перегляду (product-view-info): рядок із лейблом SKU
+    [].forEach.call(document.querySelectorAll('[ng-include]'), function(root){
+      if((root.getAttribute('ng-include')||'').indexOf('product-view-info')<0) return;
+      if(!root.offsetParent) return;
+      [].forEach.call(root.querySelectorAll('label'), function(l){
+        if(!/^SKU$/i.test(String(l.textContent||'').replace(/\s+/g,' ').trim())) return;
+        var box=l.parentElement; if(!box || box.querySelector('.lk-skucopy')) return;
+        var val=String(box.textContent||'').replace(/\s+/g,' ').replace(/^\s*SKU\s*/i,'').trim();
+        if(!val) return;
+        box.appendChild(makeBtn(function(){
+          // значення читаємо щоразу заново: Angular перевикористовує картку під інший товар
+          var t=String(box.textContent||'').replace(/\s+/g,' ').replace(/^\s*SKU\s*/i,'').trim();
+          return t.replace(/⧉|✓/g,'').trim();
+        }));
+      });
+    });
+    // 3) рядок товару в заявці/документі: «Назва товару (01179)» —
+    //    span із ng-if по viewModel.enableId усередині items-to-order-name-product
+    [].forEach.call(document.querySelectorAll('span[ng-if]'), function(sp){
+      if(String(sp.getAttribute('ng-if')||'').indexOf('viewModel.enableId')<0) return;
+      var m=/\(([^()]+)\)/.exec(String(sp.textContent||'').replace(/\s+/g,' '));
+      if(!m) return;
+      var code=m[1];
+      var known=hrefGet(code);
+      if(known===undefined) loadHref(code);    // ще не знаємо адреси — спитаємо і перемалюємо
+      var nx=sp.nextElementSibling, btn=null;
+      if(nx && nx.classList && nx.classList.contains('lk-skucopy')){
+        btn=nx;
+        var lnk=nx.nextElementSibling;
+        if(lnk && lnk.classList && lnk.classList.contains('lk-skulink')){
+          // Angular міг підставити в рядок інший товар — адресу міняємо лише коли справді інша
+          var want=known || (SITE + encodeURIComponent(code));
+          if(known===undefined) return;        // адреси ще не знаємо — нічого не чіпаємо
+          if(lnk.getAttribute('data-code')!==code || lnk.getAttribute('href')!==want){
+            lnk.setAttribute('data-code', code); lnk.setAttribute('href', want);
+          }
+          return;
+        }
+      } else {
+        btn=makeBtn(function(){
+          // читаємо щоразу заново: Angular перевикористовує рядок під інший товар
+          var t=/\(([^()]+)\)/.exec(String(sp.textContent||'').replace(/\s+/g,' '));
+          return t?t[1]:'';
+        }, 'sm');
+        sp.insertAdjacentElement('afterend', btn);
+      }
+      // саме посилання малюємо тільки коли адреса вже відома — щоб не перезаписувати href
+      if(known!==undefined) btn.insertAdjacentElement('afterend', makeLink(code, known));
+    });
+  }
+
+  var t=null;
+  function soon(){ clearTimeout(t); t=setTimeout(scan,300); }
+  soon();
+  window.addEventListener('lkdom', soon);
+  window.addEventListener('hashchange', soon);
+})();
+}catch(e){ try{ console.warn("[SD] модуль «lkSkuCopy» не запустився:", e); }catch(_){} }
+/* ▲▲▲ МОДУЛЬ-END • lkSkuCopy ▲▲▲ */
+
+/* ▼▼▼ МОДУЛЬ-START • lkSupplierBalance — ⇄ взаєморозрахунки з постачальниками ▼▼▼ */
+/* ===== Кнопка в розділі документів: рахує зустрічний рух по кожному контрагенту —
+   скільки він відвантажив нам (надходження) і скільки ми йому (видаткові накладні),
+   та показує сальдо. Для бартеру: віддали свій товар — отримали знижку/товар назад.
+   Дані — внутрішніми запитами СРМ (cookie, без публічного API й без його ліміту).
+   Нічого не пише: лише читає. ===== */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
+(function lkSupplierBalance(){
+  'use strict';
+  var CACHE_KEY='lk_supbal_v1', TTL=10*60*1000, MAX_PAGES=90;
+
+  var css=''
+    +'.lk-sb-btn{display:inline-block;margin-left:10px;padding:4px 14px;border:none;border-radius:14px;'
+    +'  background:#5D4037;color:#fff;font:700 13px/1.5 Arial,sans-serif;cursor:pointer;vertical-align:middle;white-space:nowrap}'
+    +'.lk-sb-btn:hover{background:#4a302a}'
+    +'.lk-sb-btn[disabled]{background:#9e9e9e;cursor:default}'
+    +'#lk-sb-box{margin:10px 0;padding:10px 12px;border:1px solid #bfa89f;border-left:4px solid #5D4037;'
+    +'  background:#faf6f4;border-radius:6px;font:13px/1.6 Arial,sans-serif;color:#3b2b26;'
+    +'  max-width:900px;box-sizing:border-box;position:relative}'
+    +'#lk-sb-box .h{font-weight:700;color:#4a302a;margin-bottom:6px}'
+    +'#lk-sb-box table{border-collapse:collapse;width:100%;font:13px/1.5 Arial,sans-serif}'
+    +'#lk-sb-box td,#lk-sb-box th{padding:4px 8px;border-top:1px solid #e6dad5;white-space:nowrap}'
+    +'#lk-sb-box th{font-weight:700;color:#6b4c42;text-align:left;border-top:none}'
+    +'#lk-sb-box td.n{text-align:right;font-family:ui-monospace,Menlo,Consolas,monospace}'
+    +'#lk-sb-box td.nm{white-space:normal}'
+    +'#lk-sb-box .plus{color:#1B5E20;font-weight:700}'
+    +'#lk-sb-box .minus{color:#B71C1C;font-weight:700}'
+    +'#lk-sb-box .note{color:#7a6157;font-size:12px;margin-top:7px}'
+    +'#lk-sb-box .x{position:absolute;top:5px;right:9px;border:none;background:none;cursor:pointer;'
+    +'  font-size:17px;color:#5D4037}';
+  var st=document.createElement('style'); st.textContent=css;
+  (document.head||document.documentElement).appendChild(st);
+
+  function onPage(){ return /#\/document\//.test(location.hash||''); }
+  function money(n){ return (Math.round(Number(n)||0)).toLocaleString('uk-UA'); }
+
+  // один список документів (усі сторінки) — внутрішнім запитом СРМ
+  function loadDocs(kind, onProg){
+    var url='/document-'+kind+'/index/?active=1&formId=1';
+    var out=[], page=1;
+    function step(){
+      return fetch(url+(page>1?('&page='+page):''), { credentials:'include',
+        headers:{ 'accept':'application/json, text/plain, */*' } })
+        .then(function(r){ return r.ok?r.json():null; })
+        .then(function(j){
+          if(!j) return out;
+          var b=j.response||j, rows=b.data||[];
+          out=out.concat(rows);
+          var pc=(b.pagination&&Number(b.pagination.pageCount))||1;
+          if(onProg) onProg(kind, page, Math.min(pc, MAX_PAGES));
+          if(page<pc && page<MAX_PAGES){ page++; return step(); }
+          return out;
+        })
+        .catch(function(){ return out; });
+    }
+    return step();
+  }
+
+  function nameOf(d){
+    var c=d.counterparty;
+    return (c && (c.title||c.name||c.fullName)) || ('контрагент #'+d.counterPartyId);
+  }
+
+  function build(arrivals, sales){
+    var by={}, noCp={n:0, sum:0, docs:[]};
+    arrivals.forEach(function(d){
+      var id=d.counterPartyId;
+      if(!id){
+        noCp.n++; noCp.sum+=Number(d.totalSum)||0;
+        if(noCp.docs.length<400) noCp.docs.push({ id:d.id, date:d.date, sum:Number(d.totalSum)||0 });
+        return;
+      }
+      by[id]=by[id]||{ id:id, name:nameOf(d), in:0, out:0, nIn:0, nOut:0 };
+      by[id].in+=Number(d.totalSum)||0; by[id].nIn++;
+      if(!by[id].name || /^контрагент #/.test(by[id].name)) by[id].name=nameOf(d);
+    });
+    sales.forEach(function(d){
+      var id=d.counterPartyId; if(!id) return;
+      by[id]=by[id]||{ id:id, name:nameOf(d), in:0, out:0, nIn:0, nOut:0 };
+      by[id].out+=Number(d.totalSum)||0; by[id].nOut++;
+      if(!by[id].name || /^контрагент #/.test(by[id].name)) by[id].name=nameOf(d);
+    });
+    var all=Object.keys(by).map(function(k){ return by[k]; });
+    var both=all.filter(function(x){ return x.nIn>0 && x.nOut>0; });   // зустрічний рух = бартер
+    both.forEach(function(x){ x.saldo=Math.round((x.in-x.out)*100)/100; });
+    both.sort(function(a,b){ return Math.abs(b.saldo)-Math.abs(a.saldo); });
+    return { both:both, onlyIn:all.filter(function(x){ return x.nIn>0 && !x.nOut; }).length, noCp:noCp };
+  }
+
+  // ---- «мої постачальники обміну»: список, який веде сам Василь ----
+  var MY_KEY='lk_supbal_my_v1';
+  function myList(save){
+    try{
+      if(save){ localStorage.setItem(MY_KEY, JSON.stringify(save)); return save; }
+      return JSON.parse(localStorage.getItem(MY_KEY)||'[]')||[];
+    }catch(e){ return []; }
+  }
+  function norm(x){ return String(x||'').replace(/\s+/g,' ').trim().toLowerCase(); }
+  function isMine(name){
+    var my=myList(); if(!my.length) return true;          // список порожній — показуємо всіх
+    var n=norm(name);
+    for(var i=0;i<my.length;i++){ if(n.indexOf(norm(my[i]))>=0) return true; }
+    return false;
+  }
+  function renderMy(box, onChange){
+    var old=box.querySelector('.lk-sb-my'); if(old) old.remove();
+    var wrap=document.createElement('div'); wrap.className='lk-sb-my';
+    wrap.style.cssText='margin:6px 0 10px;padding:6px 0;border-bottom:1px dashed #e0d0ca';
+    var lab=document.createElement('span');
+    lab.style.cssText='font-weight:700;color:#6b4c42;margin-right:8px';
+    lab.textContent='Мої постачальники обміну:';
+    wrap.appendChild(lab);
+    var my=myList();
+    if(!my.length){
+      var em=document.createElement('span'); em.style.color='#8a7268';
+      em.textContent='(не задані — показані всі) ';
+      wrap.appendChild(em);
+    }
+    my.forEach(function(n,i){
+      var chip=document.createElement('span');
+      chip.style.cssText='display:inline-block;margin:2px 6px 2px 0;padding:2px 8px;border-radius:10px;'
+        +'background:#efe3de;color:#4a302a;font-size:12.5px';
+      chip.textContent=n+' ';
+      var x=document.createElement('a'); x.href='#'; x.textContent='✕';
+      x.style.cssText='color:#8a4030;text-decoration:none;margin-left:4px';
+      x.addEventListener('click',function(e){ e.preventDefault(); var l=myList(); l.splice(i,1); myList(l); onChange(); });
+      chip.appendChild(x); wrap.appendChild(chip);
+    });
+    var inp=document.createElement('input'); inp.type='text'; inp.placeholder='назва постачальника';
+    inp.style.cssText='padding:3px 8px;border:1px solid #cbb8b1;border-radius:5px;font-size:13px;width:190px';
+    var add=document.createElement('button'); add.type='button'; add.className='lk-sb-btn';
+    add.textContent='+ додати'; add.style.cssText='margin-left:6px;padding:3px 10px';
+    function doAdd(){
+      var v=(inp.value||'').trim(); if(!v) return;
+      var l=myList(); if(l.indexOf(v)<0) l.push(v); myList(l); inp.value=''; onChange();
+    }
+    add.addEventListener('click',function(e){ e.preventDefault(); e.stopPropagation(); doAdd(); });
+    inp.addEventListener('keydown',function(e){ if(e.key==='Enter'){ e.preventDefault(); doAdd(); } });
+    wrap.appendChild(inp); wrap.appendChild(add);
+    box.appendChild(wrap);
+  }
+
+  function render(box, data){
+    box.querySelectorAll('.lk-sb-list,.lk-sb-my').forEach(function(n){ n.remove(); });
+    box.querySelectorAll('table,.note,.h,.lk-sb-btn').forEach(function(n){
+      if(n.className==='lk-sb-btn'||n.classList&&n.classList.contains('lk-sb-btn')){ if(n.parentNode&&n.parentNode!==document.querySelector('.lk-sb-bar')) n.parentNode.remove(); return; }
+      n.remove();
+    });
+    var h=document.createElement('div'); h.className='h';
+    var mine=data.both.filter(function(x){ return isMine(x.name); });
+    h.textContent=myList().length
+      ? ('Взаєморозрахунки з моїми постачальниками: '+mine.length+' з '+data.both.length)
+      : ('Взаєморозрахунки: контрагентів зі зустрічним рухом — '+data.both.length);
+    box.appendChild(h);
+    renderMy(box, function(){ render(box, data); });
+    data=Object.assign({}, data, { both:mine });
+    if(data.both.length){
+      var t=document.createElement('table');
+      t.innerHTML='<tr><th>Контрагент</th><th>Вони нам</th><th>Ми їм</th><th>Сальдо</th></tr>';
+      data.both.forEach(function(x){
+        var tr=document.createElement('tr');
+        var a='<a href="/ua/index.html?formId=1#/document/counterparty/update/'+x.id+'" target="_blank" rel="noopener">'+
+              String(x.name).replace(/[&<>"]/g,'')+'</a>';
+        var sal=x.saldo>0 ? ('<span class="plus">+'+money(x.saldo)+' ₴</span>')
+              : (x.saldo<0 ? ('<span class="minus">−'+money(-x.saldo)+' ₴</span>') : '0');
+        tr.innerHTML='<td class="nm">'+a+'</td>'
+          +'<td class="n">'+money(x.in)+' ₴ <span style="color:#8a7268">('+x.nIn+')</span></td>'
+          +'<td class="n">'+money(x.out)+' ₴ <span style="color:#8a7268">('+x.nOut+')</span></td>'
+          +'<td class="n">'+sal+'</td>';
+        t.appendChild(tr);
+      });
+      box.appendChild(t);
+    }
+    if(data.noCp.n && (data.noCp.docs||[]).length){
+      var act0=document.createElement('div'); act0.style.marginTop='8px';
+      var lb=document.createElement('button'); lb.type='button'; lb.className='lk-sb-btn'; lb.style.marginLeft='0';
+      lb.textContent='📋 Показати накладні без постачальника ('+data.noCp.n+')';
+      lb.title='Відкрий накладну, простав постачальника в СРМ — і вона одразу піде в баланс';
+      lb.addEventListener('click',function(ev){
+        ev.preventDefault(); ev.stopPropagation();
+        var old=box.querySelector('.lk-sb-list'); if(old){ old.remove(); return; }
+        var wrap=document.createElement('div'); wrap.className='lk-sb-list';
+        wrap.style.cssText='margin-top:8px;max-height:320px;overflow:auto;border-top:1px solid #e6dad5';
+        var t2=document.createElement('table');
+        t2.innerHTML='<tr><th>Дата</th><th>Сума</th><th>Накладна</th></tr>';
+        (data.noCp.docs||[]).slice(0,200).forEach(function(d){
+          var tr=document.createElement('tr');
+          tr.innerHTML='<td>'+(d.date||'')+'</td><td class="n">'+money(d.sum)+' ₴</td>'
+            +'<td><a href="/ua/index.html?formId=1#/document/arrival-product/update/'+d.id+'" target="_blank" rel="noopener">№'+d.id+' →</a></td>';
+          t2.appendChild(tr);
+        });
+        wrap.appendChild(t2);
+        if((data.noCp.docs||[]).length>200){
+          var more=document.createElement('div'); more.className='note';
+          more.textContent='показано перші 200 з '+data.noCp.n;
+          wrap.appendChild(more);
+        }
+        box.appendChild(wrap);
+      });
+      act0.appendChild(lb); box.appendChild(act0);
+    }
+    var note=document.createElement('div'); note.className='note';
+    note.textContent='«+» — вони завезли більше, ніж ми віддали; «−» — ми віддали більше.'
+      +(data.noCp.n?(' У '+data.noCp.n+' надходженнях постачальник не проставлений — вони не рахуються.'):'');
+    box.appendChild(note);
+  }
+
+  function boxEl(){
+    var old=document.getElementById('lk-sb-box'); if(old) return old;
+    var box=document.createElement('div'); box.id='lk-sb-box';
+    var x=document.createElement('button'); x.className='x'; x.textContent='✕';
+    x.addEventListener('click',function(){ box.remove(); });
+    box.appendChild(x);
+    var host=document.querySelector('.panel-body, .white-main-container') || document.body;
+    host.insertBefore(box, host.firstChild);
+    return box;
+  }
+
+  function run(btn){
+    var box=boxEl();
+    var h=document.createElement('div'); h.className='h'; h.textContent='рахую…'; box.appendChild(h);
+    var cached=null;
+    try{ var c=JSON.parse(localStorage.getItem(CACHE_KEY)||'null');
+         if(c && Date.now()-c.ts<TTL) cached=c.data; }catch(_){}
+    if(cached){ render(box, cached); return; }
+    btn.disabled=true;
+    var prog={};
+    function onProg(kind,page,total){ prog[kind]=page+'/'+total; h.textContent='рахую… надходження '+(prog['arrival-product']||'—')+', видаткові '+(prog['sales-invoice']||'—'); }
+    Promise.all([loadDocs('arrival-product',onProg), loadDocs('sales-invoice',onProg)])
+      .then(function(res){
+        return res;
+      })
+      .then(function(res){
+        var data=build(res[0], res[1]);
+        try{ localStorage.setItem(CACHE_KEY, JSON.stringify({ts:Date.now(), data:data})); }catch(_){}
+        render(box, data);
+      })
+      .catch(function(e){ h.textContent='✗ не вдалося: '+String(e&&e.message||e).slice(0,60); })
+      .then(function(){ btn.disabled=false; });
+  }
+
+  function sync(){
+    var btn=document.querySelector('.lk-sb-btn');
+    if(!onPage()){
+      var bar0=document.querySelector('.lk-sb-bar'); if(bar0) bar0.remove();
+      var b=document.getElementById('lk-sb-box'); if(b) b.remove(); return;
+    }
+    if(btn) return;
+    // на списку документів заголовків немає — чіпляємось до головного контейнера
+    var host=document.querySelector('.white-main-container') || document.querySelector('.panel-body');
+    if(!host) return;
+    var bar=document.createElement('div'); bar.className='lk-sb-bar';
+    bar.style.cssText='margin:8px 0 4px';
+    btn=document.createElement('button'); btn.type='button'; btn.className='lk-sb-btn';
+    btn.style.marginLeft='0';
+    btn.textContent='⇄ Взаєморозрахунки';
+    btn.title='Скільки постачальник завіз нам і скільки ми відвантажили йому — сальдо по кожному';
+    btn.addEventListener('click',function(e){ e.preventDefault(); e.stopPropagation(); run(btn); });
+    bar.appendChild(btn);
+    host.insertBefore(bar, host.firstChild);
+  }
+
+  var t=null;
+  function soon(){ clearTimeout(t); t=setTimeout(sync,300); }
+  soon();
+  window.addEventListener('lkdom', soon);
+  window.addEventListener('hashchange', soon);
+})();
+}catch(e){ try{ console.warn("[SD] модуль «lkSupplierBalance» не запустився:", e); }catch(_){} }
+/* ▲▲▲ МОДУЛЬ-END • lkSupplierBalance ▲▲▲ */
 
 /* ▼▼▼ МОДУЛЬ-START • lkNpDescr — 📋 шаблони опису у формі ТТН Нової пошти ▼▼▼ */
 /* ===== У формі «Сформувати ТТН» поле «Опис» СРМ заповнює переліком усіх товарів —
