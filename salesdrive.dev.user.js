@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.17
+// @version      3.18
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -7321,16 +7321,69 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     return b;
   }
 
-  // офіційний пошук сайту (Horoshop): /katalog/search/?q=КОД — за кодом віддає саме цей товар
+  /* ---- адреса товару на сайті ----
+     Беремо ПОЛЕ КАРТКИ «Сторінка на сайті» (viewModel.item.href) — внутрішнім
+     запитом /products/<id>/ (cookie, публічного API не чіпає). Пошук по коду
+     давав хибні влучання, тож він лишився тільки як запáсний варіант для товарів
+     без заповненої сторінки. Знайдене кладемо в localStorage на тиждень —
+     адреса змінюється дуже рідко, а кеш спільний для всіх вкладок. */
   var SITE='https://lartek.com.ua/katalog/search/?q=';
-  function makeLink(code){
+  var HKEY='lk_skuhref_v1', HTTL=7*24*60*60*1000, pending={};
+  function hrefMap(){ try{ return JSON.parse(localStorage.getItem(HKEY)||'{}')||{}; }catch(e){ return {}; } }
+  function hrefGet(code){
+    var r=hrefMap()[code];
+    return (r && Date.now()-r.ts<HTTL) ? String(r.h||'') : undefined; // undefined = ще не знаємо
+  }
+  function hrefPut(code,h){
+    try{ var m=hrefMap(); m[code]={ts:Date.now(),h:h||''}; localStorage.setItem(HKEY,JSON.stringify(m)); }catch(e){}
+  }
+  function jget(url,when){
+    return fetch(url,{credentials:'include',headers:{'accept':'application/json, text/plain, */*','when':when}})
+      .then(function(r){ return r.ok? r.json() : null; });
+  }
+  // productId уже лежить у знімку заявки, який ядро кладе на <html> — без зайвого запиту
+  function pidFromOrder(code){
+    try{
+      var raw=document.documentElement.getAttribute('data-sd-order-items'); if(!raw) return null;
+      var arr=JSON.parse(raw), pid=null;
+      arr.forEach(function(it){
+        var cs=it.codes||[]; if(cs.indexOf(String(code))<0) return;
+        var last=cs[cs.length-1];               // productId у списку кодів завжди останній
+        if(/^\d+$/.test(last) && last!==String(code)) pid=last;
+      });
+      return pid;
+    }catch(e){ return null; }
+  }
+  function loadHref(code){
+    if(pending[code]) return; pending[code]=1;
+    var pid=pidFromOrder(code);
+    // заголовок "when" обовʼязковий, рядки лежать у response.meta.option.option[]
+    var step = pid ? Promise.resolve(pid)
+      : jget('/products/data/?active=1&filter[sku]='+encodeURIComponent(code)+'&formId=1','product/index')
+        .then(function(j){
+          var rows=(j&&j.response&&j.response.meta&&j.response.meta.option&&j.response.meta.option.option)||[];
+          var row=rows.filter(function(x){ return String(x.sku)===String(code) && !x.isComplect; })[0]
+                 || rows.filter(function(x){ return String(x.sku)===String(code); })[0] || rows[0];
+          return row && row.id!=null ? row.id : null;
+        });
+    step.then(function(id){
+      if(id==null) return null;
+      return jget('/products/'+id+'/?formId=1','product/update');
+    }).then(function(j){
+      var h=j && j.response && j.response.item && j.response.item.href;
+      hrefPut(code, (typeof h==='string' && /^https?:/i.test(h)) ? h : '');
+      delete pending[code]; soon();
+    }).catch(function(){ delete pending[code]; });
+  }
+  function makeLink(code, url){
     var a=document.createElement('a'); a.className='lk-skulink'; a.textContent='🌐';
-    a.target='_blank'; a.rel='noopener'; a.title='Відкрити товар на сайті';
-    setLink(a, code);
+    a.target='_blank'; a.rel='noopener';
+    a.title = url ? 'Відкрити товар на сайті' : 'Сторінку на сайті не заповнено — відкрити пошук';
+    a.setAttribute('data-code', code);
+    a.href = url || (SITE + encodeURIComponent(code));
     a.addEventListener('click',function(e){ e.stopPropagation(); });
     return a;
   }
-  function setLink(a, code){ a.setAttribute('data-code', code); a.href = SITE + encodeURIComponent(code); }
 
   function scan(){
     // 1) режим редагування картки: input[ng-model="viewModel.item.sku"]
@@ -7365,21 +7418,31 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       var m=/\(([^()]+)\)/.exec(String(sp.textContent||'').replace(/\s+/g,' '));
       if(!m) return;
       var code=m[1];
-      var nx=sp.nextElementSibling;
+      var known=hrefGet(code);
+      if(known===undefined) loadHref(code);    // ще не знаємо адреси — спитаємо і перемалюємо
+      var nx=sp.nextElementSibling, btn=null;
       if(nx && nx.classList && nx.classList.contains('lk-skucopy')){
-        // рядок уже оснащений; Angular міг підставити інший товар — оновлюємо лише адресу
+        btn=nx;
         var lnk=nx.nextElementSibling;
-        if(lnk && lnk.classList && lnk.classList.contains('lk-skulink')
-           && lnk.getAttribute('data-code')!==code) setLink(lnk, code);
-        return;
+        if(lnk && lnk.classList && lnk.classList.contains('lk-skulink')){
+          // Angular міг підставити в рядок інший товар — адресу міняємо лише коли справді інша
+          var want=known || (SITE + encodeURIComponent(code));
+          if(known===undefined) return;        // адреси ще не знаємо — нічого не чіпаємо
+          if(lnk.getAttribute('data-code')!==code || lnk.getAttribute('href')!==want){
+            lnk.setAttribute('data-code', code); lnk.setAttribute('href', want);
+          }
+          return;
+        }
+      } else {
+        btn=makeBtn(function(){
+          // читаємо щоразу заново: Angular перевикористовує рядок під інший товар
+          var t=/\(([^()]+)\)/.exec(String(sp.textContent||'').replace(/\s+/g,' '));
+          return t?t[1]:'';
+        }, 'sm');
+        sp.insertAdjacentElement('afterend', btn);
       }
-      var btn=makeBtn(function(){
-        // читаємо щоразу заново: Angular перевикористовує рядок під інший товар
-        var t=/\(([^()]+)\)/.exec(String(sp.textContent||'').replace(/\s+/g,' '));
-        return t?t[1]:'';
-      }, 'sm');
-      sp.insertAdjacentElement('afterend', btn);
-      btn.insertAdjacentElement('afterend', makeLink(code));
+      // саме посилання малюємо тільки коли адреса вже відома — щоб не перезаписувати href
+      if(known!==undefined) btn.insertAdjacentElement('afterend', makeLink(code, known));
     });
   }
 
