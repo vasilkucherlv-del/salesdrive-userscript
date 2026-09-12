@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.23
+// @version      3.24
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -7722,7 +7722,10 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       if(!op || !op.sup) return;
       if(start && String(op.date||'')<start) return;
       if(!by[op.sup]) by[op.sup]={sup:op.sup, give:0, take:0, ops:[]};
-      if(op.dir==='take') by[op.sup].take+=num(op.sum); else by[op.sup].give+=num(op.sum);
+      if(op.give!=null || op.take!=null){          // взаємозалік: обидві сторони в однім записі
+        by[op.sup].give+=num(op.give); by[op.sup].take+=num(op.take);
+      } else if(op.dir==='take') by[op.sup].take+=num(op.sum);
+      else by[op.sup].give+=num(op.sum);
       by[op.sup].ops.push(op);
     });
     var rows=Object.keys(by).map(function(k){
@@ -7736,6 +7739,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 
   var openSup=null;      // який постачальник розгорнутий
   var draft={ dir:'give' };
+  var cart=[];           // кошик документів для одного взаємозаліку (у сховище не пишеться)
 
   /* ---- документи СРМ за номером ----
      Один внутрішній запит на пошук (cookie, публічного API не чіпає).
@@ -7744,8 +7748,11 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   var KINDS={
     arrival:{ label:'Надходження', short:'Надх.', dir:'take', hash:'#/document/arrival-product/update/',
               url:function(n){ return '/document-arrival-product/index/?active=1&formId=1&filter[id][]='+n; } },
+    // __NOTDELETED__ обовʼязковий: без нього список заявок фільтрує за статусом
+    // і давні заявки просто не знаходяться (filter[id][] сам по собі дає 0 рядків)
     order:  { label:'Заявка', short:'Заявка', dir:'give', hash:'#/order/update/',
-              url:function(n){ return '/orders/?formId=1&mobileMode=0&mode=orderList&filter[id][]='+n; } },
+              url:function(n){ return '/orders/?formId=1&mobileMode=0&mode=orderList'
+                + '&filter[statusId][]=__NOTDELETED__&filter[id][]='+n; } },
     invoice:{ label:'Видаткова', short:'Видатк.', dir:'give', hash:'#/document/sales-invoice/update/',
               url:function(n){ return '/document-sales-invoice/index/?active=1&formId=1&filter[id][]='+n; } }
   };
@@ -7769,8 +7776,12 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       .catch(function(){ return null; });
   }
 
+  function sameDoc(d, kind, n){ return d && d.kind===kind && String(d.num)===String(n); }
   function docTaken(kind, n){
-    return load().ops.some(function(o){ return o.doc && o.doc.kind===kind && String(o.doc.num)===String(n); });
+    return load().ops.some(function(o){
+      if(sameDoc(o.doc, kind, n)) return true;                       // одиночний запис
+      return (o.docs||[]).some(function(d){ return sameDoc(d, kind, n); });   // взаємозалік
+    });
   }
 
   function el(tag, cls, txt){
@@ -7832,18 +7843,31 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
           if(!r.ops.length) ops.appendChild(el('div','note','операцій у цьому періоді немає'));
           r.ops.forEach(function(op){
             var row=el('div','row');
+            var offset=(op.give!=null || op.take!=null);
             row.appendChild(el('span','d',dmy(op.date)));
-            row.appendChild(el('span','', op.dir==='take'?'вони віддали':'я віддав'));
-            row.appendChild(el('span','s',money(op.sum)+' ₴'));
-            if(op.doc && KINDS[op.doc.kind]){
+            if(offset){
+              var diff=num(op.give)-num(op.take);
+              row.appendChild(el('span','','взаємозалік'));
+              row.appendChild(el('span','s',money(op.give)+' / '+money(op.take)+' ₴'));
+              var df=el('span','', (diff>0?'+':'')+money(diff)+' ₴');
+              df.className=(diff>0?'plus':(diff<0?'minus':''));
+              row.appendChild(df);
+            } else {
+              row.appendChild(el('span','', op.dir==='take'?'вони віддали':'я віддав'));
+              row.appendChild(el('span','s',money(op.sum)+' ₴'));
+            }
+            // документи запису: старе одиночне поле doc або список docs (взаємозалік)
+            var docs=(op.docs&&op.docs.length)? op.docs : (op.doc? [op.doc] : []);
+            docs.forEach(function(d){
+              if(!KINDS[d.kind]) return;
               var lk=document.createElement('a');
               lk.className='c'; lk.style.flex='0 0 auto';
-              lk.href=KINDS[op.doc.kind].hash+op.doc.num;
-              lk.textContent=KINDS[op.doc.kind].short+' №'+op.doc.num;
+              lk.href=KINDS[d.kind].hash+d.num;
+              lk.textContent=KINDS[d.kind].short+' №'+d.num;
               lk.title='Відкрити документ';
               lk.addEventListener('click',function(e){ e.stopPropagation(); });
               row.appendChild(lk);
-            }
+            });
             row.appendChild(el('span','c',op.note||''));
             var del=el('button','del','×'); del.type='button'; del.title='Видалити запис';
             del.addEventListener('click',function(e){
@@ -7869,7 +7893,6 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 
     // ---- запис за номером документа ----
     // рядок «за номером»: підтягує дату й суму з документа СРМ
-    var found=null;                                  // {kind,num,date,sum,cpId}
     var byNum=el('div','form'); byNum.style.borderTop='none';
     var kSel=document.createElement('select');
     ['arrival','order','invoice'].forEach(function(k){
@@ -7884,6 +7907,37 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     var info=el('span','note',''); info.style.marginLeft='4px';
     byNum.appendChild(info);
     box.appendChild(byNum);
+
+    // кошик документів: складаємо кілька заявок і надходжень в ОДИН взаємозалік
+    var basket=el('div','ops'); basket.style.margin='4px 0 6px';
+    box.appendChild(basket);
+    var mkOffset=el('button','lk-sb-btn',''); mkOffset.type='button'; mkOffset.style.marginLeft='0';
+    function drawBasket(){
+      basket.textContent='';
+      if(!cart.length){ basket.hidden=true; mkOffset.hidden=true; return; }
+      basket.hidden=false; mkOffset.hidden=false;
+      var g=0, t=0;
+      cart.forEach(function(d){
+        if(KINDS[d.kind].dir==='take') t+=num(d.sum); else g+=num(d.sum);
+        var row=el('div','row');
+        row.appendChild(el('span','d',dmy(d.date)));
+        row.appendChild(el('span','', KINDS[d.kind].short+' №'+d.num));
+        row.appendChild(el('span','s',money(d.sum)+' ₴'));
+        row.appendChild(el('span','c', KINDS[d.kind].dir==='take'?'вони віддали':'я віддав'));
+        var x=el('button','del','×'); x.type='button'; x.title='Прибрати зі списку';
+        x.addEventListener('click',function(){
+          cart=cart.filter(function(z){ return !(z.kind===d.kind && z.num===d.num); });
+          drawBasket();
+        });
+        row.appendChild(x);
+        basket.appendChild(row);
+      });
+      var diff=g-t;
+      var sum=el('div','note','я віддав: '+money(g)+' ₴ · вони віддали: '+money(t)+' ₴ · різниця: '
+        +(diff>0?'+':'')+money(diff)+' ₴');
+      basket.appendChild(sum);
+      mkOffset.textContent='+ взаємозалік ('+cart.length+' док.)';
+    }
 
     // ---- форма нового запису ----
     var f=el('div','form');
@@ -7925,18 +7979,19 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     }
     function doFind(){
       var kind=kSel.value, n=String(nIn.value||'').replace(/\D/g,'');
-      found=null;
       if(!n){ info.textContent='вкажіть номер'; return; }
       if(docTaken(kind,n)){ info.textContent=KINDS[kind].short+' №'+n+' вже є в журналі'; return; }
       info.textContent='шукаю…'; find.disabled=true;
       fetchDoc(kind,n).then(function(doc){
         find.disabled=false;
         if(!doc){ info.textContent=KINDS[kind].label.toLowerCase()+' №'+n+' не знайдено'; return; }
-        found=doc;
-        fd.value=doc.date||today();
-        sum.value=String(doc.sum||'');
-        setDir(KINDS[kind].dir);
-        info.textContent=KINDS[kind].short+' №'+n+' · '+dmy(doc.date)+' · '+money(doc.sum)+' ₴';
+        if(cart.some(function(z){ return z.kind===kind && String(z.num)===String(n); })){
+          info.textContent=KINDS[kind].short+' №'+n+' вже у списку'; return;
+        }
+        cart.push({ kind:kind, num:n, date:doc.date, sum:doc.sum });
+        drawBasket();
+        nIn.value='';
+        info.textContent=KINDS[kind].short+' №'+n+' · '+dmy(doc.date)+' · '+money(doc.sum)+' ₴ — додано';
         var title=doc.cp;
         if(!title) return;                       // контрагент не заповнений — обере сам
         info.textContent+=' · '+title;
@@ -7950,7 +8005,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     }
     find.addEventListener('click',doFind);
     nIn.addEventListener('keydown',function(e){ if(e.key==='Enter'){ e.preventDefault(); doFind(); } });
-    kSel.addEventListener('change',function(){ draft.kind=kSel.value; found=null; info.textContent=''; });
+    kSel.addEventListener('change',function(){ draft.kind=kSel.value; info.textContent=''; });
 
     var add=el('button','lk-sb-btn','+ запис'); add.type='button'; add.style.marginLeft='0';
     add.addEventListener('click',function(){
@@ -7958,21 +8013,39 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       var v = num(sum.value);
       if(!sup){ nameIn.hidden=false; nameIn.focus(); return; }
       if(!(v>0)){ sum.focus(); return; }
-      // документ міг бути доданий у сусідній вкладці, поки заповнювалась форма
-      if(found && docTaken(found.kind, found.num)){
-        info.textContent=KINDS[found.kind].short+' №'+found.num+' вже є в журналі'; return;
-      }
       var d=load();
       if(d.sups.indexOf(sup)<0) d.sups.push(sup);
       var rec={ id:'o'+Date.now()+Math.floor(Math.random()*1000), date:fd.value||today(),
                 sup:sup, sum:v, dir:draft.dir, note:String(note.value||'').trim() };
-      if(found) rec.doc={ kind:found.kind, num:found.num };
       d.ops.push(rec);
       save(d);
       draft.date=fd.value; draft.sup=sup;
       render(box);
     });
     f.appendChild(add);
+
+    // один запис на кілька документів: обидві сторони всередині нього
+    mkOffset.addEventListener('click',function(){
+      if(!cart.length) return;
+      var sup = (sel.hidden || sel.value==='__new') ? String(nameIn.value||'').trim() : sel.value;
+      if(!sup){ nameIn.hidden=false; nameIn.focus(); return; }
+      var g=0, t=0, last='';
+      cart.forEach(function(d){
+        if(KINDS[d.kind].dir==='take') t+=num(d.sum); else g+=num(d.sum);
+        if(String(d.date||'')>last) last=String(d.date||'');
+      });
+      var d0=load();
+      if(d0.sups.indexOf(sup)<0) d0.sups.push(sup);
+      d0.ops.push({ id:'o'+Date.now()+Math.floor(Math.random()*1000),
+                    date:last||today(), sup:sup, give:g, take:t,
+                    docs:cart.map(function(z){ return {kind:z.kind, num:z.num, date:z.date, sum:z.sum}; }),
+                    note:String(note.value||'').trim() });
+      save(d0);
+      draft.sup=sup; cart=[];
+      render(box);
+    });
+    f.appendChild(mkOffset);
+    drawBasket();
     box.appendChild(f);
 
     // ---- копія / відновлення: дані живуть лише в цьому браузері ----
