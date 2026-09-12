@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      3.18
+// @version      3.19
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -24,7 +24,7 @@
      • lkApiBudget     — спільний облік і захист ліміту публічного API (window.sdApi)
      • lkProdLink      — посилання «код товару → його картка» (window.sdProdLink)
      • core            — ядро: шина, дані з таблиць, стилі, content.js, База знань
-     • lkNaboryInline  — позначка «входить у набори» в рядках заявки
+     • lkNaboryInline  — позначка «входить у набори» на надходженнях і в картці товару
      • lkComplectPrice — роздрібна ціна біля товару в таблиці «Товари в комплекті»
      • lkAnalogInline  — інлайн-значок «🔁 аналог» у рядку товару
      • lkModalKits     — рядок «Входить у набори» в картці товару (модалка)
@@ -3964,8 +3964,22 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     if (should) inject(cell, sku);
   }
 
+  // «+» наборів доречний там, де приймають товар і де дивляться сам товар,
+  // а не в кожному рядку заявки (прохання Василя)
+  function onPage() {
+    const h = location.hash || '';
+    return /#\/document\/arrival-product\//.test(h) || /#\/product\//.test(h);
+  }
+  function clearAll() {
+    document.querySelectorAll('.lknb-plus,.lknb-exp').forEach(n => n.remove());
+    // мітку теж знімаємо: інакше після повернення на дозволену сторінку
+    // processCell вирішить, що комірка вже оброблена, і «+» не зʼявиться
+    document.querySelectorAll('[data-lknb]').forEach(c => c.removeAttribute('data-lknb'));
+  }
+
   function scan() {
     if (!comp2kits) return;
+    if (!onPage()) { clearAll(); return; }
     document.querySelectorAll('a.link-product-field').forEach(a => {
       const cell = a.closest('.editing-hide') || a.parentElement;
       if (cell) processCell(cell);
@@ -3979,6 +3993,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     await ensureData();
     scan();
     window.addEventListener('lkdom', scanSoon);
+    // перехід між розділами міняє лише хеш — без цього «+» лишався б висіти
+    window.addEventListener('hashchange', scanSoon);
   })();
 })();
 }catch(e){ try{ console.warn("[SD] модуль «lkNaboryInline» не запустився:", e); }catch(_){} }
