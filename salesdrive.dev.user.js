@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.25
+// @version      3.26
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -8158,6 +8158,51 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 
   var stop=false, busy=false;
 
+  /* ---- кеш перевірених заявок ----
+     Один запит на заявку неминучий (СРМ не вміє шукати по коментарях), тож
+     повторні прогони того самого періоду беремо з кеша: {orderId:{ts,prints}}. */
+  var OKEY='lk_ttncache_v1', OTTL=24*60*60*1000;
+  function ocache(){
+    try{ return JSON.parse(localStorage.getItem(OKEY)||'{}')||{}; }catch(e){ return {}; }
+  }
+  function ocacheGet(id){
+    var r=ocache()[String(id)];
+    return (r && Date.now()-(r.ts||0)<OTTL && Array.isArray(r.prints)) ? r.prints : null;
+  }
+  var oPending={};                 // накопичуємо і пишемо пачкою — localStorage не любить частих записів
+  function ocachePut(id, prints){ oPending[String(id)]={ ts:Date.now(), prints:prints }; }
+  function ocacheFlush(){
+    try{
+      var m=ocache(), lim=Date.now()-OTTL;
+      Object.keys(m).forEach(function(k){ if(!m[k] || (m[k].ts||0)<lim) delete m[k]; });
+      Object.keys(oPending).forEach(function(k){ m[k]=oPending[k]; });
+      oPending={};
+      localStorage.setItem(OKEY, JSON.stringify(m));
+    }catch(e){ oPending={}; }
+  }
+
+  // 4 потоки: більше сервер не віддає швидше (виміряно: 1→604 мс/заявку, 4→181, 8→190)
+  function pool(items, n, fn, onProg){
+    var i=0, done=0, cached=0;
+    return new Promise(function(res){
+      var live=0;
+      function next(){
+        if(stop || i>=items.length){
+          if(live===0) res({ done:done, cached:cached });
+          return;
+        }
+        var it=items[i++]; live++;
+        Promise.resolve(fn(it)).then(function(fromCache){
+          done++; if(fromCache) cached++;
+          if(onProg) onProg(done, items.length, cached);
+        }).catch(function(){ done++; })
+          .then(function(){ live--; next(); });
+      }
+      for(var k=0;k<n;k++) next();
+      if(!items.length) res({ done:0, cached:0 });
+    });
+  }
+
   // ТТН заявки: ord_delivery_data буває рядком або масивом
   function hasTtn(row){
     try{
@@ -8186,17 +8231,24 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   function loadOrders(from, to, onProg){
     var qs='filter[statusId][]=__NOTDELETED__'
       +'&filter[orderTime][from]='+from+'&filter[orderTime][to]='+to;   // лише ISO-дати!
-    var out=[], page=1;
-    function step(){
-      return sdOrders(qs, page).then(function(res){
-        (res.rows||[]).forEach(function(r){ if(hasTtn(r)) out.push(r); });
-        if(onProg) onProg('сторінка '+page+' із '+(res.pageCount||1)+', із ТТН: '+out.length);
-        if(stop) return out;
-        if(page < Math.min(res.pageCount||1, MAX_PAGES)){ page++; return step(); }
-        return out;
-      });
-    }
-    return step();
+    var out=[];
+    function take(res){ (res.rows||[]).forEach(function(r){ if(hasTtn(r)) out.push(r); }); }
+    // перша сторінка дає кількість решти — далі тягнемо їх тим самим пулом із 4 потоків
+    // (тиждень — це 25 сторінок, послідовно вони читались ~30 с)
+    return sdOrders(qs, 1).then(function(first){
+      take(first);
+      var total=Math.min(first.pageCount||1, MAX_PAGES);
+      if(onProg) onProg('сторінка 1 із '+total+', із ТТН: '+out.length);
+      if(stop || total<2) return out;
+      var pages=[]; for(var p=2;p<=total;p++) pages.push(p);
+      var got=1;
+      return pool(pages, 4, function(pg){
+        return sdOrders(qs, pg).then(function(res){
+          take(res); got++;
+          if(onProg) onProg('сторінка '+got+' із '+total+', із ТТН: '+out.length);
+        });
+      }).then(function(){ return out; });
+    });
   }
 
   var users={};   // id → імʼя (з meta.fields.userId.options тієї ж відповіді)
@@ -8305,35 +8357,37 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 
     loadOrders(from, to, function(txt){ prog.textContent='читаю список заявок: '+txt; })
       .then(function(orders){
-        var diff=[], fixed=[], same=[], i=0;
-        function step(){
-          if(stop || i>=orders.length){
-            var data={ from:from, to:to, checked:i, diff:diff, fixed:fixed, same:same, ts:Date.now() };
-            try{ localStorage.setItem(CKEY, JSON.stringify(data)); }catch(e){}
-            render(b, data);
-            if(stop){
-              var s=document.createElement('div'); s.className='note';
-              s.textContent='Перевірку спинено на '+i+' із '+orders.length+' заявок.';
-              b.appendChild(s);
-            }
-            btn.disabled=false; busy=false;
-            return;
-          }
-          var o=orders[i++];
-          prog.textContent='перевіряю коментарі: '+i+' із '+orders.length;
-          prints(o.id).then(function(ps){
-            if(ps.length>=2){
-              var uniq={}, alive={};
-              ps.forEach(function(p){ uniq[p.ttn]=1; if(!p.dead) alive[p.ttn]=1; });
-              var rec={ id:o.id, date:String(o.orderTime||'').slice(0,10), prints:ps };
-              if(Object.keys(uniq).length<2) same.push(rec);            // той самий номер двічі
-              else if(Object.keys(alive).length>=2) diff.push(rec);     // дві ЖИВІ ТТН — зайва посилка
-              else fixed.push(rec);                                     // стару ТТН видалили
-            }
-            setTimeout(step, 60);     // не гатимо сервер
-          });
+        var diff=[], fixed=[], same=[];
+        function classify(o, ps){
+          if(ps.length<2) return;
+          var uniq={}, alive={};
+          ps.forEach(function(p){ uniq[p.ttn]=1; if(!p.dead) alive[p.ttn]=1; });
+          var rec={ id:o.id, date:String(o.orderTime||'').slice(0,10), prints:ps };
+          if(Object.keys(uniq).length<2) same.push(rec);            // той самий номер двічі
+          else if(Object.keys(alive).length>=2) diff.push(rec);     // дві ЖИВІ ТТН — зайва посилка
+          else fixed.push(rec);                                     // стару ТТН видалили
         }
-        step();
+        return pool(orders, 4, function(o){
+          var hit=ocacheGet(o.id);
+          if(hit){ classify(o, hit); return true; }                 // без запиту
+          return prints(o.id).then(function(ps){
+            ocachePut(o.id, ps); classify(o, ps); return false;
+          });
+        }, function(done, total, cached){
+          prog.textContent='перевіряю коментарі: '+done+' із '+total
+            +(cached?(' · з кешу: '+cached):'');
+        }).then(function(st){
+          ocacheFlush();
+          var data={ from:from, to:to, checked:st.done, diff:diff, fixed:fixed, same:same, ts:Date.now() };
+          try{ localStorage.setItem(CKEY, JSON.stringify(data)); }catch(e){}
+          render(b, data);
+          if(stop){
+            var sn=document.createElement('div'); sn.className='note';
+            sn.textContent='Перевірку спинено на '+st.done+' із '+orders.length+' заявок.';
+            b.appendChild(sn);
+          }
+          btn.disabled=false; busy=false;
+        });
       })
       .catch(function(e){
         prog.textContent='✗ не вдалося: '+String((e&&e.message)||e).slice(0,60);
