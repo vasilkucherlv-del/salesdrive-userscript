@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.22
+// @version      3.23
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -2576,6 +2576,55 @@ function __sdPageMain() {
     }
     function num(v) { var n = parseFloat(String(v == null ? "" : v).replace(/\s/g, "").replace(",", ".")); return isNaN(n) ? 0 : n; }
     function money(n) { n = Math.round(Number(n) * 100) / 100; return n.toFixed(2).replace(".", ","); }
+
+    // ---------- ВІДКАТ ЗАПИСУ (revert) ----------
+    // Знімок старих цін склав модуль після «Записати». Документа може вже не бути
+    // (його видалили) — тому viewModel тут НЕ потрібен, працюємо лише зі знімком.
+    if (mode === "revert") {
+      var snap = [];
+      try { snap = JSON.parse(document.documentElement.getAttribute("data-sd-arropt-revert") || "[]") || []; } catch (e) { snap = []; }
+      document.documentElement.removeAttribute("data-sd-arropt-revert");
+      if (!snap.length) return respond({ ok: false, err: "нема чого повертати" });
+      var rres = [], ridx = 0;
+      function rstep() {
+        document.documentElement.setAttribute("data-sd-arropt-progress", ridx + "/" + snap.length);
+        window.dispatchEvent(new Event("sdArrivalOptProgress"));
+        if (ridx >= snap.length) return respond({ ok: true, rows: rres });
+        var s = snap[ridx++];
+        fetch("/products/" + s.pid + "/?formId=1", { credentials: "include", headers: { "Accept": "application/json" } })
+          .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+          .then(function (j) {
+            var item = j.response && j.response.item;
+            if (!item) throw new Error("картка товару недоступна");
+            var o = toPut(item);
+            // роздріб повертаємо лише там, де ми його справді міняли
+            if (s.retailSet != null && num(s.retail) > 0) o.defaultPrice = num(s.retail);
+            var created = {};
+            (s.created || []).forEach(function (id) { created[String(id)] = 1; });
+            var olds = s.olds || {};
+            // тип, якого до нас не було, — ВИДАЛЯЄМО; решті повертаємо старе значення
+            o.priceTypes = (o.priceTypes || []).filter(function (p) {
+              var id = String(p.priceTypeId);
+              if (created[id]) return false;
+              if (olds[id] != null && num(olds[id]) > 0) { p.price = money(olds[id]); p.defaultPrice = num(olds[id]); }
+              return true;
+            });
+            return fetch("/products/" + o.id + "/?formId=" + o.formId,
+              { method: "PUT", credentials: "include", headers: csrfHead(), body: JSON.stringify(o) })
+              .then(function (pr) {
+                if (pr.status !== 200) throw new Error("HTTP " + pr.status);
+                try { localStorage.setItem("lkcp_bust_v1", String(Date.now())); } catch (e2) {}
+                rres.push({ pid: s.pid, sku: s.sku || String(s.pid), name: s.name || "" });
+              });
+          })
+          .catch(function (e) {
+            rres.push({ pid: s.pid, sku: s.sku || String(s.pid), name: s.name || "", err: String((e && e.message) || e) });
+          })
+          .then(function () { setTimeout(rstep, 250); });   // не гатимо сервер
+      }
+      rstep();
+      return;
+    }
 
     // viewModel прихідної накладної
     var vm = null;
@@ -6470,6 +6519,42 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     renderColumn();
   }
 
+  /* ---- знімок для відкату ----
+     Ціни пишуться прямо в картки товарів, із документом цей запис не звʼязаний:
+     видалення накладної їх НЕ поверне. Тому після «Записати» лишаємо старі значення,
+     щоб одним кліком відкотити. Живе 3 доби і в будь-якій вкладці (localStorage). */
+  var UKEY='lk_arropt_undo_v1', UTTL=3*24*60*60*1000;
+  function docLabel(){
+    var m=(location.hash||'').match(/arrival-product\/update\/(\d+)/);
+    return m? ('надх. №'+m[1]) : 'нова накладна';
+  }
+  function loadUndo(){
+    try{
+      var o=JSON.parse(localStorage.getItem(UKEY)||'null');
+      if(!o || !Array.isArray(o.rows) || !o.rows.length) return null;
+      if(Date.now()-(o.ts||0) > UTTL) return null;
+      return o;
+    }catch(e){ return null; }
+  }
+  function dropUndo(){ try{ localStorage.removeItem(UKEY); }catch(e){} }
+  function saveUndo(rows){
+    var snap=[];
+    (rows||[]).forEach(function(r){
+      if(!r || r.err || r.skipped || r.pid==null) return;   // писались лише ці
+      var olds={};
+      [[2,r.o2],[5,r.o5],[7,r.o7],[9,r.o9],[3,r.o3]].forEach(function(p){
+        if(p[1]!=null && Number(p[1])>0) olds[String(p[0])]=Number(p[1]);
+      });
+      snap.push({ pid:r.pid, sku:r.sku||String(r.pid), name:r.name||'',
+                  retail:r.retail!=null?Number(r.retail):null,
+                  retailSet:r.retailSet!=null?Number(r.retailSet):null,
+                  olds:olds, created:Array.isArray(r.created)?r.created:[] });
+    });
+    if(!snap.length) return;
+    try{ localStorage.setItem(UKEY, JSON.stringify({ ts:Date.now(), doc:docLabel(), rows:snap })); }catch(e){}
+    syncSoon();
+  }
+
   // запуск core-обробника: mode='preview' (лише читає) або 'apply' (пише)
   function invoke(mode, onDone, onProgTxt){
     var token=String(Date.now())+'_'+Math.random().toString(36).slice(2);
@@ -6516,8 +6601,15 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     x.addEventListener('click',function(){ clearView(); });
     box.appendChild(x);
     var t=document.querySelector('table.document-invoice-products');
-    if(t&&t.parentElement) t.parentElement.insertBefore(box,t);
-    else document.body.appendChild(box);
+    if(t&&t.parentElement){ t.parentElement.insertBefore(box,t); return box; }
+    // на списку надходжень таблиці накладної немає (там звіт про відкат) — інакше
+    // панель падала в кінець document.body, і результату просто не було видно
+    var ub=document.querySelector('.lk-arropt-btn-undo');
+    if(ub && ub.parentElement) ub.parentElement.insertAdjacentElement('afterend', box);
+    else{
+      var host=document.querySelector('.white-main-container')||document.querySelector('.panel-body');
+      if(host) host.insertBefore(box, host.firstChild); else document.body.appendChild(box);
+    }
     return box;
   }
   function errLines(box, rows){
@@ -6573,6 +6665,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
           }
           var ok2=0, er2=0, sk2=0;
           (d2.rows||[]).forEach(function(r){ if(r.err) er2++; else if(r.skipped) sk2++; else ok2++; });
+          saveUndo(d2.rows);          // знімок старих цін — для «↩ Повернути ціни»
           setView(d2.rows, true, d2.rate);
           var box2=bar();
           var h2=document.createElement('div'); h2.className='h';
@@ -6803,14 +6896,70 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     });
   }
 
+  // ↩ відкат: кнопка живе окремо від головних — знімок треба показувати навіть тоді,
+  // коли накладну вже видалили (відкривати нема що, а ціни в картках лишились)
+  function runUndo(ub){
+    var snap=loadUndo(); if(!snap) return;
+    if(!confirm('Повернути старі ціни у '+snap.rows.length+' товарів?\n'
+      +snap.doc+' · записано '+new Date(snap.ts).toLocaleString('uk-UA')+'\n\n'
+      +'Це запис у СРМ: роздріб і опт-ціни стануть такими, якими були до накладної.')) return;
+    ub.disabled=true;
+    document.documentElement.setAttribute('data-sd-arropt-revert', JSON.stringify(snap.rows));
+    invoke('revert', function(d){
+      ub.disabled=false;
+      var box=bar(); box.setAttribute('data-keep','1');
+      var h=document.createElement('div'); h.className='h';
+      if(!d || !d.ok){
+        h.textContent='✗ відкат не вдався: '+((d&&d.err)||'нема відповіді')+' — знімок збережено, можна повторити';
+        box.appendChild(h); syncSoon(); return;
+      }
+      var bad=(d.rows||[]).filter(function(r){ return r.err; });
+      h.textContent='↩ Повернуто: '+((d.rows||[]).length-bad.length)+' товарів'
+        +(bad.length?(' · не вдалось: '+bad.length+' (знімок збережено)'):'. Знімок прибрано.');
+      box.appendChild(h);
+      errLines(box, d.rows);
+      if(!bad.length) dropUndo();      // все повернулось — знімок більше не потрібен
+      syncSoon();
+    }, function(p){ ub.textContent='↩ Повертаю '+p+'…'; });
+  }
+  function syncUndo(host){
+    var ub=document.querySelector('.lk-arropt-btn-undo');
+    var snap=loadUndo();
+    if(!snap){ if(ub) ub.remove(); return; }
+    if(!ub){
+      if(!host) return;
+      ub=document.createElement('button'); ub.type='button';
+      ub.className='lk-arropt-btn lk-arropt-btn-undo';
+      ub.style.background='#8d6e63';
+      ub.addEventListener('click',function(e){ e.preventDefault(); e.stopPropagation(); runUndo(ub); });
+      host.appendChild(ub);
+    }
+    var d=new Date(snap.ts);
+    var txt='↩ Повернути ціни ('+snap.doc+' · '+snap.rows.length+' тов. · '
+      +('0'+d.getHours()).slice(-2)+':'+('0'+d.getMinutes()).slice(-2)+')';
+    if(ub.textContent!==txt) ub.textContent=txt;   // без переписування — щоб не мигтіло
+    ub.title='Повернути ціни, якими вони були до запису цієї накладної';
+  }
+
+  // ширша зона: сам документ + список надходжень (там кнопка відкату теж має бути)
+  function onArrivalArea(){ return /#\/document\/arrival-product\//.test(location.hash||''); }
   function sync(){
     var btn=document.querySelector('.lk-arropt-btn-main');
-    if(!onPage()){ if(btn) btn.remove(); clearViewIfAny(); return; }
+    if(!onPage()){
+      if(btn) btn.remove(); clearViewIfAny();
+      syncUndo(onArrivalArea()
+        ? (document.querySelector('.white-main-container')||document.querySelector('.panel-body')||null)
+        : null);
+      return;
+    }
     if(view) renderColumn();   // Angular перемалював рядки — повертаємо колонку
+    var host=null, hs=document.querySelectorAll('h1,h2,h3');
+    for(var i=0;i<hs.length;i++){ if(/^Надходження товарів/.test((hs[i].textContent||'').trim())){ host=hs[i]; break; } }
+    // кнопку відкату показуємо на будь-якій сторінці надходжень, навіть без рядків:
+    // накладну могли видалити, а ціни в картках лишились
+    syncUndo(host || document.querySelector('.white-main-container') || null);
     if(!rowsCount()){ if(btn) btn.remove(); return; }
     if(btn) return;
-    var host=null, hs=document.querySelectorAll('h1,h2,h3');
-    for(var i=0;i<hs.length;i++){ if(/^Надходження товарів №/.test((hs[i].textContent||'').trim())){ host=hs[i]; break; } }
     btn=document.createElement('button'); btn.type='button'; btn.className='lk-arropt-btn lk-arropt-btn-main';
     btn.textContent='💰 Опт-ціни з собівартості';
     btn.title='Показати нові ціни (Великий ×1.2, середній ×1.25, майстри ×1.3↑5) колонкою біля товарів; запис — окремою кнопкою';
@@ -6827,7 +6976,11 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     if(host) host.appendChild(kb); else if(btn.parentElement) btn.parentElement.insertBefore(kb, btn.nextSibling);
   }
   function clearViewIfAny(){
-    if(view||document.getElementById('lk-arropt-res')) clearView();
+    var r0=document.getElementById('lk-arropt-res');
+    // звіт про відкат лишаємо: його показують і на списку надходжень, де перегляду немає,
+    // а sync() інакше змітав би панель через 300 мс після кліку
+    if(r0 && r0.getAttribute('data-keep')==='1'){ view=null; return; }
+    if(view||r0) clearView();
     var kb=document.getElementById('lk-kits-res'); if(kb) kb.remove(); kitView=null;
   }
 
