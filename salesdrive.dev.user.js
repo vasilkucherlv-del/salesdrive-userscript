@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.21
+// @version      3.22
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -2682,8 +2682,9 @@ function __sdPageMain() {
             Object.keys(mem).forEach(function (k) { if (!mem[k] || (mem[k].ts || 0) < lim) delete mem[k]; });
             var map = {};
             results.forEach(function (r) { if (r.skuKey && r.costOld > 0) map[r.skuKey] = r.costOld; });
+            // збережений документ → його номер; щойно створений → "new"
             var _m = (location.hash || "").match(/arrival-product\/update\/(\d+)/);
-            var docKey = _m ? _m[1] : "doc";
+            var docKey = _m ? _m[1] : "new";
             if (Object.keys(map).length) mem[docKey] = { ts: Date.now(), map: map };
             localStorage.setItem("lk_costold_v1", JSON.stringify(mem));
           } catch (e1) {}
@@ -2900,8 +2901,11 @@ function __sdPageMain() {
       try {
         var mem = JSON.parse(localStorage.getItem("lk_costold_v1") || "{}") || {};
         var _m2 = (location.hash || "").match(/arrival-product\/update\/(\d+)/);
-        var docKey = _m2 ? _m2[1] : "doc";
+        var docKey = _m2 ? _m2[1] : "new";
         var rec = mem[docKey];
+        // типовий шлях: опт-ціни рахували ДО збереження (ключ "new"), а комплекти —
+        // вже після, коли документ дістав номер; тоді беремо запис "new" (TTL 6 год)
+        if ((!rec || !rec.map) && docKey !== "new") rec = mem["new"];
         if (!rec || !rec.map) return null;
         if (Date.now() - (rec.ts || 0) > 6 * 60 * 60 * 1000) return null;
         var v = num(rec.map[String(sku).trim()]);
@@ -6308,7 +6312,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   var st=document.createElement('style'); st.textContent=css;
   (document.head||document.documentElement).appendChild(st);
 
-  function onPage(){ return /#\/document\/arrival-product\/update\//.test(location.hash||''); }
+  // і збережений документ, і щойно створений: рахувати ціни зручніше ДО збереження —
+  // тоді собівартість у картках ще «до накладної», СРМ її не перерахувала
+  function onPage(){ return /#\/document\/arrival-product\/(update|create)/.test(location.hash||''); }
   function rowsCount(){ return document.querySelectorAll('tr[ng-repeat^="invoiceItem"]').length; }
   var fmtN=function(n){ return String(n==null?'—':n).replace('.',','); };
 
@@ -6642,8 +6648,10 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     try{
       var mem=JSON.parse(localStorage.getItem('lk_costold_v1')||'{}')||{};
       var _m3=(location.hash||'').match(/arrival-product\/update\/(\d+)/);
-      var dk=_m3?_m3[1]:'doc';
-      haveMem=!!(mem[dk]&&mem[dk].map&&Object.keys(mem[dk].map).length);
+      var dk=_m3?_m3[1]:'new';
+      var recM=mem[dk];
+      if((!recM||!recM.map) && dk!=='new') recM=mem['new'];   // рахували до збереження
+      haveMem=!!(recM&&recM.map&&Object.keys(recM.map).length);
     }catch(_){}
     if(!haveMem){
       var wn=document.createElement('div'); wn.className='er';
