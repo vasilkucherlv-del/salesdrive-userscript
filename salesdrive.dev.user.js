@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.24
+// @version      3.25
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -38,6 +38,7 @@
      • lkArrivalOpt    — 💰 опт-ціни товарів (×1.2/×1.25/×1.3↑5) із собівартості накладної
      • lkRoundPickup   — 🔟 заокруглення суми самовивозу вгору до 10 ₴ (99→100, 108→110)
      • lkOrderTier     — 💱 перерахунок цін заявки за типом ціни (опт/майстри) одним кліком     • lkSupplierBalance — ⇄ взаєморозрахунки з постачальниками (сальдо по кожному)
+     • lkTtnDouble     — 🖨 заявки з подвійним друком ТТН (різні номери / передруки)
 
      • lkNpDescr       — 📋 шаблони опису у формі ТТН Нової пошти (редаговані)
      • lkStockWhere    — 🔎 «Де товар»: у яких заявках висить код (з урахуванням комплектів)
@@ -8112,6 +8113,306 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 })();
 }catch(e){ try{ console.warn("[SD] модуль «lkSupplierBalance» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkSupplierBalance ▲▲▲ */
+
+/* ▼▼▼ МОДУЛЬ-START • lkTtnDouble — 🖨 заявки з подвійним друком ТТН ▼▼▼ */
+/* ===== Слід подвійного друку лишається ЛИШЕ в стрічці коментарів заявки:
+   /comments/?formId=1&orderId=N → рядок type:"Ttn" з текстом «Надруковано ТТН <номер>».
+   Глобального пошуку по коментарях СРМ не має (без orderId — HTTP 500), а пакет
+   orderId[]=… віддає 20 рядків без прив'язки до заявки — тому один запит на заявку,
+   і саме через це обовʼязковий період. Усе внутрішніми запитами: публічний API
+   не чіпається, у СРМ нічого не пишеться. ===== */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
+(function lkTtnDouble(){
+  'use strict';
+  var CKEY='lk_ttndbl_v1', TTL=30*60*1000, MAX_PAGES=40;
+
+  var css=''
+    +'.lk-td-btn{display:inline-block;margin-left:10px;padding:4px 14px;border:none;border-radius:14px;'
+    +'  background:#455A64;color:#fff;font:700 13px/1.5 Arial,sans-serif;cursor:pointer;vertical-align:middle;white-space:nowrap}'
+    +'.lk-td-btn:hover{background:#37474F}'
+    +'.lk-td-btn[disabled]{background:#9e9e9e;cursor:default}'
+    +'#lk-td-box{margin:10px 0;padding:10px 12px;border:1px solid #90a4ae;border-left:4px solid #455A64;'
+    +'  background:#f4f7f9;border-radius:6px;font:13px/1.6 Arial,sans-serif;color:#263238;'
+    +'  max-width:960px;box-sizing:border-box;position:relative}'
+    +'#lk-td-box .h{font-weight:700;color:#37474F;margin-bottom:5px}'
+    +'#lk-td-box .note{color:#607d8b;font-size:12px;margin-top:6px}'
+    +'#lk-td-box table{border-collapse:collapse;width:100%;font:13px/1.5 Arial,sans-serif;margin-top:4px}'
+    +'#lk-td-box td,#lk-td-box th{padding:4px 8px;border-top:1px solid #dde5e9;vertical-align:top}'
+    +'#lk-td-box th{font-weight:700;color:#546e7a;text-align:left;border-top:none}'
+    +'#lk-td-box .bad{color:#B71C1C;font-weight:700}'
+    +'#lk-td-box .ttn{font-family:ui-monospace,Menlo,Consolas,monospace}'
+    +'#lk-td-box .row2{margin-top:8px;padding-top:8px;border-top:1px dashed #cfd8dc;'
+    +'  display:flex;flex-wrap:wrap;gap:6px;align-items:center}'
+    +'#lk-td-box input{border:1px solid #b0bec5;border-radius:4px;padding:3px 6px;'
+    +'  font:13px/1.4 Arial,sans-serif;color:#263238;background:#fff}'
+    +'#lk-td-box .x{position:absolute;top:5px;right:9px;border:none;background:none;cursor:pointer;'
+    +'  font-size:17px;color:#37474F}';
+  var st=document.createElement('style'); st.textContent=css;
+  (document.head||document.documentElement).appendChild(st);
+
+  function onPage(){ return /#\/order\/index/.test(location.hash||''); }
+  function iso(d){ var p=function(x){ return (x<10?'0':'')+x; };
+    return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate()); }
+  function dmy(s){ var m=/^(\d{4})-(\d{2})-(\d{2})/.exec(String(s||'')); return m? m[3]+'.'+m[2]+'.'+m[1] : String(s||''); }
+  function daysAgo(n){ var d=new Date(); d.setDate(d.getDate()-n); return iso(d); }
+
+  var stop=false, busy=false;
+
+  // ТТН заявки: ord_delivery_data буває рядком або масивом
+  function hasTtn(row){
+    try{
+      var o=row.ord_delivery_data;
+      if(typeof o==='string') o=JSON.parse(o);
+      if(!o) return false;
+      return (Array.isArray(o)?o:[o]).some(function(v){ return v && v.trackingNumber; });
+    }catch(e){ return false; }
+  }
+
+  function jget(url){
+    return fetch(url,{credentials:'include',headers:{'accept':'application/json, text/plain, */*'}})
+      .then(function(r){ return r.ok? r.json() : null; });
+  }
+
+  // список заявок за період (внутрішній запит СРМ, без ліміту публічного API)
+  // обгортка ядра (як в інших модулях), із запасним прямим запитом
+  function sdOrders(qs, page){
+    if(window.sdApi && window.sdApi.orders) return window.sdApi.orders(qs, page);
+    var u='/orders/?formId=1&mobileMode=0&mode=orderList&page='+(page||1)+(qs?('&'+qs):'');
+    return jget(u).then(function(j){
+      var b=(j&&(j.response||j))||{};
+      return { rows:b.data||[], pageCount:((b.pagination||{}).pageCount)||1 };
+    });
+  }
+  function loadOrders(from, to, onProg){
+    var qs='filter[statusId][]=__NOTDELETED__'
+      +'&filter[orderTime][from]='+from+'&filter[orderTime][to]='+to;   // лише ISO-дати!
+    var out=[], page=1;
+    function step(){
+      return sdOrders(qs, page).then(function(res){
+        (res.rows||[]).forEach(function(r){ if(hasTtn(r)) out.push(r); });
+        if(onProg) onProg('сторінка '+page+' із '+(res.pageCount||1)+', із ТТН: '+out.length);
+        if(stop) return out;
+        if(page < Math.min(res.pageCount||1, MAX_PAGES)){ page++; return step(); }
+        return out;
+      });
+    }
+    return step();
+  }
+
+  var users={};   // id → імʼя (з meta.fields.userId.options тієї ж відповіді)
+  function grabUsers(j){
+    try{
+      var opts=j && j.meta && j.meta.fields && j.meta.fields.userId && j.meta.fields.userId.options;
+      (opts||[]).forEach(function(o){ if(o && o.value!=null) users[String(o.value)]=String(o.text||''); });
+    }catch(e){}
+  }
+  function userName(id){ return users[String(id)] || ('користувач '+id); }
+
+  // друки ТТН однієї заявки: type==='Ttn' І текст саме «Надруковано»
+  // (той самий type має і «Створена ТТН» — тому фільтр по тексту обовʼязковий)
+  function prints(orderId){
+    return jget('/comments/?formId=1&orderId='+orderId).then(function(j){
+      if(!j) return [];
+      grabUsers(j);
+      var out=[], dead={};
+      (j.data||[]).forEach(function(c){
+        if(c.type!=='Ttn') return;
+        var txt=String(c.body||'').replace(/<[^>]*>/g,' ');
+        // «Видалена ТТН» — ознака, що номер прибрали й друкували замість нього новий:
+        // це змарнована наклейка, а не зайва посилка (перевірено на 317144 і 317186)
+        var dm=/Видалена\s+ТТН\s*([0-9]+)/i.exec(txt);
+        if(dm){ dead[dm[1]]=1; return; }
+        var m=/Надруковано\s+ТТН\s*([0-9]+)/i.exec(txt);
+        if(!m) return;
+        out.push({ ttn:m[1], at:String(c.createdAt||''), user:c.userId });
+      });
+      out.forEach(function(p){ if(dead[p.ttn]) p.dead=true; });
+      return out;
+    }).catch(function(){ return []; });
+  }
+
+  function box(){
+    var old=document.getElementById('lk-td-box'); if(old) old.remove();
+    var b=document.createElement('div'); b.id='lk-td-box';
+    var x=document.createElement('button'); x.className='x'; x.textContent='×'; x.title='Сховати';
+    x.addEventListener('click',function(){ stop=true; b.remove(); });
+    b.appendChild(x);
+    var bar=document.querySelector('.lk-td-bar');
+    if(bar && bar.parentNode) bar.parentNode.insertBefore(b, bar.nextSibling);
+    else{
+      var host=document.querySelector('.white-main-container')||document.querySelector('.panel-body')||document.body;
+      host.insertBefore(b, host.firstChild);
+    }
+    return b;
+  }
+
+  function table(parent, title, list, danger){
+    var h=document.createElement('div'); h.className='h'+(danger?' bad':'');
+    h.textContent=title+': '+list.length;
+    parent.appendChild(h);
+    if(!list.length) return;
+    var t=document.createElement('table');
+    var hr=document.createElement('tr');
+    ['Заявка','Дата','Друки ТТН'].forEach(function(s){
+      var th=document.createElement('th'); th.textContent=s; hr.appendChild(th);
+    });
+    t.appendChild(hr);
+    list.forEach(function(o){
+      var tr=document.createElement('tr');
+      var td1=document.createElement('td');
+      var a=document.createElement('a'); a.href='#/order/update/'+o.id; a.target='_blank';
+      a.textContent='№'+o.id; a.title='Відкрити заявку';
+      td1.appendChild(a); tr.appendChild(td1);
+      var td2=document.createElement('td'); td2.textContent=dmy(o.date); tr.appendChild(td2);
+      var td3=document.createElement('td');
+      o.prints.forEach(function(p){
+        var d=document.createElement('div'); d.className='ttn';
+        d.textContent=p.ttn+(p.dead?' (видалена)':'')+' · '+(p.at||'').slice(0,16)+' · '+userName(p.user);
+        td3.appendChild(d);
+      });
+      tr.appendChild(td3);
+      t.appendChild(tr);
+    });
+    parent.appendChild(t);
+  }
+
+  function render(b, data){
+    b.querySelectorAll('table,.h,.note').forEach(function(n){ n.remove(); });
+    var head=document.createElement('div'); head.className='h';
+    head.textContent='🖨 Подвійний друк ТТН · '+dmy(data.from)+' — '+dmy(data.to)
+      +' · перевірено заявок із ТТН: '+data.checked;
+    b.appendChild(head);
+    data.fixed=data.fixed||[];
+    if(!data.diff.length && !data.same.length && !data.fixed.length){
+      var n=document.createElement('div'); n.className='note';
+      n.textContent='Подвійних друків за цей період немає.';
+      b.appendChild(n);
+      return;
+    }
+    table(b, '⚠ Дві живі ТТН (зайва посилка)', data.diff, true);
+    table(b, 'Передрук після заміни ТТН (стару видалено — змарнована наклейка)', data.fixed, false);
+    table(b, 'Передруки того самого номера', data.same, false);
+  }
+
+  function run(btn, b, from, to){
+    if(busy) return;
+    busy=true; stop=false;
+    var prog=document.createElement('div'); prog.className='h';
+    b.querySelectorAll('table,.h,.note').forEach(function(n){ n.remove(); });
+    prog.textContent='читаю список заявок…';
+    b.appendChild(prog);
+    btn.disabled=true;
+
+    loadOrders(from, to, function(txt){ prog.textContent='читаю список заявок: '+txt; })
+      .then(function(orders){
+        var diff=[], fixed=[], same=[], i=0;
+        function step(){
+          if(stop || i>=orders.length){
+            var data={ from:from, to:to, checked:i, diff:diff, fixed:fixed, same:same, ts:Date.now() };
+            try{ localStorage.setItem(CKEY, JSON.stringify(data)); }catch(e){}
+            render(b, data);
+            if(stop){
+              var s=document.createElement('div'); s.className='note';
+              s.textContent='Перевірку спинено на '+i+' із '+orders.length+' заявок.';
+              b.appendChild(s);
+            }
+            btn.disabled=false; busy=false;
+            return;
+          }
+          var o=orders[i++];
+          prog.textContent='перевіряю коментарі: '+i+' із '+orders.length;
+          prints(o.id).then(function(ps){
+            if(ps.length>=2){
+              var uniq={}, alive={};
+              ps.forEach(function(p){ uniq[p.ttn]=1; if(!p.dead) alive[p.ttn]=1; });
+              var rec={ id:o.id, date:String(o.orderTime||'').slice(0,10), prints:ps };
+              if(Object.keys(uniq).length<2) same.push(rec);            // той самий номер двічі
+              else if(Object.keys(alive).length>=2) diff.push(rec);     // дві ЖИВІ ТТН — зайва посилка
+              else fixed.push(rec);                                     // стару ТТН видалили
+            }
+            setTimeout(step, 60);     // не гатимо сервер
+          });
+        }
+        step();
+      })
+      .catch(function(e){
+        prog.textContent='✗ не вдалося: '+String((e&&e.message)||e).slice(0,60);
+        btn.disabled=false; busy=false;
+      });
+  }
+
+  function open(){
+    var old=document.getElementById('lk-td-box');
+    if(old){ stop=true; old.remove(); return; }
+    var b=box();
+
+    // свіжий результат підставляє СВІЙ період — інакше кеш ніколи не спрацював би
+    // (панель відкривалась із типовими датами, а ключ кеша — саме період)
+    var cached=null;
+    try{
+      var c0=JSON.parse(localStorage.getItem(CKEY)||'null');
+      if(c0 && Date.now()-(c0.ts||0)<TTL && c0.from && c0.to) cached=c0;
+    }catch(e){}
+
+    var line=document.createElement('div'); line.className='row2'; line.style.borderTop='none';
+    line.appendChild(document.createTextNode('Період: '));
+    var f=document.createElement('input'); f.type='date'; f.value=cached?cached.from:daysAgo(7); line.appendChild(f);
+    line.appendChild(document.createTextNode(' — '));
+    var t=document.createElement('input'); t.type='date'; t.value=cached?cached.to:iso(new Date()); line.appendChild(t);
+    var go=document.createElement('button'); go.type='button'; go.className='lk-td-btn'; go.style.marginLeft='0';
+    go.textContent='Перевірити';
+    line.appendChild(go);
+    var sp=document.createElement('button'); sp.type='button'; sp.className='lk-td-btn';
+    sp.style.background='#9e9e9e'; sp.textContent='Стоп';
+    sp.addEventListener('click',function(){ stop=true; });
+    line.appendChild(sp);
+    b.appendChild(line);
+
+    var hint=document.createElement('div'); hint.className='note';
+    hint.textContent='СРМ не вміє шукати по коментарях, тож кожну заявку з ТТН доводиться '
+      +'питати окремо (~0,6 с). Тиждень — це кілька хвилин; «Стоп» покаже знайдене.';
+    b.appendChild(hint);
+
+    go.addEventListener('click',function(){ run(go, b, f.value, t.value); });
+
+    if(cached){
+      render(b, cached);
+      var cn=document.createElement('div'); cn.className='note';
+      cn.textContent='Показано збережений результат (' + new Date(cached.ts).toLocaleTimeString('uk-UA')
+        + '). Змініть період або натисніть «Перевірити», щоб порахувати заново.';
+      b.appendChild(cn);
+    }
+  }
+
+  function sync(){
+    var btn=document.querySelector('.lk-td-btn-main');
+    if(!onPage()){
+      var bar0=document.querySelector('.lk-td-bar'); if(bar0) bar0.remove();
+      var b0=document.getElementById('lk-td-box'); if(b0){ stop=true; b0.remove(); }
+      return;
+    }
+    if(btn) return;
+    var host=document.querySelector('.white-main-container')||document.querySelector('.panel-body');
+    if(!host) return;
+    var bar=document.createElement('div'); bar.className='lk-td-bar';
+    bar.style.cssText='margin:8px 0 4px';
+    btn=document.createElement('button'); btn.type='button';
+    btn.className='lk-td-btn lk-td-btn-main'; btn.style.marginLeft='0';
+    btn.textContent='🖨 Подвійні ТТН';
+    btn.title='Знайти заявки, де ТТН друкували двічі (різні номери або передрук)';
+    btn.addEventListener('click',function(e){ e.preventDefault(); e.stopPropagation(); open(); });
+    bar.appendChild(btn);
+    host.insertBefore(bar, host.firstChild);
+  }
+
+  var tm=null;
+  function soon(){ clearTimeout(tm); tm=setTimeout(sync,300); }
+  soon();
+  window.addEventListener('lkdom', soon);
+  window.addEventListener('hashchange', soon);
+})();
+}catch(e){ try{ console.warn("[SD] модуль «lkTtnDouble» не запустився:", e); }catch(_){} }
+/* ▲▲▲ МОДУЛЬ-END • lkTtnDouble ▲▲▲ */
 
 /* ▼▼▼ МОДУЛЬ-START • lkNpDescr — 📋 шаблони опису у формі ТТН Нової пошти ▼▼▼ */
 /* ===== У формі «Сформувати ТТН» поле «Опис» СРМ заповнює переліком усіх товарів —
