@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.30
+// @version      3.31
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -7226,10 +7226,15 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     +'#lk-tier-res{display:inline-block;margin-left:10px;vertical-align:middle;font-weight:700}'
     +'#lk-tier-res.ok{color:#1B5E20}'
     +'#lk-tier-res.er{color:#B71C1C}'
-    +'#lk-tier-hint{display:flex;align-items:center;flex-wrap:wrap;gap:6px 10px;margin:6px 10px 6px 10px;'
-    +'  padding:6px 10px;background:#fff6e0;border:1px solid #e6c26a;border-radius:7px}'
-    +'#lk-tier-hint .t{font:700 12.5px/1.4 Arial,sans-serif;color:#7d5a00;white-space:nowrap}'
-    +'#lk-tier-hint .lk-tier-opt{margin-left:0}'
+    // Плашка живе у ВУЗЬКІЙ колонці клієнта (~308 px): flex-wrap розкидав чотири
+    // кнопки драбинкою на три рядки. Тому заголовок окремим рядком, а кнопки — сіткою 2×2.
+    +'#lk-tier-hint{display:block;margin:6px 10px;padding:6px 8px;'
+    +'  background:#fff6e0;border:1px solid #e6c26a;border-radius:7px}'
+    +'#lk-tier-hint .t{display:block;margin-bottom:5px;font:700 12.5px/1.3 Arial,sans-serif;color:#7d5a00}'
+    +'#lk-tier-hint .btns{display:grid;grid-template-columns:1fr 1fr;gap:4px}'
+    +'#lk-tier-hint .btns.one{grid-template-columns:1fr}'
+    +'#lk-tier-hint .lk-tier-opt{margin:0;width:100%;padding:4px 6px;'
+    +'  font:700 12px/1.3 Arial,sans-serif;border-radius:5px;white-space:nowrap}'
     +'#lk-tier-prev{margin:6px 0 0;padding:7px 10px;border-left:3px solid #00796B;background:#e9f5f3;'
     +'  border-radius:5px;max-width:760px}'
     +'#lk-tier-prev table{border-collapse:collapse;font:12.5px/1.45 Arial,sans-serif}'
@@ -7420,18 +7425,22 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     }
     var hint=document.createElement('div'); hint.id='lk-tier-hint'; hint.setAttribute('data-sig',sig);
     var lbl=document.createElement('span'); lbl.className='t';
+    var btns=document.createElement('div'); btns.className='btns';
     if(re){
       lbl.textContent='👤 ОПТ-клієнт: '+opt;
       hint.appendChild(lbl);
-      hint.appendChild(tierBtn('💱 поставити ці ціни', re, opt, 'go'));
+      btns.className='btns one';
+      btns.appendChild(tierBtn('💱 поставити ці ціни', re, opt, 'go'));
     }else{
       lbl.textContent='💱 Ціни за типом:';
       hint.appendChild(lbl);
-      hint.appendChild(tierBtn('Великий опт', /велик/i, 'Великий опт'));
-      hint.appendChild(tierBtn('середній опт', /середн/i, 'середній опт'));
-      hint.appendChild(tierBtn('майстри', /майст/i, 'майстри'));
-      hint.appendChild(tierBtn('дрібний опт', 'small', 'дрібний опт'));
+      // підписи короткі: слово «опт» уже є в заголовку, повна назва — у title кнопки
+      btns.appendChild(tierBtn('Великий', /велик/i, 'Великий опт'));
+      btns.appendChild(tierBtn('Середній', /середн/i, 'середній опт'));
+      btns.appendChild(tierBtn('Майстри', /майст/i, 'майстри'));
+      btns.appendChild(tierBtn('Дрібний', 'small', 'дрібний опт'));
     }
+    hint.appendChild(btns);
     anchorRow.insertAdjacentElement('afterend', hint);
   }
 
