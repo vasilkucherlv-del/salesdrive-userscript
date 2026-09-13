@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.31
+// @version      3.32
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -343,6 +343,24 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       } catch (e) { reject(e); }
     });
   }
+
+  /* ---- одна адреса — один запит ----
+     Карту комплектів (143 КБ) тягнули ТРИ модулі одночасно на кожне відкриття
+     сторінки: у кожного свій TTL, тож кеш одного не спиняв інших. Тепер усі
+     ходять сюди: поки запит у польоті — всі чекають на нього, а свіжу відповідь
+     хвилину віддаємо з памʼяті. Кеші самих модулів лишаються як були. ---- */
+  var _sdOnce = {};
+  function sdFetchOnce(url, ttlMs) {
+    var now = Date.now(), rec = _sdOnce[url];
+    if (rec && rec.p) return rec.p;                                   // вже качається
+    if (rec && rec.txt != null && now - rec.t < (ttlMs || 60000)) return Promise.resolve(rec.txt);
+    var p = gmFetch(url);
+    _sdOnce[url] = { p: p, t: now };
+    p.then(function (txt) { _sdOnce[url] = { t: Date.now(), txt: txt }; },
+           function () { delete _sdOnce[url]; });
+    return p;
+  }
+  try { window.sdFetchOnce = sdFetchOnce; } catch (e) {}
 
   // Беремо відображене значення (f) — там коди з нулями; інакше сире (v).
   function cellText(c) {
@@ -3902,15 +3920,13 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 
   function fetchKits() {
     const url = APP_URL.replace(/\/+$/, '') + '/api/kits?token=' + encodeURIComponent(TOKEN);
+    // через спільний sdFetchOnce: ту саму карту одночасно просять кілька модулів
     return new Promise((resolve, reject) => {
       const done = t => { try { const d = JSON.parse(t); d.ok ? resolve(d.kits || {}) : reject(new Error(d.error || 'no')); } catch (e) { reject(e); } };
-      if (typeof GM_xmlhttpRequest !== 'undefined') {
-        GM_xmlhttpRequest({
-          method: 'GET', url,
-          onload: r => (r.status >= 200 && r.status < 300) ? done(r.responseText) : reject(new Error('HTTP ' + r.status)),
-          onerror: () => reject(new Error('net'))
-        });
-      } else { fetch(url).then(r => r.text()).then(done).catch(reject); }
+      const get = (typeof window.sdFetchOnce === 'function')
+        ? window.sdFetchOnce(url)
+        : fetch(url).then(r => r.text());
+      get.then(done).catch(reject);
     });
   }
 
@@ -4892,15 +4908,13 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 
   function fetchKits() {
     const url = APP_URL.replace(/\/+$/, '') + '/api/kits?token=' + encodeURIComponent(TOKEN);
+    // через спільний sdFetchOnce: ту саму карту одночасно просять кілька модулів
     return new Promise((resolve, reject) => {
       const done = t => { try { const d = JSON.parse(t); d.ok ? resolve(d.kits || {}) : reject(new Error(d.error || 'no')); } catch (e) { reject(e); } };
-      if (typeof GM_xmlhttpRequest !== 'undefined') {
-        GM_xmlhttpRequest({
-          method: 'GET', url,
-          onload: r => (r.status >= 200 && r.status < 300) ? done(r.responseText) : reject(new Error('HTTP ' + r.status)),
-          onerror: () => reject(new Error('net'))
-        });
-      } else { fetch(url).then(r => r.text()).then(done).catch(reject); }
+      const get = (typeof window.sdFetchOnce === 'function')
+        ? window.sdFetchOnce(url)
+        : fetch(url).then(r => r.text());
+      get.then(done).catch(reject);
     });
   }
 
@@ -6701,13 +6715,13 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   var KITS_TTL=6*60*60*1000;
   function fetchKits(){
     var url=KITS_APP+'/api/kits?token='+encodeURIComponent(KITS_TOKEN);
+    // через спільний sdFetchOnce: ту саму карту одночасно просять кілька модулів
     return new Promise(function(resolve,reject){
       function done(t){ try{ var d=JSON.parse(t); d.ok?resolve(d.kits||{}):reject(new Error(d.error||'no')); }catch(e){ reject(e); } }
-      if(typeof GM_xmlhttpRequest!=='undefined'){
-        GM_xmlhttpRequest({ method:'GET', url:url,
-          onload:function(r){ (r.status>=200&&r.status<300)?done(r.responseText):reject(new Error('HTTP '+r.status)); },
-          onerror:function(){ reject(new Error('net')); } });
-      } else { fetch(url).then(function(r){ return r.text(); }).then(done).catch(reject); }
+      var get=(typeof window.sdFetchOnce==='function')
+        ? window.sdFetchOnce(url)
+        : fetch(url).then(function(r){ return r.text(); });
+      get.then(done).catch(reject);
     });
   }
   function kitsData(){
@@ -8829,10 +8843,11 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
         resolve(comp2kits||{});
       }
       try{
-        if(typeof GM_xmlhttpRequest!=='undefined'){
-          GM_xmlhttpRequest({ method:'GET', url:KITS_URL,
-            onload:function(r){ done(r.responseText); }, onerror:function(){ resolve(comp2kits||{}); } });
-        } else { fetch(KITS_URL).then(function(r){return r.text();}).then(done).catch(function(){ resolve(comp2kits||{}); }); }
+        // спільний sdFetchOnce — карту просять кілька модулів одночасно
+        var get=(typeof window.sdFetchOnce==='function')
+          ? window.sdFetchOnce(KITS_URL)
+          : fetch(KITS_URL).then(function(r){ return r.text(); });
+        get.then(done).catch(function(){ resolve(comp2kits||{}); });
       }catch(e){ resolve(comp2kits||{}); }
     });
   }
@@ -9197,11 +9212,11 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     return new Promise(function(resolve,reject){
       function done(t){ try{ var d=JSON.parse(t); d.ok&&d.kits?resolve(d.kits):reject(new Error('no')); }catch(e){ reject(e); } }
       try{
-        if(typeof GM_xmlhttpRequest!=='undefined'){
-          GM_xmlhttpRequest({ method:'GET', url:KITS_URL,
-            onload:function(r){ (r.status>=200&&r.status<300)?done(r.responseText):reject(new Error('HTTP '+r.status)); },
-            onerror:function(){ reject(new Error('net')); } });
-        } else { fetch(KITS_URL).then(function(r){return r.text();}).then(done).catch(reject); }
+        // спільний sdFetchOnce — карту просять кілька модулів одночасно
+        var get=(typeof window.sdFetchOnce==='function')
+          ? window.sdFetchOnce(KITS_URL)
+          : fetch(KITS_URL).then(function(r){ return r.text(); });
+        get.then(done).catch(reject);
       }catch(e){ reject(e); }
     });
   }
@@ -10317,12 +10332,13 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   var kits=null;
   function fetchKits(){
     var url=APP_URL.replace(/\/+$/,'')+'/api/kits?token='+encodeURIComponent(TOKEN);
+    // через спільний sdFetchOnce: ту саму карту одночасно просять кілька модулів
     return new Promise(function(res,rej){
       var done=function(t){ try{ var d=JSON.parse(t); d.ok?res(d.kits||{}):rej(new Error('no')); }catch(e){ rej(e); } };
-      if(typeof GM_xmlhttpRequest!=='undefined'){ GM_xmlhttpRequest({method:'GET',url:url,
-        onload:function(r){ (r.status>=200&&r.status<300)?done(r.responseText):rej(new Error('HTTP '+r.status)); },
-        onerror:function(){ rej(new Error('net')); }}); }
-      else { fetch(url).then(function(r){return r.text();}).then(done).catch(rej); }
+      var get=(typeof window.sdFetchOnce==='function')
+        ? window.sdFetchOnce(url)
+        : fetch(url).then(function(r){ return r.text(); });
+      get.then(done).catch(rej);
     });
   }
   function loadKits(){
