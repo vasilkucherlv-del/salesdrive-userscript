@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.28
+// @version      3.29
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -8131,10 +8131,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
      Раніше смуга вставлялась усередину .white-main-container — а це контейнер широкої
      прокрутної таблиці, тож вона розтягувалась на 4228 px і зсувала розкладку. */
   var css=''
-    +'#lk-td-btn{position:fixed;left:18px;bottom:204px;z-index:99998;width:52px;height:52px;'
-    +'  border-radius:50%;background:#455A64;color:#fff;border:none;font-size:22px;cursor:pointer;'
-    +'  box-shadow:0 3px 10px rgba(0,0,0,.3)}'
-    +'#lk-td-btn:hover{background:#37474F}'
+    +'#lk-td-btn{margin-left:6px}'
     +'#lk-td-ov{position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.4);'
     +'  display:flex;align-items:flex-start;justify-content:center}'
     +'#lk-td-box{background:#fff;width:720px;max-width:96vw;max-height:92vh;margin-top:3vh;'
@@ -8463,11 +8460,18 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     var btn=document.getElementById('lk-td-btn');
     if(!onPage()){ if(btn) btn.remove(); closeOv(); return; }
     if(btn) return;
-    btn=document.createElement('button'); btn.type='button'; btn.id='lk-td-btn';
-    btn.textContent='🖨';
+    // місце — смуга з нашими кнопками нагорі (поруч із «📋 Усі заявки»), як просив Василь
+    var prev=document.getElementById('lk-all-orders-btn')
+          || document.getElementById('lk-pickup-list-btn')
+          || document.getElementById('lk-pickup-btn');
+    if(!prev || !prev.parentNode) return;          // смуга ще не намальована — спробуємо на наступний пульс
+    btn=document.createElement('a'); btn.id='lk-td-btn';
+    btn.className='btn btn-default cursor-pointer';
+    btn.href='javascript:;';
+    btn.textContent='🖨 Подвійні ТТН';
     btn.title='Знайти заявки, де ТТН друкували двічі (різні номери або передрук)';
     btn.addEventListener('click',function(e){ e.preventDefault(); e.stopPropagation(); open(); });
-    document.body.appendChild(btn);
+    prev.parentNode.insertBefore(btn, prev.nextSibling);
   }
 
   var tm=null;
