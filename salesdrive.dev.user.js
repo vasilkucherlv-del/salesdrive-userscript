@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.27
+// @version      3.28
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -9461,7 +9461,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     if(document.getElementById('lk-prg-css')) return;
     var s=document.createElement('style'); s.id='lk-prg-css';
     s.textContent=''
-    +'.lk-prg-badge{display:inline-block;margin-left:6px;padding:1px 6px;border-radius:9px;'
+    +'.lk-prg-badge{display:block;width:fit-content;margin:3px 0 0;padding:1px 6px;border-radius:9px;white-space:nowrap;'
       +'background:#c0392b;color:#fff;font:700 10px/1.5 sans-serif;vertical-align:middle;white-space:nowrap}'
     +'#lk-prg-bar{position:sticky;top:0;z-index:99997;margin:0 0 6px;padding:8px 12px;border-radius:8px;'
       +'background:#fdecea;border:1px solid #c0392b;color:#7b241c;font:13px/1.4 -apple-system,Segoe UI,Roboto,sans-serif}'
@@ -9508,12 +9508,18 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       var has=!!tr.querySelector('.lk-prg-badge');
       if(want===has) return;                       // нічого не змінилось — не чіпаємо DOM
       if(!want){ var b=tr.querySelector('.lk-prg-badge'); if(b) b.remove(); return; }
-      var a=tr.querySelector('a[href*="/order/update/"]'); if(!a) return;
+      // Куди ставити: НЕ до олівця в першій комірці — вона 33 px завширшки,
+      // і бейдж вивалювався на колонку дати (Василь: «криво вийшло»).
+      // Колонка статусу — 124 px, там уже є така сама кольорова плашка.
+      var host=tr.querySelector('[attr-field-name="statusId"]')
+            || tr.querySelector('[attr-field-name="id"]');
       var sp=document.createElement('span');
       sp.className='lk-prg-badge'; sp.textContent='🖨 друковано';
       var rec=localRec(nfo.ttn);
       sp.title='Накладна вже позначена в СРМ як роздрукована'
         +(rec?('\nна цьому ПК: '+rec.n+'× , востаннє '+fmtDate(rec.t)):'');
+      if(host){ host.appendChild(sp); return; }
+      var a=tr.querySelector('a[href*="/order/update/"]'); if(!a) return;
       a.insertAdjacentElement('afterend', sp);
     });
   }
