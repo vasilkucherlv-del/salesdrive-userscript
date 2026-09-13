@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.32
+// @version      3.33
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -7632,11 +7632,23 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       var code=m[1];
       var known=hrefGet(code);
       if(known===undefined) loadHref(code);    // ще не знаємо адреси — спитаємо і перемалюємо
-      var nx=sp.nextElementSibling, btn=null;
-      if(nx && nx.classList && nx.classList.contains('lk-skucopy')){
-        btn=nx;
-        var lnk=nx.nextElementSibling;
-        if(lnk && lnk.classList && lnk.classList.contains('lk-skulink')){
+      // ШУКАЄМО ПО ВСІЙ КОМІРЦІ, а не «одразу за кодом»: модуль аналогів вставляє свій
+      // значок МІЖ кодом і нашою кнопкою, і перевірка по сусіду бачила чужий елемент,
+      // вважала, що кнопки немає, і додавала другу (Василь: «іноді подвоюються»).
+      var host=sp.parentElement||sp;
+      var have=[].slice.call(host.querySelectorAll('.lk-skucopy'));
+      while(have.length>1){                    // прибрати вже наплоджені дублікати
+        var extra=have.pop();
+        var el2=extra.nextElementSibling;
+        if(el2 && el2.classList && el2.classList.contains('lk-skulink')) el2.remove();
+        extra.remove();
+      }
+      var links=[].slice.call(host.querySelectorAll('.lk-skulink'));
+      while(links.length>1) links.pop().remove();          // так само для посилань
+      var btn=have[0]||null;
+      if(btn){
+        var lnk=links[0]||null;
+        if(lnk){
           // Angular міг підставити в рядок інший товар — адресу міняємо лише коли справді інша
           var want=known || (SITE + encodeURIComponent(code));
           if(known===undefined) return;        // адреси ще не знаємо — нічого не чіпаємо
