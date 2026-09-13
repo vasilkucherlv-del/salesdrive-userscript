@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.34
+// @version      3.35
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -88,7 +88,14 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     if(document.hidden) return;   // фонова вкладка: не будимо 36 модулів даремно
     try{ window.dispatchEvent(new Event('lkdom')); }catch(e){}
   }
-  function soon(){ dirty=true; clearTimeout(t); t=setTimeout(fire,250); }
+  var firstAfterNav = true;
+  function soon(){
+    dirty=true;
+    // перша зміна DOM після входу чи переходу — пульс одразу, без 250 мс
+    if(firstAfterNav){ firstAfterNav=false; fire(); return; }
+    clearTimeout(t); t=setTimeout(fire,250);
+  }
+  window.addEventListener('hashchange', function(){ firstAfterNav=true; });
   function arm(){
     try{ new MutationObserver(soon).observe(document.body,{childList:true,subtree:true}); }
     catch(e){ setTimeout(arm,500); return; }
@@ -422,6 +429,23 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
         || /#\/product\//.test(h);
   }
   try { window.sdItemRowsPage = sdItemRowsPage; } catch (e) {}
+
+  /* ---- спільний дебаунс ----
+     Раніше затримки складались: пульс чекав 250 мс після зміни DOM, а далі
+     КОЖЕН модуль чекав ще свої 200-400 мс — значки зʼявлялись за пів секунди,
+     навіть коли всі дані вже лежали в кеші. Тепер перший показ на новій
+     сторінці — негайний, і додатково лишається звичайна відкладена перевірка
+     (Angular міг ще не домалювати рядки, другий прохід їх підхопить).
+     Захист від миготіння в модулях уже є — підписи стану й звірка тексту
+     перед записом, — саме тому подвійний прохід безпечний. */
+  var _soonT = {}, _soonH = {};
+  function sdSoon(key, fn, ms) {
+    var h = location.hash || '';
+    if (_soonH[key] !== h) { _soonH[key] = h; try { fn(); } catch (e) {} }
+    clearTimeout(_soonT[key]);
+    _soonT[key] = setTimeout(fn, ms);
+  }
+  try { window.sdSoon = sdSoon; } catch (e) {}
   try {
     window.sdCardAny = sdCardAny;
     window.sdCardRoot = sdCardRoot;
@@ -4147,7 +4171,10 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   }
 
   let t = null;
-  function scanSoon() { clearTimeout(t); t = setTimeout(scan, 250); }
+  function scanSoon() {
+    if (typeof window.sdSoon === 'function') return window.sdSoon('nabory', scan, 250);
+    clearTimeout(t); t = setTimeout(scan, 250);
+  }
 
   (async function init() {
     await ensureData();
@@ -4616,7 +4643,11 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     });
     updateTotals();
   }
-  var t=null; function scanSoon(){ clearTimeout(t); t=setTimeout(scan,300); }
+  var t=null;
+  function scanSoon(){
+    if(typeof window.sdSoon==='function') return window.sdSoon('complectPrice', scan, 300);
+    clearTimeout(t); t=setTimeout(scan,300);
+  }
   window.addEventListener('lkdom', scanSoon);
   scan();
 })();
@@ -4944,7 +4975,10 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   }
 
   var t = null;
-  function scanSoon() { clearTimeout(t); t = setTimeout(scan, 250); }
+  function scanSoon() {
+    if (typeof window.sdSoon === 'function') return window.sdSoon('analogInline', scan, 250);
+    clearTimeout(t); t = setTimeout(scan, 250);
+  }
 
   scan();
   window.addEventListener('lkdom', scanSoon);
@@ -5174,7 +5208,10 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   }
 
   let t = null;
-  function scanSoon() { clearTimeout(t); t = setTimeout(process, 200); }
+  function scanSoon() {
+    if (typeof window.sdSoon === 'function') return window.sdSoon('modalKits', process, 200);
+    clearTimeout(t); t = setTimeout(process, 200);
+  }
 
   (async function init() {
     await ensureData();
@@ -5421,7 +5458,10 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   }
 
   var t = null;
-  function soon(){ clearTimeout(t); t = setTimeout(process, 200); }
+  function soon(){
+    if(typeof window.sdSoon==='function') return window.sdSoon('modalAnalogs', process, 200);
+    clearTimeout(t); t = setTimeout(process, 200);
+  }
   PAGE.addEventListener('sdAnalogReady', soon);
   window.addEventListener('lkdom', soon);
   window.addEventListener('hashchange', soon);   // миттєва реакція на SPA-перехід
@@ -6420,7 +6460,10 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   }
 
   var t=null;
-  function syncSoon(){ clearTimeout(t); t=setTimeout(sync,300); }
+  function syncSoon(){
+    if(typeof window.sdSoon==='function') return window.sdSoon('arrivalCount', sync, 300);
+    clearTimeout(t); t=setTimeout(sync,300);
+  }
   sync();
   window.addEventListener('lkdom', syncSoon);
   window.addEventListener('hashchange', syncSoon);
@@ -7573,7 +7616,11 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   }
 
   var t=null;
-  function soon(){ clearTimeout(t); t=setTimeout(function(){ mount(); hintSync(); },300); }
+  function soon(){
+    var run=function(){ mount(); hintSync(); };
+    if(typeof window.sdSoon==='function') return window.sdSoon('orderTier', run, 300);
+    clearTimeout(t); t=setTimeout(run,300);
+  }
   soon();
   window.addEventListener('lkdom', soon);
   window.addEventListener('hashchange', function(){ clearPrev(); soon(); });
@@ -7780,7 +7827,10 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   }
 
   var t=null;
-  function soon(){ clearTimeout(t); t=setTimeout(scan,300); }
+  function soon(){
+    if(typeof window.sdSoon==='function') return window.sdSoon('skuCopy', scan, 300);
+    clearTimeout(t); t=setTimeout(scan,300);
+  }
   soon();
   window.addEventListener('lkdom', soon);
   window.addEventListener('hashchange', soon);
@@ -9286,7 +9336,10 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   }
 
   var t=null;
-  function soon(){ clearTimeout(t); t=setTimeout(process, 300); }
+  function soon(){
+    if(typeof window.sdSoon==='function') return window.sdSoon('cardReserve', process, 300);
+    clearTimeout(t); t=setTimeout(process, 300);
+  }
   window.addEventListener('lkdom', soon);
   window.addEventListener('hashchange', soon);
   soon();
@@ -9452,7 +9505,11 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   }
 
   var t=null;
-  function scanSoon(){ clearTimeout(t); t=setTimeout(function(){ ensureData(); scan(); },300); }
+  function scanSoon(){
+    var run=function(){ ensureData(); scan(); };
+    if(typeof window.sdSoon==='function') return window.sdSoon('catalogKits', run, 300);
+    clearTimeout(t); t=setTimeout(run,300);
+  }
   ensureData(); scanSoon();
   window.addEventListener('lkdom', scanSoon);
   window.addEventListener('hashchange', scanSoon);
@@ -9766,7 +9823,10 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     loadMap().then(function(){ markRows(); renderBar(); });
   }
   var t=null;
-  function syncSoon(){ clearTimeout(t); t=setTimeout(sync,300); }
+  function syncSoon(){
+    if(typeof window.sdSoon==='function') return window.sdSoon('printedList', sync, 300);
+    clearTimeout(t); t=setTimeout(sync,300);
+  }
   document.addEventListener('change', function(e){
     if(onListPage() && e.target && e.target.type==='checkbox') renderBar();
   }, true);
