@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.26
+// @version      3.27
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -46,6 +46,7 @@
      • lkRozCommission — ⚖ комісія Rozetka для товарів, дописаних менеджером
      • lkCatalogKits   — позначка «входить у набори» в каталозі Товари/Послуги + на сторінці товару
      • lkTtnPrintGuard — 🖨 попередження про повторний друк ТТН Укрпошти
+     • lkPrintedGuardList — 🖨 вже надруковані накладні у списку заявок (бейдж, панель, підтвердження)
      • lkCashRegister  — 💰 Каса самовивозу
      • lkPickList      — 📋 зведений лист комплектації (сума товарів по заявках статусу)
      • lkUkrPromList   — 📮 лист «Пром-оплата + Укрпошта» (відправник/отримувач/індекс/ТТН, друк)
@@ -9368,6 +9369,230 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 })();
 }catch(e){ try{ console.warn("[SD] модуль «lkTtnPrintGuard» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkTtnPrintGuard ▲▲▲ */
+
+/* ▼▼▼ МОДУЛЬ-START • lkPrintedGuardList — 🖨 вже надруковані накладні у списку заявок ▼▼▼ */
+/* ===== Пакувальник на #/order/index ставить галочки і додає заявки до реєстру.
+   Якщо серед вибраних є накладні, які вже друкували (серверний isPrinted —
+   спільний для всіх менеджерів), показуємо це ДО дії: бейдж у рядку, липка
+   панель зі списком при виборі і таблиця-підтвердження перед «Додати до реєстру».
+   Дані беремо внутрішнім запитом СРМ (sdApi.orders) — годинна квота API не витрачається. ===== */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
+(function lkPrintedGuardList(){
+  'use strict';
+  var CKEY='lk_prguard_v1', CTTL=10*60*1000;   // кеш мапи друку, 10 хв
+  var PKEY='lk_ttnprint_v1';                   // лічильник друків на цьому ПК (спільний із lkTtnPrintGuard)
+  var map=null, mapSig='', loading=false;
+
+  function onListPage(){ return /#\/order\/index/.test(location.hash||''); }
+  function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g,function(c){
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
+
+  // Фільтри беремо з самої адреси — щоб тягнути рівно той список, що бачить пакувальник
+  function filterQs(){
+    var dec=decodeURIComponent(location.hash||''), out=[], m;
+    var re=/filter\[statusId\]\[\]=([^&]+)/g;
+    while((m=re.exec(dec))) if(/^[\w_]+$/.test(m[1])) out.push('filter[statusId][]='+m[1]);
+    if(!out.length) out.push('filter[statusId][]=__NOTDELETED__');
+    return out.join('&');
+  }
+  function sigNow(){ return filterQs(); }
+
+  function localRec(ttn){
+    try{ var m=JSON.parse(localStorage.getItem(PKEY))||{}; return ttn?(m[ttn]||null):null; }
+    catch(e){ return null; }
+  }
+  function fmtDate(t){
+    try{ var d=new Date(t), p=function(n){ return (n<10?'0':'')+n; };
+      return p(d.getDate())+'.'+p(d.getMonth()+1)+' '+p(d.getHours())+':'+p(d.getMinutes()); }
+    catch(e){ return ''; }
+  }
+
+  function cacheGet(sig){
+    try{
+      var c=JSON.parse(localStorage.getItem(CKEY)||'null');
+      if(c && c.sig===sig && Date.now()-c.ts<CTTL) return c.map;
+    }catch(e){}
+    return null;
+  }
+  function cacheSet(sig,m){
+    try{ localStorage.setItem(CKEY, JSON.stringify({sig:sig, ts:Date.now(), map:m})); }catch(e){}
+  }
+
+  // id -> {printed, ttn, provider}. Внутрішній ендпоінт СРМ: cookie, без ключа, без ліміту.
+  function loadMap(){
+    var sig=sigNow();
+    if(map && mapSig===sig) return Promise.resolve(map);
+    var c=cacheGet(sig);
+    if(c){ map=c; mapSig=sig; return Promise.resolve(map); }
+    if(loading || !window.sdApi || !window.sdApi.orders) return Promise.resolve(null);
+    loading=true;
+    var qs=filterQs(), acc={}, page=1, pages=1, guard=0;
+    function next(){
+      if(guard++>=25 || page>pages) return Promise.resolve(acc);
+      return window.sdApi.orders(qs, page).then(function(res){
+        (res.rows||[]).forEach(function(o){
+          var d=(o.ord_delivery_data||[])[0]||{};
+          acc[String(o.id)]={ printed: Number(d.isPrinted)===1,
+                              ttn: String(d.trackingNumber||''),
+                              provider: String(d.provider||'') };
+        });
+        pages=res.pageCount||1; page++;
+        if(page>pages) return acc;
+        return new Promise(function(r){ setTimeout(r,200); }).then(next);
+      }).catch(function(){ return acc; });
+    }
+    return next().then(function(m){
+      loading=false; map=m; mapSig=sig; cacheSet(sig,m);
+      return map;
+    });
+  }
+
+  function ensureStyles(){
+    if(document.getElementById('lk-prg-css')) return;
+    var s=document.createElement('style'); s.id='lk-prg-css';
+    s.textContent=''
+    +'.lk-prg-badge{display:inline-block;margin-left:6px;padding:1px 6px;border-radius:9px;'
+      +'background:#c0392b;color:#fff;font:700 10px/1.5 sans-serif;vertical-align:middle;white-space:nowrap}'
+    +'#lk-prg-bar{position:sticky;top:0;z-index:99997;margin:0 0 6px;padding:8px 12px;border-radius:8px;'
+      +'background:#fdecea;border:1px solid #c0392b;color:#7b241c;font:13px/1.4 -apple-system,Segoe UI,Roboto,sans-serif}'
+    +'#lk-prg-bar b{color:#c0392b}'
+    +'#lk-prg-bar table{width:100%;border-collapse:collapse;margin-top:6px;font-size:12px}'
+    +'#lk-prg-bar th{text-align:left;font-weight:600;padding:2px 8px 4px 0;color:#8a5a12}'
+    +'#lk-prg-bar td{padding:2px 8px 2px 0;font-family:ui-monospace,Menlo,Consolas,monospace}'
+    +'#lk-prg-ov{position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.45);display:flex;'
+      +'align-items:flex-start;justify-content:center}'
+    +'#lk-prg-box{background:#fff;width:760px;max-width:96vw;max-height:88vh;margin-top:6vh;overflow:auto;'
+      +'border-radius:12px;padding:16px 18px;font:13px/1.45 -apple-system,Segoe UI,Roboto,sans-serif;'
+      +'box-shadow:0 8px 30px rgba(0,0,0,.35)}'
+    +'#lk-prg-box h3{margin:0 0 4px;font-size:16px;color:#c0392b}'
+    +'#lk-prg-box table{width:100%;border-collapse:collapse;margin:10px 0;font-size:12px}'
+    +'#lk-prg-box th{text-align:left;border-bottom:1px solid #ddd;padding:4px 8px 4px 0;color:#666;font-weight:600}'
+    +'#lk-prg-box td{padding:4px 8px 4px 0;border-bottom:1px solid #f0f0f0;font-family:ui-monospace,Menlo,Consolas,monospace}'
+    +'#lk-prg-box .btns{display:flex;gap:10px;justify-content:flex-end;margin-top:12px}'
+    +'#lk-prg-box button{padding:8px 16px;border-radius:8px;border:none;font-size:13px;cursor:pointer}'
+    +'#lk-prg-box .go{background:#c0392b;color:#fff}'
+    +'#lk-prg-box .no{background:#eee;color:#333}';
+    (document.head||document.documentElement).appendChild(s);
+  }
+
+  // Номер заявки з рядка — через посилання на картку (не залежить від класів СРМ)
+  function rowId(tr){
+    var a=tr.querySelector('a[href*="/order/update/"]');
+    if(!a) return '';
+    var m=(a.getAttribute('href')||'').match(/\/order\/update\/(\d+)/);
+    return m?m[1]:'';
+  }
+  function rows(){
+    return Array.prototype.slice.call(document.querySelectorAll('tr'))
+      .filter(function(tr){ return !!tr.querySelector('a[href*="/order/update/"]'); });
+  }
+  function info(id){ return (map&&map[id])||null; }
+
+  // ── 1. бейдж «друковано» в рядку ──────────────────────────────────────────
+  function markRows(){
+    if(!map) return;
+    rows().forEach(function(tr){
+      var id=rowId(tr); if(!id) return;
+      var nfo=info(id);
+      var want=!!(nfo&&nfo.printed);
+      var has=!!tr.querySelector('.lk-prg-badge');
+      if(want===has) return;                       // нічого не змінилось — не чіпаємо DOM
+      if(!want){ var b=tr.querySelector('.lk-prg-badge'); if(b) b.remove(); return; }
+      var a=tr.querySelector('a[href*="/order/update/"]'); if(!a) return;
+      var sp=document.createElement('span');
+      sp.className='lk-prg-badge'; sp.textContent='🖨 друковано';
+      var rec=localRec(nfo.ttn);
+      sp.title='Накладна вже позначена в СРМ як роздрукована'
+        +(rec?('\nна цьому ПК: '+rec.n+'× , востаннє '+fmtDate(rec.t)):'');
+      a.insertAdjacentElement('afterend', sp);
+    });
+  }
+
+  // ── 2. липка панель зі списком вибраних, що вже друковані ─────────────────
+  function pickedPrinted(){
+    var out=[];
+    rows().forEach(function(tr){
+      var cb=tr.querySelector('input[type=checkbox]');
+      if(!cb||!cb.checked) return;
+      var id=rowId(tr); if(!id) return;
+      var nfo=info(id);
+      if(nfo&&nfo.printed) out.push({id:id, ttn:nfo.ttn, provider:nfo.provider, rec:localRec(nfo.ttn)});
+    });
+    return out;
+  }
+  function tableHtml(list){
+    var h='<table><tr><th>Заявка</th><th>ТТН</th><th>Перевізник</th><th>На цьому ПК</th></tr>';
+    list.forEach(function(r){
+      h+='<tr><td><a href="/ua/index.html?formId=1#/order/update/'+esc(r.id)+'" target="_blank" rel="noopener">№'+esc(r.id)+'</a></td>'
+        +'<td>'+esc(r.ttn||'—')+'</td><td>'+esc(r.provider||'—')+'</td>'
+        +'<td>'+(r.rec?esc(r.rec.n+'× '+fmtDate(r.rec.t)):'—')+'</td></tr>';
+    });
+    return h+'</table>';
+  }
+  function renderBar(){
+    var list=pickedPrinted();
+    var sig=list.map(function(r){ return r.id; }).join(',');
+    var bar=document.getElementById('lk-prg-bar');
+    if(!list.length){ if(bar) bar.remove(); return; }
+    if(bar && bar.getAttribute('data-sig')===sig) return;   // без змін — не перемальовуємо
+    if(!bar){
+      bar=document.createElement('div'); bar.id='lk-prg-bar';
+      var tb=document.querySelector('table');
+      if(tb && tb.parentNode) tb.parentNode.insertBefore(bar, tb); else document.body.insertBefore(bar, document.body.firstChild);
+    }
+    bar.setAttribute('data-sig', sig);
+    bar.innerHTML='⚠ Серед вибраних <b>'+list.length+'</b> уже друкували'+tableHtml(list);
+  }
+
+  // ── 3. підтвердження перед «Додати до реєстру» ────────────────────────────
+  var passThrough=false;
+  function confirmBox(list, onYes){
+    ensureStyles();
+    var ov=document.createElement('div'); ov.id='lk-prg-ov';
+    ov.innerHTML='<div id="lk-prg-box"><h3>⚠ Ці накладні вже друкували</h3>'
+      +'<div>Серед вибраних заявок <b>'+list.length+'</b> уже позначені в СРМ як роздруковані. '
+      +'Можливо, посилки вже здані.</div>'+tableHtml(list)
+      +'<div class="btns"><button class="no">Скасувати</button><button class="go">Все одно продовжити</button></div></div>';
+    document.body.appendChild(ov);
+    ov.querySelector('.no').onclick=function(){ ov.remove(); };
+    ov.querySelector('.go').onclick=function(){ ov.remove(); passThrough=true; onYes(); setTimeout(function(){ passThrough=false; },1500); };
+  }
+  document.addEventListener('click', function(e){
+    try{
+      if(!onListPage() || passThrough || !map) return;
+      var t=e.target&&e.target.closest?e.target.closest('button,a,[ng-click],[role=button]'):null;
+      if(!t) return;
+      var txt=(t.textContent||'').trim().toLowerCase();
+      var ng=(t.getAttribute&&t.getAttribute('ng-click')||'').toLowerCase();
+      var isAdd=/додати до реєстр|додати в реєстр|до реєстру/.test(txt) || /registr|reestr/.test(ng);
+      if(!isAdd) return;
+      var list=pickedPrinted();
+      if(!list.length) return;
+      e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
+      confirmBox(list, function(){ t.click(); });
+    }catch(err){}
+  }, true);
+
+  // ── життєвий цикл ────────────────────────────────────────────────────────
+  function sync(){
+    if(!onListPage()){
+      var bar=document.getElementById('lk-prg-bar'); if(bar) bar.remove();
+      return;
+    }
+    ensureStyles();
+    loadMap().then(function(){ markRows(); renderBar(); });
+  }
+  var t=null;
+  function syncSoon(){ clearTimeout(t); t=setTimeout(sync,300); }
+  document.addEventListener('change', function(e){
+    if(onListPage() && e.target && e.target.type==='checkbox') renderBar();
+  }, true);
+  window.addEventListener('lkdom', syncSoon);
+  window.addEventListener('hashchange', function(){ map=null; mapSig=''; setTimeout(sync,400); });
+  sync();
+})();
+}catch(e){ try{ console.warn("[SD] модуль «lkPrintedGuardList» не запустився:", e); }catch(_){} }
+/* ▲▲▲ МОДУЛЬ-END • lkPrintedGuardList ▲▲▲ */
 
 /* ▼▼▼ МОДУЛЬ-START • lkCashRegister — 💰 Каса самовивозу (день/тиждень/місяць/період) ▼▼▼ */
 /* ===== 💰 Каса самовивозу — день / тиждень / місяць / період ===== */
