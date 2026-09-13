@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.33
+// @version      3.34
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -83,16 +83,33 @@ try {
 try{ // SD-ізоляція: помилка цього модуля не зупинить решту
 (function lkDomTick(){
   'use strict';
-  var t=null;
-  function fire(){ try{ window.dispatchEvent(new Event('lkdom')); }catch(e){} }
-  function soon(){ clearTimeout(t); t=setTimeout(fire,250); }
+  var t=null, dirty=true, period=2000;
+  function fire(){
+    if(document.hidden) return;   // фонова вкладка: не будимо 36 модулів даремно
+    try{ window.dispatchEvent(new Event('lkdom')); }catch(e){}
+  }
+  function soon(){ dirty=true; clearTimeout(t); t=setTimeout(fire,250); }
   function arm(){
     try{ new MutationObserver(soon).observe(document.body,{childList:true,subtree:true}); }
     catch(e){ setTimeout(arm,500); return; }
     fire();
   }
   if(document.body) arm(); else document.addEventListener('DOMContentLoaded', arm);
-  setInterval(fire, 2000); // страховий пульс: зміни без DOM-мутацій теж підхопляться
+  /* Страховий пульс (зміни без DOM-мутацій теж підхопляться). Поки на сторінці
+     щось рухається — кожні 2 с, як було; коли все завмерло — рідшає до 10 с,
+     щоб неганяти всі модулі на порожньому місці. */
+  (function tick(){
+    setTimeout(function(){
+      fire();
+      period = dirty ? 2000 : 10000;
+      dirty = false;
+      tick();
+    }, period);
+  })();
+  // повернулись у вкладку — оновлюємо одразу, без очікування наступного тику
+  document.addEventListener('visibilitychange', function(){
+    if(!document.hidden){ dirty=true; fire(); }
+  });
 })();
 }catch(e){ try{ console.warn("[SD] модуль «lkDomTick» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkDomTick ▲▲▲ */
@@ -246,9 +263,10 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   var KIT_BOXES='.lkck-exp,.lknb-exp,.lkmk-exp';
   function kitLinks(){
     var out=[];
-    [].forEach.call(document.querySelectorAll('a[data-sd-sku]'), function(a){ out.push(a); });
-    [].forEach.call(document.querySelectorAll(KIT_BOXES), function(box){
-      [].forEach.call(box.querySelectorAll('a[href]'), function(a){
+    // один прохід документом замість двох (бігає на кожен пульс на всіх сторінках)
+    [].forEach.call(document.querySelectorAll('a[data-sd-sku],'+KIT_BOXES), function(el){
+      if(el.hasAttribute('data-sd-sku')){ out.push(el); return; }
+      [].forEach.call(el.querySelectorAll('a[href]'), function(a){
         if(!a.hasAttribute('data-sd-sku') && skuFromHref(a.getAttribute('href'))) out.push(a);
       });
     });
@@ -258,13 +276,23 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     return a.getAttribute('data-sd-sku') || skuFromHref(a.getAttribute('href')) || '';
   }
   // підміняємо href у вже намальованих посиланнях (пишемо лише коли реально інше)
+  /* Скан на кожен пульс коштує ~1 мс на великому списку заявок, де наших
+     посилань узагалі немає. Якщо минулого разу не знайшли жодного — пропускаємо
+     наступні пульси (до 2 с), доки на сторінці щось не зміниться по-справжньому. */
+  var _pSkip=0, _pHash='';
   function paint(){
     try{
+      var h=location.hash||'';
+      if(h!==_pHash){ _pHash=h; _pSkip=0; }        // інша сторінка — перевіряємо одразу
+      else if(_pSkip>0){ _pSkip--; return; }
+      var found=0;
       kitLinks().forEach(function(a){
         var sku=skuOfLink(a); if(!sku) return;
         var u=url(sku, a.getAttribute('data-sd-kit')!=='0');
         if(a.getAttribute('href')!==u) a.setAttribute('href', u);
+        found++;
       });
+      _pSkip = found ? 0 : 4;                      // порожньо — наступні 4 пульси пропускаємо
     }catch(e){}
   }
   // Страхувальник: навіть якщо href не встиг оновитись (або плашку намалювала
@@ -361,6 +389,44 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     return p;
   }
   try { window.sdFetchOnce = sdFetchOnce; } catch (e) {}
+
+  /* ---- одна картка товару — один пошук ----
+     Картка (product-view-info) відкривається модалкою ПОВЕРХ будь-якої сторінки,
+     тож відсікти її по адресі не можна. Чотири модулі (lkModalKits, lkModalAnalogs,
+     lkCardReserve, lkSkuCopy) шукали її кожен сам: однаковий скан [ng-include] по
+     всьому документу плюс перевірка видимості (примусовий reflow) — чотири рази
+     на кожен пульс. Тепер пошук один, результат живе 150 мс. ---- */
+  var _crT = 0, _crAll = null, _crVis = null;
+  function _crCalc() {
+    var now = Date.now();
+    if (_crAll && now - _crT < 150) return;
+    var all = [], vis = [], incs = document.querySelectorAll('[ng-include]');
+    for (var i = 0; i < incs.length; i++) {
+      if ((incs[i].getAttribute('ng-include') || '').indexOf('product-view-info') < 0) continue;
+      all.push(incs[i]);
+      if (incs[i].offsetParent) vis.push(incs[i]);   // невидимі картки лишаються в DOM
+    }
+    _crAll = all; _crVis = vis; _crT = now;
+  }
+  function sdCardAny()     { _crCalc(); return _crAll[0] || null; }
+  // картки складаються стосом — потрібна ОСТАННЯ видима, тобто та, що зараз зверху
+  function sdCardRoot()    { _crCalc(); return _crVis.length ? _crVis[_crVis.length - 1] : null; }
+  function sdCardVisible() { _crCalc(); return _crVis.slice(); }
+  /* Рядки товарів (а з ними наші значки) бувають лише в картці заявки, у
+     документах і на сторінках товару. Список заявок — найважчий документ у СРМ
+     (13 тис. вузлів), і саме там модулі сканували його даремно. */
+  function sdItemRowsPage() {
+    var h = location.hash || '';
+    return /#\/order\/(update|create)/.test(h)
+        || /#\/document\//.test(h)
+        || /#\/product\//.test(h);
+  }
+  try { window.sdItemRowsPage = sdItemRowsPage; } catch (e) {}
+  try {
+    window.sdCardAny = sdCardAny;
+    window.sdCardRoot = sdCardRoot;
+    window.sdCardVisible = sdCardVisible;
+  } catch (e) {}
 
   // Беремо відображене значення (f) — там коди з нулями; інакше сире (v).
   function cellText(c) {
@@ -1484,8 +1550,7 @@ var UPSELL_MAP_DATA = []; // вбудований запас прибрано: �
     return r.width > 0 && r.height > 0;
   }
   function anyModalOpen() {
-    if (elVisible(document.querySelector(".modal-backdrop"))) return true;
-    var ms = document.querySelectorAll(".modal");
+    var ms = document.querySelectorAll(".modal-backdrop,.modal");   // один прохід замість двох
     for (var i = 0; i < ms.length; i++) if (elVisible(ms[i])) return true;
     return false;
   }
@@ -1513,22 +1578,43 @@ var UPSELL_MAP_DATA = []; // вбудований запас прибрано: �
     }
     return false;
   }
-  var _modalState = null;
-  function syncModalClass() {
+  var _modalState = null, _mcT = null, _mcLast = 0;
+  function syncModalClassNow() {
+    _mcLast = Date.now();
     var open = anyModalOpen() || autocompleteOpen();
     if (open === _modalState) return;
     _modalState = open;
     document.documentElement.classList.toggle("sd-modal-open", open);
   }
+  /* Найдорожче місце скрипта: висить на 'input' у capture-фазі, тобто бігало на
+     КОЖНЕ натискання клавіші — два скани документа плюс getComputedStyle/
+     getBoundingClientRect на кожній знахідці (примусовий reflow). Десятки подій
+     підряд зводимо до одного перерахунку раз на 150 мс. */
+  function syncModalClass() {
+    if (_mcT) return;
+    var wait = Math.max(0, 150 - (Date.now() - _mcLast));
+    _mcT = setTimeout(function () { _mcT = null; syncModalClassNow(); }, wait);
+  }
   try {
     if (document.body) new MutationObserver(syncModalClass).observe(document.body, { childList: true });
   } catch (e) {}
-  // миттєва реакція: коли друкуєш у пошуку або фокус заходить/виходить із поля
-  ["input", "focusin", "focusout", "click"].forEach(function (ev) {
+  // миттєва реакція: коли друкуєш у пошуку або фокус заходить/виходить із поля.
+  // 'input' сиплеться на КОЖНУ клавішу, а випасти список може лише всередині поля
+  // пошуку товару — тож для друку спершу дешева перевірка предка (десяток кроків
+  // угору), і тільки потім скан документа. Друк у звичайних полях більше не коштує нічого.
+  var AC_WRAP = ".form-group-autocomplete, .change-products";
+  document.addEventListener("input", function (e) {
+    try {
+      var t = e.target;
+      if (!t || !t.closest || !t.closest(AC_WRAP)) return;
+    } catch (err) {}
+    setTimeout(syncModalClass, 0);
+  }, true);
+  ["focusin", "focusout", "click"].forEach(function (ev) {
     document.addEventListener(ev, function () { setTimeout(syncModalClass, 0); }, true);
   });
   setInterval(syncModalClass, 2000);
-  syncModalClass();
+  syncModalClassNow();
 
   // тягнемо карту з таблиці при завантаженні сторінки
   requestSheet(false);
@@ -4048,12 +4134,15 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     document.querySelectorAll('[data-lknb]').forEach(c => c.removeAttribute('data-lknb'));
   }
 
+  let drawn = false;          // чи є на сторінці наші позначки — щоб не чистити порожнє
   function scan() {
     if (!comp2kits) return;
-    if (!onPage()) { clearAll(); return; }
+    // clearAll() — два скани всього документа; на чужих сторінках (список заявок,
+    // картка заявки) він бігав на КОЖЕН пульс і завжди знаходив порожнечу
+    if (!onPage()) { if (drawn) { clearAll(); drawn = false; } return; }
     document.querySelectorAll('a.link-product-field').forEach(a => {
       const cell = a.closest('.editing-hide') || a.parentElement;
-      if (cell) processCell(cell);
+      if (cell) { processCell(cell); drawn = true; }
     });
   }
 
@@ -4409,6 +4498,12 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   // усі таблиці комплекту на сторінці (і режим редагування, і перегляду)
   function kitTables(){
     var out=[];
+    // Дешева відсічка перед двома важкими селекторами (один із них — пошук за
+    // підрядком в атрибуті). Таблиця «Товари в комплекті» є лише в картці товару:
+    // або сторінка товару, або картка-модалка поверх будь-якої сторінки.
+    var onProd = /#\/product\//.test(location.hash || '');
+    var card = (typeof window.sdCardVisible === 'function') ? window.sdCardVisible().length : 1;
+    if (!onProd && !card) return out;
     document.querySelectorAll('table.products-complect-table, div[ng-show*="isComplect"] table').forEach(function(tb){
       if(out.indexOf(tb)<0 && tb.querySelector('a.link-product-field')) out.push(tb);
     });
@@ -4840,6 +4935,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 
   function scan() {
     if (!BYSKU) return;
+    // у списку заявок рядків товару немає — скан усього документа був холостим
+    if (typeof window.sdItemRowsPage === 'function' && !window.sdItemRowsPage()) return;
     document.querySelectorAll('a.link-product-field').forEach(function (a) {
       var cell = a.closest('.editing-hide') || a.parentElement;
       if (cell) processCell(cell);
@@ -4968,6 +5065,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 
   // ---------- пошук модалки товару та поля ID ----------
   function findModalInfo() {
+    if (typeof window.sdCardAny === 'function') return window.sdCardAny();   // спільний пошук ядра
     const incs = document.querySelectorAll('[ng-include]');
     for (const el of incs) {
       if ((el.getAttribute('ng-include') || '').indexOf('product-view-info') !== -1) return el;
@@ -5137,6 +5235,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   // корінь картки товару. Картки складаються стосом (з картки можна відкрити
   // картку аналога), тож беремо ОСТАННЮ видиму — це та, що зараз зверху.
   function findRoot(){
+    if (typeof window.sdCardRoot === 'function') return window.sdCardRoot();   // спільний пошук ядра
     var incs = document.querySelectorAll('[ng-include]'), found = null;
     for (var i = 0; i < incs.length; i++) {
       if ((incs[i].getAttribute('ng-include') || '').indexOf('product-view-info') === -1) continue;
@@ -7597,9 +7696,15 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     return a;
   }
 
+  function rowsPage(){
+    return (typeof window.sdItemRowsPage==='function')
+      ? window.sdItemRowsPage()
+      : !/#\/(order|product)\/index/.test(location.hash||'');
+  }
   function scan(){
+    var rows=rowsPage();
     // 1) режим редагування картки: input[ng-model="viewModel.item.sku"]
-    [].forEach.call(document.querySelectorAll('input[ng-model="viewModel.item.sku"]'), function(inp){
+    if(rows) [].forEach.call(document.querySelectorAll('input[ng-model="viewModel.item.sku"]'), function(inp){
       var wrap=inp.parentElement; if(!wrap) return;
       var row=wrap.parentElement||wrap;
       if(row.querySelector('.lk-skucopy')) return;
@@ -7608,9 +7713,12 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       wrap.insertAdjacentElement('afterend', makeBtn(function(){ return inp.value; }, 'side'));
     });
     // 2) модалка перегляду (product-view-info): рядок із лейблом SKU
-    [].forEach.call(document.querySelectorAll('[ng-include]'), function(root){
-      if((root.getAttribute('ng-include')||'').indexOf('product-view-info')<0) return;
-      if(!root.offsetParent) return;
+    var cardRoots = (typeof window.sdCardVisible === 'function')
+      ? window.sdCardVisible()                       // спільний пошук ядра
+      : [].filter.call(document.querySelectorAll('[ng-include]'), function(r){
+          return (r.getAttribute('ng-include')||'').indexOf('product-view-info')>=0 && r.offsetParent;
+        });
+    cardRoots.forEach(function(root){
       [].forEach.call(root.querySelectorAll('label'), function(l){
         if(!/^SKU$/i.test(String(l.textContent||'').replace(/\s+/g,' ').trim())) return;
         var box=l.parentElement; if(!box || box.querySelector('.lk-skucopy')) return;
@@ -7625,6 +7733,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     });
     // 3) рядок товару в заявці/документі: «Назва товару (01179)» —
     //    span із ng-if по viewModel.enableId усередині items-to-order-name-product
+    if(!rows) return;
     [].forEach.call(document.querySelectorAll('span[ng-if]'), function(sp){
       if(String(sp.getAttribute('ng-if')||'').indexOf('viewModel.enableId')<0) return;
       var m=/\(([^()]+)\)/.exec(String(sp.textContent||'').replace(/\s+/g,' '));
@@ -8582,12 +8691,19 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     el.dispatchEvent(new Event('change',{bubbles:true}));
   }
 
+  var npDrawn=false;
   function mount(){
     var ta=document.getElementById('descriptionNovaPoshta');
     if(!ta){                                   // форму закрили — прибираємо панель
-      [].forEach.call(document.querySelectorAll('.lk-npd,.lk-npd-ed'), function(n){ n.remove(); });
+      // скан усього документа тут бігав на кожен пульс на будь-якій сторінці,
+      // хоча прибирати майже завжди нічого
+      if(npDrawn){
+        [].forEach.call(document.querySelectorAll('.lk-npd,.lk-npd-ed'), function(n){ n.remove(); });
+        npDrawn=false;
+      }
       return;
     }
+    npDrawn=true;
     var box=ta.closest('.form-group')||ta.parentElement;
     var bar=box.querySelector('.lk-npd');
     if(!bar){
@@ -9110,6 +9226,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 
   // корінь ВЕРХНЬОЇ видимої картки (картки складаються стосом — як у lkModalAnalogs)
   function findRoot(){
+    if (typeof window.sdCardRoot === 'function') return window.sdCardRoot();   // спільний пошук ядра
     var incs=document.querySelectorAll('[ng-include]'), found=null;
     for(var i=0;i<incs.length;i++){
       if((incs[i].getAttribute('ng-include')||'').indexOf('product-view-info')===-1) continue;
