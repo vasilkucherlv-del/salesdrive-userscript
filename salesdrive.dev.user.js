@@ -8127,27 +8127,39 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   'use strict';
   var CKEY='lk_ttndbl_v1', TTL=30*60*1000, MAX_PAGES=40;
 
+  /* Кнопка плаваюча, як у сусідів по списку заявок (📋 lkPickList, 📮 lkUkrPromList).
+     Раніше смуга вставлялась усередину .white-main-container — а це контейнер широкої
+     прокрутної таблиці, тож вона розтягувалась на 4228 px і зсувала розкладку. */
   var css=''
-    +'.lk-td-btn{display:inline-block;margin-left:10px;padding:4px 14px;border:none;border-radius:14px;'
-    +'  background:#455A64;color:#fff;font:700 13px/1.5 Arial,sans-serif;cursor:pointer;vertical-align:middle;white-space:nowrap}'
-    +'.lk-td-btn:hover{background:#37474F}'
-    +'.lk-td-btn[disabled]{background:#9e9e9e;cursor:default}'
-    +'#lk-td-box{margin:10px 0;padding:10px 12px;border:1px solid #90a4ae;border-left:4px solid #455A64;'
-    +'  background:#f4f7f9;border-radius:6px;font:13px/1.6 Arial,sans-serif;color:#263238;'
-    +'  max-width:960px;box-sizing:border-box;position:relative}'
-    +'#lk-td-box .h{font-weight:700;color:#37474F;margin-bottom:5px}'
+    +'#lk-td-btn{position:fixed;left:18px;bottom:204px;z-index:99998;width:52px;height:52px;'
+    +'  border-radius:50%;background:#455A64;color:#fff;border:none;font-size:22px;cursor:pointer;'
+    +'  box-shadow:0 3px 10px rgba(0,0,0,.3)}'
+    +'#lk-td-btn:hover{background:#37474F}'
+    +'#lk-td-ov{position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.4);'
+    +'  display:flex;align-items:flex-start;justify-content:center}'
+    +'#lk-td-box{background:#fff;width:720px;max-width:96vw;max-height:92vh;margin-top:3vh;'
+    +'  overflow:auto;border-radius:12px;box-shadow:0 12px 40px rgba(0,0,0,.35);'
+    +'  font:13px/1.5 Arial,sans-serif;color:#222}'
+    +'#lk-td-box .hd{position:sticky;top:0;background:#455A64;color:#fff;padding:12px 16px;'
+    +'  display:flex;align-items:center;justify-content:space-between;z-index:2}'
+    +'#lk-td-box .hd b{font-size:16px}'
+    +'#lk-td-box .hd button{background:rgba(255,255,255,.2);border:none;color:#fff;'
+    +'  border-radius:6px;cursor:pointer;font-size:14px;padding:4px 10px}'
+    +'#lk-td-box .body{padding:10px 16px 16px}'
+    +'#lk-td-box .h{font-weight:700;color:#37474F;margin:8px 0 4px}'
     +'#lk-td-box .note{color:#607d8b;font-size:12px;margin-top:6px}'
     +'#lk-td-box table{border-collapse:collapse;width:100%;font:13px/1.5 Arial,sans-serif;margin-top:4px}'
     +'#lk-td-box td,#lk-td-box th{padding:4px 8px;border-top:1px solid #dde5e9;vertical-align:top}'
     +'#lk-td-box th{font-weight:700;color:#546e7a;text-align:left;border-top:none}'
     +'#lk-td-box .bad{color:#B71C1C;font-weight:700}'
     +'#lk-td-box .ttn{font-family:ui-monospace,Menlo,Consolas,monospace}'
-    +'#lk-td-box .row2{margin-top:8px;padding-top:8px;border-top:1px dashed #cfd8dc;'
-    +'  display:flex;flex-wrap:wrap;gap:6px;align-items:center}'
+    +'#lk-td-box .row2{margin-top:4px;display:flex;flex-wrap:wrap;gap:6px;align-items:center}'
     +'#lk-td-box input{border:1px solid #b0bec5;border-radius:4px;padding:3px 6px;'
     +'  font:13px/1.4 Arial,sans-serif;color:#263238;background:#fff}'
-    +'#lk-td-box .x{position:absolute;top:5px;right:9px;border:none;background:none;cursor:pointer;'
-    +'  font-size:17px;color:#37474F}';
+    +'#lk-td-box .act{border:1px solid #455A64;background:#fff;color:#455A64;border-radius:7px;'
+    +'  padding:5px 12px;cursor:pointer;font-weight:700}'
+    +'#lk-td-box .act:hover{background:#eceff1}'
+    +'#lk-td-box .act[disabled]{border-color:#b0bec5;color:#90a4ae;cursor:default;background:#fff}';
   var st=document.createElement('style'); st.textContent=css;
   (document.head||document.documentElement).appendChild(st);
 
@@ -8284,19 +8296,28 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     }).catch(function(){ return []; });
   }
 
+  function closeOv(){
+    stop=true;
+    var ov=document.getElementById('lk-td-ov'); if(ov) ov.remove();
+  }
+  // оверлей поверх сторінки — таблиці заявок не торкаємось узагалі
   function box(){
-    var old=document.getElementById('lk-td-box'); if(old) old.remove();
+    closeOv();
+    var ov=document.createElement('div'); ov.id='lk-td-ov';
+    ov.addEventListener('click',function(e){ if(e.target===ov) closeOv(); });
     var b=document.createElement('div'); b.id='lk-td-box';
-    var x=document.createElement('button'); x.className='x'; x.textContent='×'; x.title='Сховати';
-    x.addEventListener('click',function(){ stop=true; b.remove(); });
-    b.appendChild(x);
-    var bar=document.querySelector('.lk-td-bar');
-    if(bar && bar.parentNode) bar.parentNode.insertBefore(b, bar.nextSibling);
-    else{
-      var host=document.querySelector('.white-main-container')||document.querySelector('.panel-body')||document.body;
-      host.insertBefore(b, host.firstChild);
-    }
-    return b;
+    var hd=document.createElement('div'); hd.className='hd';
+    var ttl=document.createElement('b'); ttl.textContent='🖨 Подвійний друк ТТН';
+    hd.appendChild(ttl);
+    var x=document.createElement('button'); x.type='button'; x.textContent='× Закрити';
+    x.addEventListener('click',closeOv);
+    hd.appendChild(x);
+    b.appendChild(hd);
+    var body=document.createElement('div'); body.className='body';
+    b.appendChild(body);
+    ov.appendChild(b);
+    document.body.appendChild(ov);
+    return body;                       // малюємо все всередині .body
   }
 
   function table(parent, title, list, danger){
@@ -8397,8 +8418,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   }
 
   function open(){
-    var old=document.getElementById('lk-td-box');
-    if(old){ stop=true; old.remove(); return; }
+    if(document.getElementById('lk-td-ov')){ closeOv(); return; }
     var b=box();
 
     // свіжий результат підставляє СВІЙ період — інакше кеш ніколи не спрацював би
@@ -8414,11 +8434,11 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     var f=document.createElement('input'); f.type='date'; f.value=cached?cached.from:daysAgo(7); line.appendChild(f);
     line.appendChild(document.createTextNode(' — '));
     var t=document.createElement('input'); t.type='date'; t.value=cached?cached.to:iso(new Date()); line.appendChild(t);
-    var go=document.createElement('button'); go.type='button'; go.className='lk-td-btn'; go.style.marginLeft='0';
+    var go=document.createElement('button'); go.type='button'; go.className='act';
     go.textContent='Перевірити';
     line.appendChild(go);
-    var sp=document.createElement('button'); sp.type='button'; sp.className='lk-td-btn';
-    sp.style.background='#9e9e9e'; sp.textContent='Стоп';
+    var sp=document.createElement('button'); sp.type='button'; sp.className='act';
+    sp.textContent='Стоп';
     sp.addEventListener('click',function(){ stop=true; });
     line.appendChild(sp);
     b.appendChild(line);
@@ -8440,24 +8460,14 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   }
 
   function sync(){
-    var btn=document.querySelector('.lk-td-btn-main');
-    if(!onPage()){
-      var bar0=document.querySelector('.lk-td-bar'); if(bar0) bar0.remove();
-      var b0=document.getElementById('lk-td-box'); if(b0){ stop=true; b0.remove(); }
-      return;
-    }
+    var btn=document.getElementById('lk-td-btn');
+    if(!onPage()){ if(btn) btn.remove(); closeOv(); return; }
     if(btn) return;
-    var host=document.querySelector('.white-main-container')||document.querySelector('.panel-body');
-    if(!host) return;
-    var bar=document.createElement('div'); bar.className='lk-td-bar';
-    bar.style.cssText='margin:8px 0 4px';
-    btn=document.createElement('button'); btn.type='button';
-    btn.className='lk-td-btn lk-td-btn-main'; btn.style.marginLeft='0';
-    btn.textContent='🖨 Подвійні ТТН';
+    btn=document.createElement('button'); btn.type='button'; btn.id='lk-td-btn';
+    btn.textContent='🖨';
     btn.title='Знайти заявки, де ТТН друкували двічі (різні номери або передрук)';
     btn.addEventListener('click',function(e){ e.preventDefault(); e.stopPropagation(); open(); });
-    bar.appendChild(btn);
-    host.insertBefore(bar, host.firstChild);
+    document.body.appendChild(btn);
   }
 
   var tm=null;
