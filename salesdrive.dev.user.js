@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.35
+// @version      3.36
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -1139,15 +1139,40 @@ var UPSELL_MAP_DATA = []; // вбудований запас прибрано: �
     if (!btn) return;
     btn.classList.add("sd-done");
     btn.disabled = true;
+    btn.removeAttribute("data-sd-lab");
     btn.textContent = "✓ Додано";
   }
 
   // один клік: просимо page-context додати через рідний Angular-метод SalesDrive;
   // якщо не вдалось — просто вписуємо код у поле.
+  // Миттєвий стан кнопки. Без нього після кліку UI мовчав до 2,5 с, а клік по
+  // кнопці СУСІДНЬОГО товару поки зайнято просто ковтався без жодної ознаки —
+  // виглядало так, ніби кнопка не працює.
+  function markBusy(btn) {
+    if (!btn || btn.disabled) return;
+    if (!btn.hasAttribute("data-sd-lab")) btn.setAttribute("data-sd-lab", btn.textContent || "");
+    btn.disabled = true;
+    btn.textContent = "⏳ Додаю…";
+  }
+  function unmarkBusy(btn) {
+    if (!btn || btn.classList.contains("sd-done")) return;
+    var lab = btn.getAttribute("data-sd-lab");
+    if (lab !== null) btn.textContent = lab;
+    btn.disabled = false;
+  }
+
   function addCompanion(code, btn) {
     if (!code) return;
-    if (busy) return;
+    if (busy) {                       // інший товар ще додається — покажемо це, а не змовчимо
+      if (btn && !btn.disabled) {
+        var old = btn.textContent;
+        btn.textContent = "зачекайте…";
+        setTimeout(function () { if (btn.textContent === "зачекайте…") btn.textContent = old; }, 900);
+      }
+      return;
+    }
     busy = true;
+    markBusy(btn);
     var done = false;
 
     function finish(ok) {
@@ -1156,7 +1181,7 @@ var UPSELL_MAP_DATA = []; // вбудований запас прибрано: �
       busy = false;
       BUS.removeEventListener("sdUpsellAddResult", onResult);
       if (ok) { markAdded(btn); armHideTimer(); }
-      else { fillFallback(code); }
+      else { unmarkBusy(btn); fillFallback(code); }
     }
     var token = String(Date.now()) + "_up_" + Math.random().toString(36).slice(2);
     function onResult() {
@@ -1639,6 +1664,47 @@ var UPSELL_MAP_DATA = []; // вбудований запас прибрано: �
   });
   setInterval(syncModalClass, 2000);
   syncModalClassNow();
+
+  /* ---- наші вікна: Esc, і щоб наші ж кнопки їм не заважали ----
+     Досі Esc закривав лише Базу знань, а плаваючі кнопки (Каса, Склад, Укрпошта,
+     «Де товар») і кнопка Бази знань висіли ПОВЕРХ наших власних вікон. ---- */
+  var LK_OVS = ['lk-td-ov', 'lk-where-ov', 'lk-cash-ov', 'lk-pick-ov', 'lk-ukp-ov'];
+  function lkTopOverlay() {
+    for (var i = LK_OVS.length - 1; i >= 0; i--) {
+      var ov = document.getElementById(LK_OVS[i]);
+      if (ov) return ov;
+    }
+    return null;
+  }
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== 'Escape') return;
+    var ov = lkTopOverlay();
+    if (!ov) return;
+    // той самий шлях, що й клік по темному фону — щоб модуль прибрав усе своє
+    try { ov.dispatchEvent(new MouseEvent('click', { bubbles: true })); } catch (err) { ov.remove(); }
+  });
+  function lkOvSync() {
+    document.documentElement.classList.toggle('lk-ov-open', !!lkTopOverlay());
+  }
+  try {
+    if (document.body) new MutationObserver(lkOvSync).observe(document.body, { childList: true });
+  } catch (e) {}
+
+  (function () {
+    var st = document.createElement('style');
+    st.textContent =
+      /* наші вікна перекривають наші ж плаваючі кнопки */
+      'html.lk-ov-open #sd-kb-btn,html.lk-ov-open #sd-kb-panel,html.lk-ov-open #lk-cash-btn,'
+      + 'html.lk-ov-open #lk-pick-btn,html.lk-ov-open #lk-ukp-btn,html.lk-ov-open #lk-where-btn,'
+      + 'html.lk-ov-open #lk-pay-tiles,html.lk-ov-open #sd-payreq-warn{display:none !important}'
+      /* миттєвий відгук на натиск: без нього кнопка здається «не натиснутою»,
+         особливо на трекпаді, де :hover майже не видно */
+      + '#sd-kb-btn:active,#lk-cash-btn:active,#lk-pick-btn:active,#lk-ukp-btn:active,'
+      + '#lk-where-btn:active,#lk-td-btn:active,#lk-all-orders-btn:active,.lk-side-item:active,'
+      + '.lk-sb-btn:active,.lk-skucopy:active,.lk-skulink:active,.lkcr:active,'
+      + '.lk-arropt-btn:active,.lkan-add:active{transform:translateY(1px);filter:brightness(.94)}';
+    (document.head || document.documentElement).appendChild(st);
+  })();
 
   // тягнемо карту з таблиці при завантаженні сторінки
   requestSheet(false);
@@ -4070,7 +4136,12 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   .lknb-plus{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;
     margin-left:6px;border-radius:50%;background:#ef8a1f;color:#fff;font:700 12px/1 sans-serif;
     cursor:pointer;vertical-align:middle;user-select:none}
+  .lknb-plus{position:relative}
+  /* невидимий розширювач зони натискання: значок лишається 16px, а промахнутись
+     по ньому в тісному рядку стає значно важче (зона 24x24) */
+  .lknb-plus::before{content:'';position:absolute;inset:-4px}
   .lknb-plus:hover{background:#d97a12}
+  .lknb-plus:active{background:#c06a0a;transform:translateY(1px)}
   .lknb-exp{margin:4px 0 2px;padding:6px 9px;border-left:3px solid #ef8a1f;background:#fff7ec;
     border-radius:4px;font:12px/1.45 -apple-system,Segoe UI,Roboto,sans-serif;color:#333}
   .lknb-exp .h{color:#8a5a12;font-weight:600;margin-bottom:3px}
@@ -4670,7 +4741,10 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     + '  background:linear-gradient(180deg,#9fd450 0%,#6fb52c 52%,#4e9a1f 100%);'
     + '  box-shadow:inset 0 1px 1px rgba(255,255,255,.55),0 1px 2px rgba(0,0,0,.25);'
     + '  cursor:pointer;vertical-align:middle;user-select:none;flex:0 0 auto}'
+    + '.lkan-plus{position:relative}'
+    + '.lkan-plus::before{content:"";position:absolute;inset:-4px}'   /* зона натискання 26x26 */
     + '.lkan-plus:hover{background:linear-gradient(180deg,#8cc63f 0%,#5da324 52%,#3f8416 100%)}'
+    + '.lkan-plus:active{transform:translateY(1px);box-shadow:inset 0 1px 3px rgba(0,0,0,.35)}'
     + '.lkan-plus svg{display:block;width:12px;height:12px;fill:#fff}'
     // список аналогів — таблиця-сітка з суцільною рамкою й лініями (назва | код | кнопка)
     + '.lkan-exp{margin:5px 0 3px;background:#f2fbfa;border:1px solid #00897B;border-radius:6px;'
@@ -5079,7 +5153,10 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   .lkmk-plus{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;
     border-radius:50%;background:#ef8a1f;color:#fff;font:700 12px/1 sans-serif;
     cursor:pointer;vertical-align:middle;user-select:none}
+  .lkmk-plus{position:relative}
+  .lkmk-plus::before{content:'';position:absolute;inset:-4px}   /* зона натискання 24x24 */
   .lkmk-plus:hover{background:#d97a12}
+  .lkmk-plus:active{background:#c06a0a;transform:translateY(1px)}
   .lkmk-cnt{margin-left:6px;color:#8a5a12;font:600 12px/1 -apple-system,Segoe UI,Roboto,sans-serif;vertical-align:middle}
   .lkmk-val{position:relative}
   .lkmk-exp{position:absolute;top:100%;left:0;margin-top:4px;z-index:9999;display:none;
@@ -6525,7 +6602,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     +'th.lk-arropt-td{font:700 13px/1.5 Arial,sans-serif;background:#e3f4f2;color:#00695c;'
     +'  padding:8px 16px;border-left:3px solid #00897B;white-space:nowrap}'
     +'td.lk-arropt-td .nw{display:flex;align-items:center}'
-    +'.lk-arropt-chk{width:17px;height:17px;margin-right:9px;cursor:pointer;accent-color:#00897B;flex:0 0 auto}';
+    +'.lk-arropt-chk{width:18px;height:18px;margin-right:9px;cursor:pointer;accent-color:#00897B;flex:0 0 auto}';
   var st=document.createElement('style'); st.textContent=css;
   (document.head||document.documentElement).appendChild(st);
 
@@ -6603,6 +6680,12 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       var l1t=document.createElement('span');
       l1t.textContent=(view.applied?'✓ ':'')+r.p2+' / '+r.p5+' / '+r.p7+(r.p9!=null?(' / '+r.p9):'');
       l1.appendChild(l1t);
+      // увесь рядок цін працює як підпис до галочки — цілитись у квадратик 18px не треба
+      var cbIn=l1.querySelector('.lk-arropt-chk');
+      if(cbIn){
+        l1t.style.cursor='pointer';
+        l1t.addEventListener('click',function(){ cbIn.click(); });
+      }
       var l2=document.createElement('div'); l2.className='od';
       l2.textContent=r.o2==null&&r.o5==null&&r.o7==null&&r.o9==null
         ? 'типів цін не було — нові'
@@ -7650,7 +7733,15 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     +'  width:18px;height:18px;margin-left:3px;border:1px solid #b9c6d4;border-radius:5px;'
     +'  background:#f2f6fa;color:#33556e;font:11px/1 Arial,sans-serif;text-decoration:none;'
     +'  vertical-align:middle;user-select:none}'
-    +'.lk-skulink:hover{background:#e2ecf5;border-color:#8fa9c0;text-decoration:none}';
+    +'.lk-skulink:hover{background:#e2ecf5;border-color:#8fa9c0;text-decoration:none}'
+    /* Невидимі розширювачі зони натискання. ⧉ і 🌐 стоять упритул одне до одного,
+       тому розширюємо кожен у СВІЙ бік: ⧉ — вгору/вниз/вліво, 🌐 — вгору/вниз/вправо.
+       Так зона росте з 18px до 26px по висоті, а кнопки не перекривають одна одну. */
+    +'.lk-skucopy,.lk-skulink{position:relative}'
+    +'.lk-skucopy::before,.lk-skulink::before{content:"";position:absolute;inset:-4px}'
+    +'.lk-skucopy.sm::before{inset:-4px 0 -4px -4px}'
+    +'.lk-skulink::before{inset:-4px -4px -4px 0}'
+    +'.lk-skucopy:active,.lk-skulink:active{background:#d3e2f0}';
   var st=document.createElement('style'); st.textContent=css;
   (document.head||document.documentElement).appendChild(st);
 
@@ -9362,7 +9453,10 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     +'.lkck-plus{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;'
     +'  margin-left:6px;border-radius:50%;background:#ef8a1f;color:#fff;font:700 12px/1 sans-serif;'
     +'  cursor:pointer;vertical-align:middle;user-select:none}'
+    +'.lkck-plus{position:relative}'
+    +'.lkck-plus::before{content:"";position:absolute;inset:-4px}'   /* зона натискання 24x24 */
     +'.lkck-plus:hover{background:#d97a12}'
+    +'.lkck-plus:active{background:#c06a0a;transform:translateY(1px)}'
     +'.lkck-exp{margin:4px 0 2px;padding:6px 9px;border-left:3px solid #ef8a1f;background:#fff7ec;'
     +'  border-radius:4px;font:12px/1.45 -apple-system,Segoe UI,Roboto,sans-serif;color:#333;'
     +'  white-space:normal;min-width:230px}'
@@ -11815,7 +11909,16 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       b.title='Створити чек для цієї заявки, касир: '+(cashier.name||'')+'. Спосіб оплати й касу підставимо; «Створити чек» тисніть вручну.';
       b.style.marginLeft='4px'; b.style.display='none';
       b.textContent='🧾 Чек · '+(cashier.label||cashier.name||('#'+idx));
-      b.addEventListener('click', (function(c){ return function(e){ e.preventDefault(); openAndFill(c); }; })(cashier));
+      // заповнення форми чека — це кілька кроків поспіль; поки воно йде, кнопка
+      // має бути видимо зайнятою, інакше другий клік запускає другу послідовність
+      b.addEventListener('click', (function(c){ return function(e){
+        e.preventDefault();
+        if(b.disabled) return;
+        var lab=b.textContent;
+        b.disabled=true; b.textContent='🧾 Готую…';
+        setTimeout(function(){ b.disabled=false; b.textContent=lab; }, 6000);
+        openAndFill(c);
+      }; })(cashier));
       prev.parentNode.insertBefore(b, prev.nextSibling);
       prev=b;
     });
