@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.29
+// @version      3.30
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -26,7 +26,7 @@
      • core            — ядро: шина, дані з таблиць, стилі, content.js, База знань
      • lkNaboryInline  — позначка «входить у набори» в рядках заявки
      • lkComplectPrice — роздрібна ціна біля товару в таблиці «Товари в комплекті»
-     • lkAnalogInline  — інлайн-значок «🔁 аналог» у рядку товару
+     • lkAnalogInline  — інлайн-значок аналогів (зелена кнопка ↻) у рядку товару
      • lkModalKits     — рядок «Входить у набори» в картці товару (модалка)
      • lkModalAnalogs  — блок «Аналоги» в картці товару (фото/код/залишок/ціна)
      • lkUpsellRedesign— компактний вигляд картки допродажу
@@ -4513,7 +4513,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 /* ▲▲▲ МОДУЛЬ-END • lkComplectPrice ▲▲▲ */
 
 
-/* ▼▼▼ МОДУЛЬ-START • lkAnalogInline — Інлайн-значок «🔁 аналог» у рядку товару ▼▼▼ */
+/* ▼▼▼ МОДУЛЬ-START • lkAnalogInline — Інлайн-значок аналогів у рядку товару ▼▼▼ */
 /* ===== Інлайн-значок «🔁 аналог» у рядку товару (праворуч від «+» комплектів) ===== */
 try{ // SD-ізоляція: помилка цього модуля не зупинить решту
 (function lkAnalogInline() {
@@ -4521,10 +4521,15 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   var PAGE = (typeof unsafeWindow !== 'undefined' && unsafeWindow) || window;
 
   var css = ''
-    + '.lkan-plus{display:inline-flex;align-items:center;justify-content:center;height:17px;'
-    + '  margin-left:8px;padding:0 7px;border-radius:9px;background:#00897B;color:#fff;'
-    + '  font:700 11px/1 sans-serif;cursor:pointer;vertical-align:middle;user-select:none;white-space:nowrap}'
-    + '.lkan-plus:hover{background:#00695C}'
+    // кругла зелена кнопка зі стрілками (зразок від Василя); текст «аналоги» прибрано —
+    // пояснення лишилось у title, інакше значок був би незрозумілий
+    + '.lkan-plus{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;'
+    + '  margin-left:8px;padding:0;border-radius:50%;border:1px solid #9aa79a;'
+    + '  background:linear-gradient(180deg,#9fd450 0%,#6fb52c 52%,#4e9a1f 100%);'
+    + '  box-shadow:inset 0 1px 1px rgba(255,255,255,.55),0 1px 2px rgba(0,0,0,.25);'
+    + '  cursor:pointer;vertical-align:middle;user-select:none;flex:0 0 auto}'
+    + '.lkan-plus:hover{background:linear-gradient(180deg,#8cc63f 0%,#5da324 52%,#3f8416 100%)}'
+    + '.lkan-plus svg{display:block;width:12px;height:12px;fill:#fff}'
     // список аналогів — таблиця-сітка з суцільною рамкою й лініями (назва | код | кнопка)
     + '.lkan-exp{margin:5px 0 3px;background:#f2fbfa;border:1px solid #00897B;border-radius:6px;'
     + '  overflow:hidden;font:12px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;color:#0f3d39}'
@@ -4698,7 +4703,12 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 
     var plus = document.createElement('span');
     plus.className = 'lkan-plus';
-    plus.textContent = '🔁 аналоги';
+    // дві кругові стрілки як inline-SVG: емодзі 🔁 у різних браузерах виглядає по-різному
+    plus.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true">'
+      + '<path d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46'
+      + 'A7.93 7.93 0 0 0 20 12c0-4.42-3.58-8-8-8z"/>'
+      + '<path d="M12 18c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 7.74A7.93 7.93 0 0 0 4 12'
+      + 'c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"/></svg>';
     plus.title = 'Показати аналоги-заміну';
 
     var exp = document.createElement('div');
