@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.40
+// @version      3.41
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -1844,11 +1844,34 @@ var UPSELL_MAP_DATA = []; // вбудований запас прибрано: �
     + '#sd-upsell-hint,#sd-price-warn,#sd-rating-warn,.sd-ttn-box,#sd-stockpay-warn,#sd-bundle-fix{'
     +   'font-family:var(--sd-font)!important;border-radius:var(--sd-r)!important;'
     +   'box-shadow:var(--sd-sh-2)!important;line-height:1.6!important}'
-    + '#sd-upsell-hint{padding:18px 46px 20px 20px!important}'
-    + '#sd-upsell-hint .sd-add{border-radius:var(--sd-r-sm)!important;font-weight:600!important;'
+    /* Банер допродажу: модуль перевигляду ставив width:100%/max-width:none, тож
+       він розтягувався на всю ширину таблиці й праворуч лишалась порожнеча.
+       Робимо картку сталої ширини, як решта наших поверхонь. */
+    + '#sd-upsell-hint{max-width:900px!important;width:auto!important;'
+    +   'padding:14px 40px 16px 16px!important;'
+    +   'background:var(--sd-surface)!important;border:1px solid var(--sd-line)!important;'
+    +   'border-left:4px solid var(--sd-accent)!important;color:var(--sd-ink)!important}'
+    + '#sd-upsell-hint .sd-top{color:var(--sd-ink-3)!important;font-weight:600!important}'
+    + '#sd-upsell-hint .sd-item{border-top-color:var(--sd-line)!important}'
+    + '#sd-upsell-hint .sd-name{color:var(--sd-ink)!important;letter-spacing:0!important}'
+    + '#sd-upsell-hint .sd-script{color:var(--sd-ink-2)!important}'
+    + '#sd-upsell-hint .sd-price{background:var(--sd-muted)!important;'
+    +   'border:1px solid var(--sd-line)!important;border-radius:var(--sd-r-sm)!important}'
+    + '#sd-upsell-hint .sd-price-lab{color:var(--sd-ink-3)!important}'
+    + '#sd-upsell-hint .sd-price-val{color:var(--sd-ink)!important}'
+    /* кнопка була темно-зеленою — а зелений тут уже означає «є в наявності».
+       Головна дія стає індиговою, і зелений лишається тільки станом складу. */
+    + '#sd-upsell-hint .sd-add{background:var(--sd-accent)!important;color:#fff!important;'
+    +   'border:1px solid var(--sd-accent)!important;'
+    +   'border-radius:var(--sd-r-sm)!important;font-weight:600!important;'
     +   'box-shadow:var(--sd-sh-1)!important;'
     +   'transition:background-color .18s ease,box-shadow .18s ease,transform .12s ease!important}'
-    + '#sd-upsell-hint .sd-add:hover{box-shadow:var(--sd-sh-2)!important}'
+    + '#sd-upsell-hint .sd-add:hover{background:var(--sd-accent-hov)!important;'
+    +   'border-color:var(--sd-accent-hov)!important;box-shadow:var(--sd-sh-2)!important}'
+    + '#sd-upsell-hint .sd-add.sd-done{background:var(--sd-muted)!important;'
+    +   'color:var(--sd-ink-3)!important;border-color:var(--sd-line)!important;box-shadow:none!important}'
+    + '#sd-upsell-hint .sd-x{color:var(--sd-ink-3)!important;border-radius:var(--sd-r-sm)!important}'
+    + '#sd-upsell-hint .sd-x:hover{background:var(--sd-line)!important;color:var(--sd-ink)!important}'
 
     /* --- панелі ВСЕРЕДИНІ форм СРМ (не вікна): «Ціни за типом», опт-ціни
            надходження, взаєморозрахунки, копія без товарів --- */
