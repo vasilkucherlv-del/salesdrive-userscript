@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.38
+// @version      3.39
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -1849,6 +1849,52 @@ var UPSELL_MAP_DATA = []; // вбудований запас прибрано: �
     +   'box-shadow:var(--sd-sh-1)!important;'
     +   'transition:background-color .18s ease,box-shadow .18s ease,transform .12s ease!important}'
     + '#sd-upsell-hint .sd-add:hover{box-shadow:var(--sd-sh-2)!important}'
+
+    /* --- панелі ВСЕРЕДИНІ форм СРМ (не вікна): «Ціни за типом», опт-ціни
+           надходження, взаєморозрахунки, копія без товарів --- */
+    + '#lk-tier-hint,#lk-tier-prev,.lk-sb-bar,#lk-arrcnt{'
+    +   'font-family:var(--sd-font)!important;border-radius:var(--sd-r)!important;'
+    +   'line-height:1.55!important}'
+    + '#lk-tier-hint{padding:12px 14px!important;margin:10px 0!important;'
+    +   'background:var(--sd-muted)!important;border:1px solid var(--sd-line)!important;'
+    +   'box-shadow:var(--sd-sh-1)!important}'
+    + '#lk-tier-hint .t{color:var(--sd-ink-2)!important;font-weight:600!important;'
+    +   'font-size:12px!important;letter-spacing:.02em!important;margin-bottom:10px!important}'
+    + '#lk-tier-hint .btns{gap:8px!important}'
+
+    /* вибір типу ціни — це ВИБІР, а не головна дія: спокійні кнопки-контури */
+    + '.lk-tier-opt{font-family:var(--sd-font)!important;font-weight:500!important;'
+    +   'border-radius:var(--sd-r-sm)!important;border:1px solid var(--sd-line)!important;'
+    +   'background:var(--sd-surface)!important;color:var(--sd-ink)!important;'
+    +   'box-shadow:var(--sd-sh-1)!important;'
+    +   'transition:background-color .18s ease,border-color .18s ease,box-shadow .18s ease,transform .12s ease!important}'
+    + '#lk-tier-hint .lk-tier-opt{padding:9px 10px!important;font-size:12.5px!important}'
+    + '.lk-tier-opt:hover{background:var(--sd-accent-soft)!important;'
+    +   'border-color:var(--sd-accent-line)!important;color:var(--sd-accent-hov)!important;'
+    +   'box-shadow:var(--sd-sh-2)!important}'
+    + '.lk-tier-opt:active{transform:translateY(1px)!important;box-shadow:var(--sd-sh-1)!important}'
+    /* «go» = підтвердити, «no» = скасувати — значення лишаються, форма нова */
+    + '.lk-tier-opt.go{background:var(--sd-accent)!important;border-color:var(--sd-accent)!important;'
+    +   'color:#fff!important;font-weight:600!important}'
+    + '.lk-tier-opt.go:hover{background:var(--sd-accent-hov)!important;'
+    +   'border-color:var(--sd-accent-hov)!important;color:#fff!important}'
+    + '.lk-tier-opt.no{background:var(--sd-surface)!important;border-color:var(--sd-line)!important;'
+    +   'color:var(--sd-ink-3)!important}'
+    + '#lk-tier-prev{border-left:3px solid var(--sd-accent)!important;'
+    +   'background:var(--sd-muted)!important;padding:12px 14px!important}'
+
+    /* кнопки-пігулки надходження і взаєморозрахунків */
+    + '.lk-arropt-btn,.lk-sb-btn,#lk-copy-ng{'
+    +   'font-family:var(--sd-font)!important;font-weight:500!important;'
+    +   'border-radius:var(--sd-r-sm)!important;box-shadow:var(--sd-sh-1)!important;'
+    +   'transition:background-color .18s ease,box-shadow .18s ease,transform .12s ease!important}'
+    + '.lk-arropt-btn:hover,.lk-sb-btn:hover,#lk-copy-ng:hover{box-shadow:var(--sd-sh-2)!important}'
+    + '.lk-arropt-btn:active,.lk-sb-btn:active,#lk-copy-ng:active{'
+    +   'transform:translateY(1px)!important;box-shadow:var(--sd-sh-1)!important}'
+
+    /* розкривні списки наборів і аналогів у рядках */
+    + '.lknb-exp,.lkan-exp,.lkck-exp,.lkmk-exp{border-radius:var(--sd-r-sm)!important;'
+    +   'box-shadow:var(--sd-sh-1)!important;line-height:1.55!important}'
 
     /* --- дрібні значки в рядках таблиць: РОЗМІРИ НЕ ЧІПАЄМО (рядки тісні),
            лише мʼякший кут і плавність --- */
