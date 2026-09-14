@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.41
+// @version      3.42
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -1748,7 +1748,11 @@ var UPSELL_MAP_DATA = []; // вбудований запас прибрано: �
     var X = '#lk-cash-box .x,#lk-sb-box .x,#lk-where-box .x,#lk-ukp-box .x,#lk-td-box .x,#sd-kb-panel .sd-kb-x';
     var css = ''
     + ':root{'
-    +   '--sd-accent:#4f46e5;--sd-accent-hov:#4338ca;--sd-accent-soft:#eef2ff;--sd-accent-line:#c7d2fe;'
+    /* Акцент — РОДИЧ фірмового синього СРМ (кнопка «Зберегти» #4697CE, тон 204°),
+       а не чужий індиго: те саме сімейство, але глибше й насиченіше, щоб наші
+       головні дії лишались помітними поряд зі штатними кнопками.
+       Контраст білого тексту на #2174AB — 5,06:1 (норма 4,5). */
+    +   '--sd-accent:#2174ab;--sd-accent-hov:#1b608d;--sd-accent-soft:#e9f4fb;--sd-accent-line:#b6d7ed;'
     +   '--sd-ink:#0f172a;--sd-ink-2:#475569;--sd-ink-3:#94a3b8;'
     +   '--sd-line:#e2e8f0;--sd-line-2:#cbd5e1;--sd-surface:#fff;--sd-muted:#f8fafc;'
     +   '--sd-r:12px;--sd-r-sm:8px;'
