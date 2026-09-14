@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.37
+// @version      3.38
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -1731,6 +1731,142 @@ var UPSELL_MAP_DATA = []; // вбудований запас прибрано: �
       + '.lk-sb-btn:active,.lk-skucopy:active,.lk-skulink:active,.lkcr:active,'
       + '.lk-arropt-btn:active,.lkan-add:active{transform:translateY(1px);filter:brightness(.94)}';
     (document.head || document.documentElement).appendChild(st);
+  })();
+
+  /* ================= СУЧАСНИЙ ВИГЛЯД (skin) =================
+     Одне місце на весь інтерфейс скрипта: токени + оформлення наших власних
+     поверхонь. Свідомо БЕЗ backdrop-filter:blur — «скло» з розмиттям коштує
+     дорого на перемальовці великих вікон, а швидкодія тут пріоритет.
+     Стиль тримається на інших засобах: мʼякі радіуси, тонкі межі, легкі тіні,
+     повітря і чітка ієрархія тексту.
+     Чого НЕ чіпаємо: кольори-значення (зелений «є в наявності», помаранчевий
+     «набори», червоний «увага») і темне ліве меню СРМ — там світлі токени
+     зробили б дірку. ========================================= */
+  (function sdSkin(){
+    var A = '#lk-cash-box,#lk-pick-box,#lk-ukp-box,#lk-where-box,#lk-td-box,#lk-sb-box,#lk-prg-box,#sd-kb-panel';
+    var BTN = A.split(',').map(function(x){ return x + ' button'; }).join(',');
+    var X = '#lk-cash-box .x,#lk-sb-box .x,#lk-where-box .x,#lk-ukp-box .x,#lk-td-box .x,#sd-kb-panel .sd-kb-x';
+    var css = ''
+    + ':root{'
+    +   '--sd-accent:#4f46e5;--sd-accent-hov:#4338ca;--sd-accent-soft:#eef2ff;--sd-accent-line:#c7d2fe;'
+    +   '--sd-ink:#0f172a;--sd-ink-2:#475569;--sd-ink-3:#94a3b8;'
+    +   '--sd-line:#e2e8f0;--sd-line-2:#cbd5e1;--sd-surface:#fff;--sd-muted:#f8fafc;'
+    +   '--sd-r:12px;--sd-r-sm:8px;'
+    +   '--sd-sh-1:0 1px 2px rgba(15,23,42,.06);'
+    +   '--sd-sh-2:0 4px 14px rgba(15,23,42,.09);'
+    +   '--sd-sh-3:0 18px 48px rgba(15,23,42,.18);'
+    +   '--sd-font:Inter,"Segoe UI","SF Pro Text",-apple-system,BlinkMacSystemFont,Roboto,Arial,sans-serif;'
+    + '}'
+
+    /* --- підкладка вікна: спокійніша, без розмиття --- */
+    + '#lk-cash-ov,#lk-pick-ov,#lk-ukp-ov,#lk-where-ov,#lk-td-ov,#lk-prg-ov{'
+    +   'background:rgba(15,23,42,.45)!important}'
+
+    /* --- саме вікно --- */
+    + A + '{font-family:var(--sd-font)!important;color:var(--sd-ink)!important;'
+    +   'background:var(--sd-surface)!important;border:1px solid var(--sd-line)!important;'
+    +   'border-radius:16px!important;box-shadow:var(--sd-sh-3)!important;line-height:1.6!important}'
+
+    /* --- шапка вікна: світла, з темним текстом --- */
+    + '#lk-cash-box .h,#lk-sb-box .h,#lk-pick-box .hd,#lk-where-box .h,#lk-ukp-box .h,#lk-td-box .h,'
+    + '#sd-kb-panel .sd-kb-head{background:var(--sd-muted)!important;color:var(--sd-ink)!important;'
+    +   'border-bottom:1px solid var(--sd-line)!important;padding:16px 20px!important}'
+    + '#sd-kb-panel .sd-kb-title,#lk-cash-box .h b,#lk-sb-box .h b{color:var(--sd-ink)!important;'
+    +   'font-weight:650!important;font-size:16px!important;letter-spacing:-.01em!important}'
+    + '#lk-pick-box .sub,#lk-cash-box .sub{color:var(--sd-ink-3)!important;font-weight:400!important}'
+
+    /* --- кнопки всередині наших вікон --- */
+    + BTN + '{font-family:var(--sd-font)!important;font-size:13px!important;font-weight:500!important;'
+    +   'border-radius:var(--sd-r-sm)!important;border:1px solid var(--sd-line)!important;'
+    +   'background:var(--sd-surface)!important;color:var(--sd-ink-2)!important;'
+    +   'padding:8px 14px!important;box-shadow:var(--sd-sh-1)!important;cursor:pointer;'
+    +   'transition:background-color .18s ease,border-color .18s ease,box-shadow .18s ease,transform .12s ease!important}'
+    + BTN.split(',').map(function(x){return x+':hover';}).join(',')
+    +   '{background:var(--sd-muted)!important;border-color:var(--sd-line-2)!important;'
+    +   'box-shadow:var(--sd-sh-2)!important;color:var(--sd-ink)!important}'
+    + BTN.split(',').map(function(x){return x+':active';}).join(',')
+    +   '{transform:translateY(1px)!important;box-shadow:var(--sd-sh-1)!important}'
+
+    /* --- обрана кнопка (режим/період) — акцент --- */
+    + '#lk-cash-modes button.on,#lk-td-box button.on,#lk-ukp-box button.on,#lk-cash-range button{'
+    +   'background:var(--sd-accent)!important;border-color:var(--sd-accent)!important;color:#fff!important;'
+    +   'font-weight:600!important;box-shadow:0 1px 3px rgba(79,70,229,.35)!important}'
+    + '#lk-cash-modes button.on:hover,#lk-cash-range button:hover{'
+    +   'background:var(--sd-accent-hov)!important;border-color:var(--sd-accent-hov)!important;color:#fff!important}'
+
+    /* --- хрестик: тихий, але з відчутною зоною --- */
+    + X + '{width:32px!important;height:32px!important;padding:0!important;'
+    +   'border:none!important;background:transparent!important;box-shadow:none!important;'
+    +   'border-radius:var(--sd-r-sm)!important;color:var(--sd-ink-3)!important;font-size:20px!important}'
+    + X.split(',').map(function(x){return x+':hover';}).join(',')
+    +   '{background:var(--sd-line)!important;color:var(--sd-ink)!important;box-shadow:none!important}'
+
+    /* --- тихі текстові кнопки лишаються посиланнями, а не «кнопками» --- */
+    + '#lk-cash-nav .today{border:none!important;background:none!important;box-shadow:none!important;'
+    +   'padding:2px 4px!important;color:var(--sd-accent)!important;font-weight:500!important;'
+    +   'text-decoration:underline!important;text-underline-offset:3px!important}'
+    + '#lk-cash-nav .today:hover{background:none!important;box-shadow:none!important;'
+    +   'color:var(--sd-accent-hov)!important}'
+
+    /* --- поля вводу --- */
+    + A.split(',').map(function(x){return x+' input,'+x+' select';}).join(',')
+    +   '{font-family:var(--sd-font)!important;border:1px solid var(--sd-line)!important;'
+    +   'border-radius:var(--sd-r-sm)!important;padding:8px 11px!important;color:var(--sd-ink)!important;'
+    +   'transition:border-color .18s ease,box-shadow .18s ease!important}'
+    + A.split(',').map(function(x){return x+' input:focus,'+x+' select:focus';}).join(',')
+    +   '{outline:none!important;border-color:var(--sd-accent)!important;'
+    +   'box-shadow:0 0 0 3px var(--sd-accent-soft)!important}'
+
+    /* --- посилання-рядки в списках: більше повітря --- */
+    + '#lk-cash-list a,#lk-cash-out-list .it{border-radius:var(--sd-r-sm)!important;'
+    +   'padding:10px 12px!important;border-bottom:1px solid var(--sd-line)!important;'
+    +   'transition:background-color .15s ease!important}'
+    + '#lk-cash-list .ttl{color:var(--sd-ink-3)!important;font-weight:600!important;letter-spacing:.06em!important}'
+
+    /* --- плаваючі кнопки --- */
+    + '#lk-cash-btn,#lk-pick-btn,#lk-ukp-btn,#lk-where-btn,#lk-round-btn{'
+    +   'box-shadow:var(--sd-sh-2)!important;border:none!important;'
+    +   'transition:box-shadow .2s ease,transform .12s ease!important}'
+    + '#lk-cash-btn:hover,#lk-pick-btn:hover,#lk-ukp-btn:hover,#lk-where-btn:hover,#lk-round-btn:hover{'
+    +   'box-shadow:var(--sd-sh-3)!important;filter:none!important}'
+    + '#sd-kb-btn{border-radius:var(--sd-r)!important;background:var(--sd-accent)!important;'
+    +   'font-family:var(--sd-font)!important;font-weight:600!important;'
+    +   'box-shadow:var(--sd-sh-2)!important;transition:background-color .18s ease,box-shadow .2s ease,transform .12s ease!important}'
+    + '#sd-kb-btn:hover{background:var(--sd-accent-hov)!important;box-shadow:var(--sd-sh-3)!important}'
+
+    /* --- кнопки у верхній смузі списку заявок --- */
+    + '#lk-td-btn,#lk-all-orders-btn{border-radius:var(--sd-r-sm)!important;'
+    +   'font-family:var(--sd-font)!important;font-weight:500!important;'
+    +   'box-shadow:var(--sd-sh-1)!important;'
+    +   'transition:background-color .18s ease,box-shadow .18s ease,transform .12s ease!important}'
+
+    /* --- банери у формі заявки: тільки мʼякість і повітря, кольори-значення лишаються --- */
+    + '#sd-upsell-hint,#sd-price-warn,#sd-rating-warn,.sd-ttn-box,#sd-stockpay-warn,#sd-bundle-fix{'
+    +   'font-family:var(--sd-font)!important;border-radius:var(--sd-r)!important;'
+    +   'box-shadow:var(--sd-sh-2)!important;line-height:1.6!important}'
+    + '#sd-upsell-hint{padding:18px 46px 20px 20px!important}'
+    + '#sd-upsell-hint .sd-add{border-radius:var(--sd-r-sm)!important;font-weight:600!important;'
+    +   'box-shadow:var(--sd-sh-1)!important;'
+    +   'transition:background-color .18s ease,box-shadow .18s ease,transform .12s ease!important}'
+    + '#sd-upsell-hint .sd-add:hover{box-shadow:var(--sd-sh-2)!important}'
+
+    /* --- дрібні значки в рядках таблиць: РОЗМІРИ НЕ ЧІПАЄМО (рядки тісні),
+           лише мʼякший кут і плавність --- */
+    + '.lk-skucopy,.lk-skulink{border-radius:var(--sd-r-sm)!important;'
+    +   'transition:background-color .15s ease,border-color .15s ease!important}'
+    + '.lkcp-chip,.lkcr{border-radius:var(--sd-r-sm)!important}';
+
+    var st = document.createElement('style');
+    st.id = 'sd-skin';
+    st.textContent = css;
+    function put(){
+      if (!document.head) return;
+      // наша шкіра має лежати ОСТАННЬОЮ: три модулі вставляють свої стилі
+      // пізніше (коли вперше відкриваєш вікно), і мають програвати цій
+      if (document.head.lastElementChild !== st) document.head.appendChild(st);
+    }
+    setTimeout(put, 0);                        // після того, як усі модулі вставили своє
+    window.addEventListener('lkdom', put);     // перевірка O(1), переміщення — лічені рази
   })();
 
   // тягнемо карту з таблиці при завантаженні сторінки
