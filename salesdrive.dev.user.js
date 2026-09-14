@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.39
+// @version      3.40
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -1891,6 +1891,55 @@ var UPSELL_MAP_DATA = []; // вбудований запас прибрано: �
     + '.lk-arropt-btn:hover,.lk-sb-btn:hover,#lk-copy-ng:hover{box-shadow:var(--sd-sh-2)!important}'
     + '.lk-arropt-btn:active,.lk-sb-btn:active,#lk-copy-ng:active{'
     +   'transform:translateY(1px)!important;box-shadow:var(--sd-sh-1)!important}'
+
+    /* --- надходження: колонки, які домальовуємо в таблицю СРМ ---
+           Моноширинний шрифт ЛИШАЄТЬСЯ: на ньому ціни вирівнюються у стовпчик,
+           це робота, а не прикраса. Вертикальні відступи теж не чіпаємо —
+           більше повітря тут підняло б висоту кожного рядка накладної. */
+    // смуга на КОЖНОМУ рядку зливається у суцільну лінію на всю висоту таблиці,
+    // тож у комірках вона світла, а насичений індиго лишається в заголовку
+    + 'td.lk-arropt-td,td.lk-roz-td{background:var(--sd-muted)!important;'
+    +   'border-left:3px solid var(--sd-accent-line)!important;color:var(--sd-ink)!important}'
+    + 'td.lk-arropt-td.blank{background:transparent!important;border-left:none!important}'
+    + 'td.lk-arropt-td .nw{color:var(--sd-ink)!important;font-weight:700!important}'
+    + 'td.lk-arropt-td .od,td.lk-roz-td .od{color:var(--sd-ink-3)!important}'
+    + 'th.lk-arropt-td,th.lk-roz-th{background:var(--sd-muted)!important;'
+    +   'color:var(--sd-ink-2)!important;font-family:var(--sd-font)!important;'
+    +   'font-weight:600!important;border-left:3px solid var(--sd-accent)!important}'
+    + '.lk-arropt-chk{accent-color:var(--sd-accent)!important}'
+
+    /* панель дій над таблицею і плашка комплектів */
+    + '#lk-arropt-res,#lk-kits-res{font-family:var(--sd-font)!important;'
+    +   'background:var(--sd-surface)!important;color:var(--sd-ink-2)!important;'
+    +   'border:1px solid var(--sd-line)!important;border-left:4px solid var(--sd-accent)!important;'
+    +   'border-radius:var(--sd-r)!important;box-shadow:var(--sd-sh-1)!important;'
+    +   'padding:14px 16px!important;line-height:1.6!important}'
+    + '#lk-arropt-res .h,#lk-kits-res .h{color:var(--sd-ink)!important;'
+    +   'font-weight:600!important;margin-bottom:8px!important}'
+    + '#lk-kits-res .row{border-top:1px solid var(--sd-line)!important;padding:7px 0!important}'
+    + '#lk-kits-res .sub{color:var(--sd-ink-3)!important}'
+    + '#lk-kits-res a.lk-kit-link{color:var(--sd-accent)!important;text-decoration:none!important}'
+    + '#lk-kits-res a.lk-kit-link:hover{color:var(--sd-accent-hov)!important;'
+    +   'text-decoration:underline!important;text-underline-offset:3px!important}'
+    + '#lk-kits-res .act{margin-top:12px!important}'
+    + '#lk-arropt-res .x,#lk-kits-res .x{top:8px!important;right:10px!important;'
+    +   'width:28px!important;height:28px!important;border-radius:var(--sd-r-sm)!important;'
+    +   'color:var(--sd-ink-3)!important;font-size:18px!important;'
+    +   'transition:background-color .18s ease,color .18s ease!important}'
+    + '#lk-arropt-res .x:hover,#lk-kits-res .x:hover{background:var(--sd-line)!important;'
+    +   'color:var(--sd-ink)!important}'
+
+    /* головна дія — індиго; «↩ Повернути ціни» не має з нею конкурувати */
+    + '.lk-arropt-btn{background:var(--sd-accent)!important;color:#fff!important;'
+    +   'border:1px solid var(--sd-accent)!important}'
+    + '.lk-arropt-btn:hover{background:var(--sd-accent-hov)!important;'
+    +   'border-color:var(--sd-accent-hov)!important}'
+    + '.lk-arropt-btn-undo,.lk-arropt-btn-quiet{background:var(--sd-surface)!important;'
+    +   'color:var(--sd-ink-2)!important;border:1px solid var(--sd-line)!important}'
+    + '.lk-arropt-btn-undo:hover,.lk-arropt-btn-quiet:hover{background:var(--sd-muted)!important;'
+    +   'border-color:var(--sd-line-2)!important;color:var(--sd-ink)!important}'
+    + '.lk-arropt-btn[disabled]{background:var(--sd-muted)!important;color:var(--sd-ink-3)!important;'
+    +   'border-color:var(--sd-line)!important;box-shadow:none!important}'
 
     /* розкривні списки наборів і аналогів у рядках */
     + '.lknb-exp,.lkan-exp,.lkck-exp,.lkmk-exp{border-radius:var(--sd-r-sm)!important;'
@@ -7137,8 +7186,10 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
           errLines(box2, d2.rows);
         }, function(p){ ap.textContent='✅ Пишу '+p+'…'; });
       });
-      var cl=document.createElement('button'); cl.className='lk-arropt-btn';
-      cl.style.background='#9e9e9e'; cl.textContent='✕ Прибрати';
+      // другорядна дія: колір класом, а не інлайном — інакше оформлення
+      // не може відрізнити її від головної кнопки
+      var cl=document.createElement('button'); cl.className='lk-arropt-btn lk-arropt-btn-quiet';
+      cl.textContent='✕ Прибрати';
       cl.addEventListener('click',function(){ clearView(); });
       box.appendChild(ap); box.appendChild(cl);
       updateApplyLabel();
