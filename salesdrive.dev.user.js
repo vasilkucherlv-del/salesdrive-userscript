@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.36
+// @version      3.37
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -419,6 +419,33 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   // картки складаються стосом — потрібна ОСТАННЯ видима, тобто та, що зараз зверху
   function sdCardRoot()    { _crCalc(); return _crVis.length ? _crVis[_crVis.length - 1] : null; }
   function sdCardVisible() { _crCalc(); return _crVis.slice(); }
+
+  /* Код товару з рядка «SKU» картки.
+     Просто взяти textContent рядка НЕ можна: у цьому ж рядку стоїть НАША кнопка
+     ⧉ (а в рядках товару ще й 🌐), і код перетворювався на «01278 ⧉». Через це
+     блок аналогів і «🔒 у роботі» тихо не знаходили товар у своїх картах, а коли
+     кнопка зʼявлялась ПІЗНІШЕ за блок — код «мінявся», і блок сам себе прибирав:
+     аналоги блимали. */
+  function sdCardSku(root) {
+    if (!root) return '';
+    var labels = root.querySelectorAll('label');
+    for (var i = 0; i < labels.length; i++) {
+      var l = labels[i];
+      if (!/^SKU$/i.test(String(l.textContent || '').replace(/\s+/g, ' ').trim())) continue;
+      var box = l.parentElement; if (!box) continue;
+      var txt = '';
+      for (var j = 0; j < box.childNodes.length; j++) {
+        var kid = box.childNodes[j];
+        if (kid === l) continue;                                  // сам підпис «SKU»
+        if (kid.nodeType === 1 && kid.classList &&
+            (kid.classList.contains('lk-skucopy') || kid.classList.contains('lk-skulink'))) continue;
+        txt += (kid.textContent || '');
+      }
+      return txt.replace(/[\u29C9\u2713\uD83C\uDF10]/g, '').replace(/\s+/g, ' ').trim();
+    }
+    return '';
+  }
+  try { window.sdCardSku = sdCardSku; } catch (e) {}
   /* Рядки товарів (а з ними наші значки) бувають лише в картці заявки, у
      документах і на сторінках товару. Список заявок — найважчий документ у СРМ
      (13 тис. вузлів), і саме там модулі сканували його даремно. */
@@ -5269,12 +5296,13 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     let kits = id2kits.get(id) || [];
     if (!kits.length) {
       // фолбек за кодом: беремо значення рядка «SKU» у картці
-      let sku = '';
-      root.querySelectorAll('label').forEach(l => {
+      let sku = (typeof window.sdCardSku === 'function') ? window.sdCardSku(root) : '';
+      if (!sku) root.querySelectorAll('label').forEach(l => {
         if (sku) return;
         if (/^SKU$/i.test(norm(l.textContent))) {
           const outer = l.parentElement;
-          if (outer) sku = norm(String(outer.textContent || '').replace(norm(l.textContent), ''));
+          if (outer) sku = norm(String(outer.textContent || '')
+            .replace(norm(l.textContent), '').replace(/[\u29C9\u2713]/g, ''));
         }
       });
       if (sku) kits = sku2kits.get(sku) || [];
@@ -5360,13 +5388,14 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   }
   // код товару з рядка «SKU» картки
   function skuOf(root){
+    if (typeof window.sdCardSku === 'function') return window.sdCardSku(root);   // спільний читач ядра
     var out = '';
     [].forEach.call(root.querySelectorAll('label'), function (l) {
       if (out) return;
       var t = norm(l.textContent);
       if (/^SKU$/i.test(t)) {
         var box = l.parentElement;
-        if (box) out = norm(String(box.textContent || '').replace(t, ''));
+        if (box) out = norm(String(box.textContent || '').replace(t, '').replace(/[\u29C9\u2713]/g, ''));
       }
     });
     return out;
@@ -9384,8 +9413,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     return null;
   }
   function skuOf(root){
+    if (typeof window.sdCardSku === 'function') return window.sdCardSku(root);   // спільний читач ядра
     var row=labelRow(root,'SKU'); if(!row) return '';
-    return norm(String(row.textContent||'').replace(/SKU/,''));
+    return norm(String(row.textContent||'').replace(/SKU/,'').replace(/[\u29C9\u2713]/g,''));
   }
 
   // результат памʼятаємо 2 хв на код — щоб пульси DOM не перезапускали підрахунок
