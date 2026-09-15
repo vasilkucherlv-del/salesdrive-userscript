@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      3.37
+// @version      3.47
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -1731,6 +1731,264 @@ var UPSELL_MAP_DATA = []; // вбудований запас прибрано: �
       + '.lk-sb-btn:active,.lk-skucopy:active,.lk-skulink:active,.lkcr:active,'
       + '.lk-arropt-btn:active,.lkan-add:active{transform:translateY(1px);filter:brightness(.94)}';
     (document.head || document.documentElement).appendChild(st);
+  })();
+
+  /* ================= СУЧАСНИЙ ВИГЛЯД (skin) =================
+     Одне місце на весь інтерфейс скрипта: токени + оформлення наших власних
+     поверхонь. Свідомо БЕЗ backdrop-filter:blur — «скло» з розмиттям коштує
+     дорого на перемальовці великих вікон, а швидкодія тут пріоритет.
+     Стиль тримається на інших засобах: мʼякі радіуси, тонкі межі, легкі тіні,
+     повітря і чітка ієрархія тексту.
+     Чого НЕ чіпаємо: кольори-значення (зелений «є в наявності», помаранчевий
+     «набори», червоний «увага») і темне ліве меню СРМ — там світлі токени
+     зробили б дірку. ========================================= */
+  (function sdSkin(){
+    var A = '#lk-cash-box,#lk-pick-box,#lk-ukp-box,#lk-where-box,#lk-td-box,#lk-sb-box,#lk-prg-box,#sd-kb-panel';
+    var BTN = A.split(',').map(function(x){ return x + ' button'; }).join(',');
+    var X = '#lk-cash-box .x,#lk-sb-box .x,#lk-where-box .x,#lk-ukp-box .x,#lk-td-box .x,#sd-kb-panel .sd-kb-x';
+    var css = ''
+    + ':root{'
+    /* Акцент — РОДИЧ фірмового синього СРМ (кнопка «Зберегти» #4697CE, тон 204°),
+       а не чужий індиго: те саме сімейство, але глибше й насиченіше, щоб наші
+       головні дії лишались помітними поряд зі штатними кнопками.
+       Контраст білого тексту на #2174AB — 5,06:1 (норма 4,5). */
+    +   '--sd-accent:#2174ab;--sd-accent-hov:#1b608d;--sd-accent-soft:#e9f4fb;--sd-accent-line:#b6d7ed;'
+    +   '--sd-ink:#0f172a;--sd-ink-2:#475569;--sd-ink-3:#94a3b8;'
+    +   '--sd-line:#e2e8f0;--sd-line-2:#cbd5e1;--sd-surface:#fff;--sd-muted:#f8fafc;'
+    +   '--sd-r:12px;--sd-r-sm:8px;'
+    +   '--sd-sh-1:0 1px 2px rgba(15,23,42,.06);'
+    +   '--sd-sh-2:0 4px 14px rgba(15,23,42,.09);'
+    +   '--sd-sh-3:0 18px 48px rgba(15,23,42,.18);'
+    +   '--sd-font:Inter,"Segoe UI","SF Pro Text",-apple-system,BlinkMacSystemFont,Roboto,Arial,sans-serif;'
+    + '}'
+
+    /* --- підкладка вікна: спокійніша, без розмиття --- */
+    + '#lk-cash-ov,#lk-pick-ov,#lk-ukp-ov,#lk-where-ov,#lk-td-ov,#lk-prg-ov{'
+    +   'background:rgba(15,23,42,.45)!important}'
+
+    /* --- саме вікно --- */
+    + A + '{font-family:var(--sd-font)!important;color:var(--sd-ink)!important;'
+    +   'background:var(--sd-surface)!important;border:1px solid var(--sd-line)!important;'
+    +   'border-radius:16px!important;box-shadow:var(--sd-sh-3)!important;line-height:1.6!important}'
+
+    /* --- шапка вікна: світла, з темним текстом --- */
+    + '#lk-cash-box .h,#lk-sb-box .h,#lk-pick-box .hd,#lk-where-box .h,#lk-ukp-box .h,#lk-td-box .h,'
+    + '#sd-kb-panel .sd-kb-head{background:var(--sd-muted)!important;color:var(--sd-ink)!important;'
+    +   'border-bottom:1px solid var(--sd-line)!important;padding:16px 20px!important}'
+    + '#sd-kb-panel .sd-kb-title,#lk-cash-box .h b,#lk-sb-box .h b{color:var(--sd-ink)!important;'
+    +   'font-weight:650!important;font-size:16px!important;letter-spacing:-.01em!important}'
+    + '#lk-pick-box .sub,#lk-cash-box .sub{color:var(--sd-ink-3)!important;font-weight:400!important}'
+
+    /* --- кнопки всередині наших вікон --- */
+    + BTN + '{font-family:var(--sd-font)!important;font-size:13px!important;font-weight:500!important;'
+    +   'border-radius:var(--sd-r-sm)!important;border:1px solid var(--sd-line)!important;'
+    +   'background:var(--sd-surface)!important;color:var(--sd-ink-2)!important;'
+    +   'padding:8px 14px!important;box-shadow:var(--sd-sh-1)!important;cursor:pointer;'
+    +   'transition:background-color .18s ease,border-color .18s ease,box-shadow .18s ease,transform .12s ease!important}'
+    + BTN.split(',').map(function(x){return x+':hover';}).join(',')
+    +   '{background:var(--sd-muted)!important;border-color:var(--sd-line-2)!important;'
+    +   'box-shadow:var(--sd-sh-2)!important;color:var(--sd-ink)!important}'
+    + BTN.split(',').map(function(x){return x+':active';}).join(',')
+    +   '{transform:translateY(1px)!important;box-shadow:var(--sd-sh-1)!important}'
+
+    /* --- обрана кнопка (режим/період) — акцент --- */
+    + '#lk-cash-modes button.on,#lk-td-box button.on,#lk-ukp-box button.on,#lk-cash-range button{'
+    +   'background:var(--sd-accent)!important;border-color:var(--sd-accent)!important;color:#fff!important;'
+    +   'font-weight:600!important;box-shadow:0 1px 3px rgba(79,70,229,.35)!important}'
+    + '#lk-cash-modes button.on:hover,#lk-cash-range button:hover{'
+    +   'background:var(--sd-accent-hov)!important;border-color:var(--sd-accent-hov)!important;color:#fff!important}'
+
+    /* --- хрестик: тихий, але з відчутною зоною --- */
+    + X + '{width:32px!important;height:32px!important;padding:0!important;'
+    +   'border:none!important;background:transparent!important;box-shadow:none!important;'
+    +   'border-radius:var(--sd-r-sm)!important;color:var(--sd-ink-3)!important;font-size:20px!important}'
+    + X.split(',').map(function(x){return x+':hover';}).join(',')
+    +   '{background:var(--sd-line)!important;color:var(--sd-ink)!important;box-shadow:none!important}'
+
+    /* --- тихі текстові кнопки лишаються посиланнями, а не «кнопками» --- */
+    + '#lk-cash-nav .today{border:none!important;background:none!important;box-shadow:none!important;'
+    +   'padding:2px 4px!important;color:var(--sd-accent)!important;font-weight:500!important;'
+    +   'text-decoration:underline!important;text-underline-offset:3px!important}'
+    + '#lk-cash-nav .today:hover{background:none!important;box-shadow:none!important;'
+    +   'color:var(--sd-accent-hov)!important}'
+
+    /* --- поля вводу --- */
+    + A.split(',').map(function(x){return x+' input,'+x+' select';}).join(',')
+    +   '{font-family:var(--sd-font)!important;border:1px solid var(--sd-line)!important;'
+    +   'border-radius:var(--sd-r-sm)!important;padding:8px 11px!important;color:var(--sd-ink)!important;'
+    +   'transition:border-color .18s ease,box-shadow .18s ease!important}'
+    + A.split(',').map(function(x){return x+' input:focus,'+x+' select:focus';}).join(',')
+    +   '{outline:none!important;border-color:var(--sd-accent)!important;'
+    +   'box-shadow:0 0 0 3px var(--sd-accent-soft)!important}'
+
+    /* --- посилання-рядки в списках: більше повітря --- */
+    + '#lk-cash-list a,#lk-cash-out-list .it{border-radius:var(--sd-r-sm)!important;'
+    +   'padding:10px 12px!important;border-bottom:1px solid var(--sd-line)!important;'
+    +   'transition:background-color .15s ease!important}'
+    + '#lk-cash-list .ttl{color:var(--sd-ink-3)!important;font-weight:600!important;letter-spacing:.06em!important}'
+
+    /* --- плаваючі кнопки --- */
+    + '#lk-cash-btn,#lk-pick-btn,#lk-ukp-btn,#lk-where-btn,#lk-round-btn{'
+    +   'box-shadow:var(--sd-sh-2)!important;border:none!important;'
+    +   'transition:box-shadow .2s ease,transform .12s ease!important}'
+    + '#lk-cash-btn:hover,#lk-pick-btn:hover,#lk-ukp-btn:hover,#lk-where-btn:hover,#lk-round-btn:hover{'
+    +   'box-shadow:var(--sd-sh-3)!important;filter:none!important}'
+    + '#sd-kb-btn{border-radius:var(--sd-r)!important;background:var(--sd-accent)!important;'
+    +   'font-family:var(--sd-font)!important;font-weight:600!important;'
+    +   'box-shadow:var(--sd-sh-2)!important;transition:background-color .18s ease,box-shadow .2s ease,transform .12s ease!important}'
+    + '#sd-kb-btn:hover{background:var(--sd-accent-hov)!important;box-shadow:var(--sd-sh-3)!important}'
+
+    /* --- кнопки у верхній смузі списку заявок --- */
+    + '#lk-td-btn,#lk-all-orders-btn{border-radius:var(--sd-r-sm)!important;'
+    +   'font-family:var(--sd-font)!important;font-weight:500!important;'
+    +   'box-shadow:var(--sd-sh-1)!important;'
+    +   'transition:background-color .18s ease,box-shadow .18s ease,transform .12s ease!important}'
+
+    /* --- банери у формі заявки: тільки мʼякість і повітря, кольори-значення лишаються --- */
+    + '#sd-upsell-hint,#sd-price-warn,#sd-rating-warn,.sd-ttn-box,#sd-stockpay-warn,#sd-bundle-fix{'
+    +   'font-family:var(--sd-font)!important;border-radius:var(--sd-r)!important;'
+    +   'box-shadow:var(--sd-sh-2)!important;line-height:1.6!important}'
+    /* Банер допродажу: модуль перевигляду ставив width:100%/max-width:none, тож
+       він розтягувався на всю ширину таблиці й праворуч лишалась порожнеча.
+       Робимо картку сталої ширини, як решта наших поверхонь. */
+    + '#sd-upsell-hint{max-width:900px!important;width:auto!important;'
+    +   'padding:14px 40px 16px 16px!important;'
+    +   'background:var(--sd-surface)!important;border:1px solid var(--sd-line)!important;'
+    +   'border-left:4px solid var(--sd-accent)!important;color:var(--sd-ink)!important}'
+    + '#sd-upsell-hint .sd-top{color:var(--sd-ink-3)!important;font-weight:600!important}'
+    + '#sd-upsell-hint .sd-item{border-top-color:var(--sd-line)!important}'
+    + '#sd-upsell-hint .sd-name{color:var(--sd-ink)!important;letter-spacing:0!important}'
+    + '#sd-upsell-hint .sd-script{color:var(--sd-ink-2)!important}'
+    + '#sd-upsell-hint .sd-price{background:var(--sd-muted)!important;'
+    +   'border:1px solid var(--sd-line)!important;border-radius:var(--sd-r-sm)!important}'
+    + '#sd-upsell-hint .sd-price-lab{color:var(--sd-ink-3)!important}'
+    + '#sd-upsell-hint .sd-price-val{color:var(--sd-ink)!important}'
+    /* кнопка була темно-зеленою — а зелений тут уже означає «є в наявності».
+       Головна дія стає індиговою, і зелений лишається тільки станом складу. */
+    + '#sd-upsell-hint .sd-add{background:var(--sd-accent)!important;color:#fff!important;'
+    +   'border:1px solid var(--sd-accent)!important;'
+    +   'border-radius:var(--sd-r-sm)!important;font-weight:600!important;'
+    +   'box-shadow:var(--sd-sh-1)!important;'
+    +   'transition:background-color .18s ease,box-shadow .18s ease,transform .12s ease!important}'
+    + '#sd-upsell-hint .sd-add:hover{background:var(--sd-accent-hov)!important;'
+    +   'border-color:var(--sd-accent-hov)!important;box-shadow:var(--sd-sh-2)!important}'
+    + '#sd-upsell-hint .sd-add.sd-done{background:var(--sd-muted)!important;'
+    +   'color:var(--sd-ink-3)!important;border-color:var(--sd-line)!important;box-shadow:none!important}'
+    + '#sd-upsell-hint .sd-x{color:var(--sd-ink-3)!important;border-radius:var(--sd-r-sm)!important}'
+    + '#sd-upsell-hint .sd-x:hover{background:var(--sd-line)!important;color:var(--sd-ink)!important}'
+
+    /* --- панелі ВСЕРЕДИНІ форм СРМ (не вікна): «Ціни за типом», опт-ціни
+           надходження, взаєморозрахунки, копія без товарів --- */
+    + '#lk-tier-hint,#lk-tier-prev,.lk-sb-bar,#lk-arrcnt{'
+    +   'font-family:var(--sd-font)!important;border-radius:var(--sd-r)!important;'
+    +   'line-height:1.55!important}'
+    + '#lk-tier-hint{padding:12px 14px!important;margin:10px 0!important;'
+    +   'background:var(--sd-muted)!important;border:1px solid var(--sd-line)!important;'
+    +   'box-shadow:var(--sd-sh-1)!important}'
+    + '#lk-tier-hint .t{color:var(--sd-ink-2)!important;font-weight:600!important;'
+    +   'font-size:12px!important;letter-spacing:.02em!important;margin-bottom:10px!important}'
+    + '#lk-tier-hint .btns{gap:8px!important}'
+
+    /* вибір типу ціни — це ВИБІР, а не головна дія: спокійні кнопки-контури */
+    + '.lk-tier-opt{font-family:var(--sd-font)!important;font-weight:500!important;'
+    +   'border-radius:var(--sd-r-sm)!important;border:1px solid var(--sd-line)!important;'
+    +   'background:var(--sd-surface)!important;color:var(--sd-ink)!important;'
+    +   'box-shadow:var(--sd-sh-1)!important;'
+    +   'transition:background-color .18s ease,border-color .18s ease,box-shadow .18s ease,transform .12s ease!important}'
+    + '#lk-tier-hint .lk-tier-opt{padding:9px 10px!important;font-size:12.5px!important}'
+    + '.lk-tier-opt:hover{background:var(--sd-accent-soft)!important;'
+    +   'border-color:var(--sd-accent-line)!important;color:var(--sd-accent-hov)!important;'
+    +   'box-shadow:var(--sd-sh-2)!important}'
+    + '.lk-tier-opt:active{transform:translateY(1px)!important;box-shadow:var(--sd-sh-1)!important}'
+    /* «go» = підтвердити, «no» = скасувати — значення лишаються, форма нова */
+    + '.lk-tier-opt.go{background:var(--sd-accent)!important;border-color:var(--sd-accent)!important;'
+    +   'color:#fff!important;font-weight:600!important}'
+    + '.lk-tier-opt.go:hover{background:var(--sd-accent-hov)!important;'
+    +   'border-color:var(--sd-accent-hov)!important;color:#fff!important}'
+    + '.lk-tier-opt.no{background:var(--sd-surface)!important;border-color:var(--sd-line)!important;'
+    +   'color:var(--sd-ink-3)!important}'
+    + '#lk-tier-prev{border-left:3px solid var(--sd-accent)!important;'
+    +   'background:var(--sd-muted)!important;padding:12px 14px!important}'
+
+    /* кнопки-пігулки надходження і взаєморозрахунків */
+    + '.lk-arropt-btn,.lk-sb-btn,#lk-copy-ng{'
+    +   'font-family:var(--sd-font)!important;font-weight:500!important;'
+    +   'border-radius:var(--sd-r-sm)!important;box-shadow:var(--sd-sh-1)!important;'
+    +   'transition:background-color .18s ease,box-shadow .18s ease,transform .12s ease!important}'
+    + '.lk-arropt-btn:hover,.lk-sb-btn:hover,#lk-copy-ng:hover{box-shadow:var(--sd-sh-2)!important}'
+    + '.lk-arropt-btn:active,.lk-sb-btn:active,#lk-copy-ng:active{'
+    +   'transform:translateY(1px)!important;box-shadow:var(--sd-sh-1)!important}'
+
+    /* --- надходження: колонки, які домальовуємо в таблицю СРМ ---
+           Моноширинний шрифт ЛИШАЄТЬСЯ: на ньому ціни вирівнюються у стовпчик,
+           це робота, а не прикраса. Вертикальні відступи теж не чіпаємо —
+           більше повітря тут підняло б висоту кожного рядка накладної. */
+    // смуга на КОЖНОМУ рядку зливається у суцільну лінію на всю висоту таблиці,
+    // тож у комірках вона світла, а насичений індиго лишається в заголовку
+    + 'td.lk-arropt-td,td.lk-roz-td{background:var(--sd-muted)!important;'
+    +   'border-left:3px solid var(--sd-accent-line)!important;color:var(--sd-ink)!important}'
+    + 'td.lk-arropt-td.blank{background:transparent!important;border-left:none!important}'
+    + 'td.lk-arropt-td .nw{color:var(--sd-ink)!important;font-weight:700!important}'
+    + 'td.lk-arropt-td .od,td.lk-roz-td .od{color:var(--sd-ink-3)!important}'
+    + 'th.lk-arropt-td,th.lk-roz-th{background:var(--sd-muted)!important;'
+    +   'color:var(--sd-ink-2)!important;font-family:var(--sd-font)!important;'
+    +   'font-weight:600!important;border-left:3px solid var(--sd-accent)!important}'
+    + '.lk-arropt-chk{accent-color:var(--sd-accent)!important}'
+
+    /* панель дій над таблицею і плашка комплектів */
+    + '#lk-arropt-res,#lk-kits-res{font-family:var(--sd-font)!important;'
+    +   'background:var(--sd-surface)!important;color:var(--sd-ink-2)!important;'
+    +   'border:1px solid var(--sd-line)!important;border-left:4px solid var(--sd-accent)!important;'
+    +   'border-radius:var(--sd-r)!important;box-shadow:var(--sd-sh-1)!important;'
+    +   'padding:14px 16px!important;line-height:1.6!important}'
+    + '#lk-arropt-res .h,#lk-kits-res .h{color:var(--sd-ink)!important;'
+    +   'font-weight:600!important;margin-bottom:8px!important}'
+    + '#lk-kits-res .row{border-top:1px solid var(--sd-line)!important;padding:7px 0!important}'
+    + '#lk-kits-res .sub{color:var(--sd-ink-3)!important}'
+    + '#lk-kits-res a.lk-kit-link{color:var(--sd-accent)!important;text-decoration:none!important}'
+    + '#lk-kits-res a.lk-kit-link:hover{color:var(--sd-accent-hov)!important;'
+    +   'text-decoration:underline!important;text-underline-offset:3px!important}'
+    + '#lk-kits-res .act{margin-top:12px!important}'
+    + '#lk-arropt-res .x,#lk-kits-res .x{top:8px!important;right:10px!important;'
+    +   'width:28px!important;height:28px!important;border-radius:var(--sd-r-sm)!important;'
+    +   'color:var(--sd-ink-3)!important;font-size:18px!important;'
+    +   'transition:background-color .18s ease,color .18s ease!important}'
+    + '#lk-arropt-res .x:hover,#lk-kits-res .x:hover{background:var(--sd-line)!important;'
+    +   'color:var(--sd-ink)!important}'
+
+    /* головна дія — індиго; «↩ Повернути ціни» не має з нею конкурувати */
+    + '.lk-arropt-btn{background:var(--sd-accent)!important;color:#fff!important;'
+    +   'border:1px solid var(--sd-accent)!important}'
+    + '.lk-arropt-btn:hover{background:var(--sd-accent-hov)!important;'
+    +   'border-color:var(--sd-accent-hov)!important}'
+    + '.lk-arropt-btn-undo,.lk-arropt-btn-quiet{background:var(--sd-surface)!important;'
+    +   'color:var(--sd-ink-2)!important;border:1px solid var(--sd-line)!important}'
+    + '.lk-arropt-btn-undo:hover,.lk-arropt-btn-quiet:hover{background:var(--sd-muted)!important;'
+    +   'border-color:var(--sd-line-2)!important;color:var(--sd-ink)!important}'
+    + '.lk-arropt-btn[disabled]{background:var(--sd-muted)!important;color:var(--sd-ink-3)!important;'
+    +   'border-color:var(--sd-line)!important;box-shadow:none!important}'
+
+    /* розкривні списки наборів і аналогів у рядках */
+    + '.lknb-exp,.lkan-exp,.lkck-exp,.lkmk-exp{border-radius:var(--sd-r-sm)!important;'
+    +   'box-shadow:var(--sd-sh-1)!important;line-height:1.55!important}'
+
+    /* --- дрібні значки в рядках таблиць: РОЗМІРИ НЕ ЧІПАЄМО (рядки тісні),
+           лише мʼякший кут і плавність --- */
+    + '.lk-skucopy,.lk-skulink{border-radius:var(--sd-r-sm)!important;'
+    +   'transition:background-color .15s ease,border-color .15s ease!important}'
+    + '.lkcp-chip,.lkcr{border-radius:var(--sd-r-sm)!important}';
+
+    var st = document.createElement('style');
+    st.id = 'sd-skin';
+    st.textContent = css;
+    function put(){
+      if (!document.head) return;
+      // наша шкіра має лежати ОСТАННЬОЮ: три модулі вставляють свої стилі
+      // пізніше (коли вперше відкриваєш вікно), і мають програвати цій
+      if (document.head.lastElementChild !== st) document.head.appendChild(st);
+    }
+    setTimeout(put, 0);                        // після того, як усі модулі вставили своє
+    window.addEventListener('lkdom', put);     // перевірка O(1), переміщення — лічені рази
   })();
 
   // тягнемо карту з таблиці при завантаженні сторінки
@@ -6955,8 +7213,10 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
           errLines(box2, d2.rows);
         }, function(p){ ap.textContent='✅ Пишу '+p+'…'; });
       });
-      var cl=document.createElement('button'); cl.className='lk-arropt-btn';
-      cl.style.background='#9e9e9e'; cl.textContent='✕ Прибрати';
+      // другорядна дія: колір класом, а не інлайном — інакше оформлення
+      // не може відрізнити її від головної кнопки
+      var cl=document.createElement('button'); cl.className='lk-arropt-btn lk-arropt-btn-quiet';
+      cl.textContent='✕ Прибрати';
       cl.addEventListener('click',function(){ clearView(); });
       box.appendChild(ap); box.appendChild(cl);
       updateApplyLabel();
@@ -9737,7 +9997,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 try{ // SD-ізоляція: помилка цього модуля не зупинить решту
 (function lkPrintedGuardList(){
   'use strict';
-  var CKEY='lk_prguard_v1', CTTL=10*60*1000;   // кеш мапи друку, 10 хв
+  var CKEY='lk_prguard_v2', CTTL=10*60*1000;   // кеш мапи друку, 10 хв (v2: лише Укрпошта)
+  var UKR_SM=30;                               // доставка Укрпошта (як у lkUkrPromList)
   var PKEY='lk_ttnprint_v1';                   // лічильник друків на цьому ПК (спільний із lkTtnPrintGuard)
   var map=null, mapSig='', loading=false;
 
@@ -9790,7 +10051,12 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       return window.sdApi.orders(qs, page).then(function(res){
         (res.rows||[]).forEach(function(o){
           var d=(o.ord_delivery_data||[])[0]||{};
-          acc[String(o.id)]={ printed: Number(d.isPrinted)===1,
+          // Сторожа — ЛИШЕ для Укрпошти, як і в картці заявки (lkTtnPrintGuard).
+          // У Нової Пошти isPrinted означає інше й стоїть майже скрізь: без цієї
+          // перевірки попередження спрацьовувало на всі вибрані НП-заявки підряд.
+          var prov=String(d.provider||'').toLowerCase();
+          var isUkr = prov==='ukrposhta' || Number(o.shipping_method)===UKR_SM;
+          acc[String(o.id)]={ printed: isUkr && Number(d.isPrinted)===1,
                               ttn: String(d.trackingNumber||''),
                               provider: String(d.provider||'') };
         });
@@ -9811,12 +10077,33 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     s.textContent=''
     +'.lk-prg-badge{display:block;width:fit-content;margin:3px 0 0;padding:1px 6px;border-radius:9px;white-space:nowrap;'
       +'background:#c0392b;color:#fff;font:700 10px/1.5 sans-serif;vertical-align:middle;white-space:nowrap}'
-    +'#lk-prg-bar{position:sticky;top:0;z-index:99997;margin:0 0 6px;padding:8px 12px;border-radius:8px;'
-      +'background:#fdecea;border:1px solid #c0392b;color:#7b241c;font:13px/1.4 -apple-system,Segoe UI,Roboto,sans-serif}'
+    // Була sticky з величезним z-index — через це смуга висіла ПОВЕРХ сторінки
+    // і перекривала випадне меню «Виберіть дію». Тепер вона в звичайному потоці
+    // (relative лише щоб тримати хрестик) і нічого собою не закриває.
+    // Ширину обмежуємо, інакше таблиця розтягувалась на весь екран і хрестик
+    // опинявся аж за кадром.
+    +'#lk-prg-bar{position:relative;margin:0 0 8px;padding:12px 44px 12px 14px;border-radius:12px;'
+      +'max-width:900px;box-sizing:border-box;'
+      +'background:#fdecea;border:1px solid #e6b0aa;border-left:4px solid #c0392b;color:#7b241c;'
+      +'box-shadow:0 1px 2px rgba(15,23,42,.06);font:13px/1.5 -apple-system,Segoe UI,Roboto,sans-serif}'
+    +'#lk-prg-bar .x{position:absolute;top:6px;right:8px;width:28px;height:28px;padding:0;'
+      +'border:none;background:none;cursor:pointer;font-size:19px;line-height:1;color:#a8564b;'
+      +'border-radius:8px}'
+    +'#lk-prg-bar .x:hover{background:rgba(192,57,43,.12);color:#7b241c}'
+    +'#lk-prg-bar .act{margin-top:10px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}'
+    +'#lk-prg-bar .act .drop{border:1px solid #c0392b;background:#fff;color:#a8342a;'
+      +'border-radius:8px;padding:7px 13px;font:600 12.5px/1.2 inherit;cursor:pointer;'
+      +'box-shadow:0 1px 2px rgba(15,23,42,.06);'
+      +'transition:background-color .18s ease,box-shadow .18s ease,transform .12s ease}'
+    +'#lk-prg-bar .act .drop:hover{background:#fdecea;box-shadow:0 4px 14px rgba(15,23,42,.09)}'
+    +'#lk-prg-bar .act .drop:active{transform:translateY(1px)}'
+    +'#lk-prg-bar .act .drop[disabled]{border-color:#e6b0aa;color:#b08;opacity:.7;cursor:default}'
+    +'#lk-prg-bar .act .hint{font-size:12px;color:#a06a63}'
     +'#lk-prg-bar b{color:#c0392b}'
-    +'#lk-prg-bar table{width:100%;border-collapse:collapse;margin-top:6px;font-size:12px}'
-    +'#lk-prg-bar th{text-align:left;font-weight:600;padding:2px 8px 4px 0;color:#8a5a12}'
-    +'#lk-prg-bar td{padding:2px 8px 2px 0;font-family:ui-monospace,Menlo,Consolas,monospace}'
+    // width:auto — колонки тримаються тексту, а не розпихають смугу на весь екран
+    +'#lk-prg-bar table{width:auto;max-width:100%;border-collapse:collapse;margin-top:8px;font-size:12px}'
+    +'#lk-prg-bar th{text-align:left;font-weight:600;padding:2px 18px 5px 0;color:#8a5a12}'
+    +'#lk-prg-bar td{padding:3px 18px 3px 0;font-family:ui-monospace,Menlo,Consolas,monospace}'
     +'#lk-prg-ov{position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.45);display:flex;'
       +'align-items:flex-start;justify-content:center}'
     +'#lk-prg-box{background:#fff;width:760px;max-width:96vw;max-height:88vh;margin-top:6vh;overflow:auto;'
@@ -9842,7 +10129,12 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   }
   function rows(){
     return Array.prototype.slice.call(document.querySelectorAll('tr'))
-      .filter(function(tr){ return !!tr.querySelector('a[href*="/order/update/"]'); });
+      .filter(function(tr){
+        // наші власні панелі теж містять посилання на заявки — інакше бейдж
+        // «друковано» малювався ще й усередині самого попередження (18 замість 9)
+        if(tr.closest && tr.closest('#lk-prg-bar,#lk-prg-ov')) return false;
+        return !!tr.querySelector('a[href*="/order/update/"]');
+      });
   }
   function info(id){ return (map&&map[id])||null; }
 
@@ -9865,7 +10157,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       sp.className='lk-prg-badge'; sp.textContent='🖨 друковано';
       var rec=localRec(nfo.ttn);
       sp.title='Накладна вже позначена в СРМ як роздрукована'
-        +(rec?('\nна цьому ПК: '+rec.n+'× , востаннє '+fmtDate(rec.t)):'');
+        +(rec?('\nостанній друк звідси: '+fmtDate(rec.t)):'');
       if(host){ host.appendChild(sp); return; }
       var a=tr.querySelector('a[href*="/order/update/"]'); if(!a) return;
       a.insertAdjacentElement('afterend', sp);
@@ -9884,20 +10176,97 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     });
     return out;
   }
+  /* ---- хто друкував накладну ----
+     Слід лишається в стрічці заявки: /comments/ віддає рядок type:"Ttn" з
+     текстом «Надруковано ТТН <номер>», часом і userId; імена — у
+     meta.fields.userId.options ТІЄЇ САМОЇ відповіді. Той самий розбір, що в
+     модулі lkTtnDouble (prints/grabUsers) — перевірений на живих даних, у т.ч.
+     на Укрпошті. Запит внутрішній (cookie), годинна квота API не витрачається. */
+  var whoCache={};                       // id → {name, at} або null, якщо запису немає
+  var whoBusy={};                        // id → проміс запиту, що ЗАРАЗ у польоті
+  function whoFetch(id){
+    var key=String(id);
+    if(whoCache[key]!==undefined) return Promise.resolve(whoCache[key]);
+    // Поки відповідь не прийшла, кеш ще порожній — а смуга встигає
+    // перемалюватись і попросити те саме ще раз. Без цієї перевірки на 13
+    // рядків виходило 87 запитів замість 13 (зловлено на перевірці релізу).
+    if(whoBusy[key]) return whoBusy[key];
+    var p = fetch('/comments/?formId=1&orderId='+encodeURIComponent(key),
+        {credentials:'include',headers:{'accept':'application/json, text/plain, */*'}})
+      .then(function(r){ return r.ok?r.json():null; })
+      .then(function(j){
+        var users={}, best=null;
+        var opts=j&&j.meta&&j.meta.fields&&j.meta.fields.userId&&j.meta.fields.userId.options;
+        (opts||[]).forEach(function(o){ if(o&&o.value!=null) users[String(o.value)]=String(o.text||''); });
+        (j&&j.data||[]).forEach(function(c){
+          if(c.type!=='Ttn') return;
+          var txt=String(c.body||'').replace(/<[^>]*>/g,' ');
+          if(!/Надруковано\s+ТТН\s*[0-9]+/i.test(txt)) return;
+          var at=String(c.createdAt||'');
+          if(!best || at>best.at) best={ name:(users[String(c.userId)]||('користувач '+c.userId)), at:at };
+        });
+        whoCache[key]=best; delete whoBusy[key];
+        return best;
+      })
+      .catch(function(){ whoCache[key]=null; delete whoBusy[key]; return null; });
+    whoBusy[key]=p;
+    return p;
+  }
+  // дописуємо комірки поступово, пулом по 3 — смуга малюється одразу, не чекаючи мережі
+  function fillWho(root){
+    var cells=[].slice.call(root.querySelectorAll('td[data-who]'));
+    var i=0;
+    function next(){
+      if(i>=cells.length) return;
+      var td=cells[i++];
+      var id=td.getAttribute('data-who');
+      return whoFetch(id).then(function(w){
+        if(!td.isConnected) return;
+        td.textContent = w ? (w.name+' · '+String(w.at).slice(0,16)) : '—';
+      }).then(next);
+    }
+    for(var k=0;k<4;k++) next();   // 4 потоки — виміряний оптимум для цієї СРМ
+  }
+
   function tableHtml(list){
-    var h='<table><tr><th>Заявка</th><th>ТТН</th><th>Перевізник</th><th>На цьому ПК</th></tr>';
+    // «На цьому ПК» показувало лічильник із памʼяті ЦЬОГО браузера — друкують із
+    // різних машин, тож там майже завжди було «—». Замість нього — хто друкував.
+    var h='<table><tr><th>Заявка</th><th>ТТН</th><th>Перевізник</th><th>Хто друкував</th></tr>';
     list.forEach(function(r){
+      var w=whoCache[String(r.id)];
+      var txt = (w===undefined) ? '…' : (w ? (w.name+' · '+String(w.at).slice(0,16)) : '—');
       h+='<tr><td><a href="/ua/index.html?formId=1#/order/update/'+esc(r.id)+'" target="_blank" rel="noopener">№'+esc(r.id)+'</a></td>'
         +'<td>'+esc(r.ttn||'—')+'</td><td>'+esc(r.provider||'—')+'</td>'
-        +'<td>'+(r.rec?esc(r.rec.n+'× '+fmtDate(r.rec.t)):'—')+'</td></tr>';
+        +'<td data-who="'+esc(r.id)+'">'+esc(txt)+'</td></tr>';
     });
     return h+'</table>';
   }
+  /* Зняти галочки саме з друкованих, лишивши решту вибраного.
+     Галочку знімаємо СПРАВЖНІМ кліком: у СРМ вона привʼязана до Angular-моделі,
+     і просто cb.checked=false модель не побачить — лічильник «ІЗ ВИБРАНИМИ»
+     лишився б старим, а на друк пішли б ті самі заявки. */
+  function uncheckPrinted(){
+    var boxes=[];
+    rows().forEach(function(tr){
+      var cb=tr.querySelector('input[type=checkbox]');
+      if(!cb||!cb.checked) return;
+      var id=rowId(tr); if(!id) return;
+      var nfo=info(id);
+      if(nfo&&nfo.printed) boxes.push(cb);
+    });
+    // спершу зібрали, потім клікаємо: Angular перемальовує рядки на ходу
+    boxes.forEach(function(cb){ try{ cb.click(); }catch(e){} });
+    return boxes.length;
+  }
+
+  var barHidden='';                        // добірка, для якої смугу закрили хрестиком
   function renderBar(){
     var list=pickedPrinted();
     var sig=list.map(function(r){ return r.id; }).join(',');
     var bar=document.getElementById('lk-prg-bar');
     if(!list.length){ if(bar) bar.remove(); return; }
+    // закрили хрестиком — мовчимо, поки не зміниться набір вибраних заявок
+    if(barHidden===sig){ if(bar) bar.remove(); return; }
     if(bar && bar.getAttribute('data-sig')===sig) return;   // без змін — не перемальовуємо
     if(!bar){
       bar=document.createElement('div'); bar.id='lk-prg-bar';
@@ -9905,7 +10274,22 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       if(tb && tb.parentNode) tb.parentNode.insertBefore(bar, tb); else document.body.insertBefore(bar, document.body.firstChild);
     }
     bar.setAttribute('data-sig', sig);
-    bar.innerHTML='⚠ Серед вибраних <b>'+list.length+'</b> уже друкували'+tableHtml(list);
+    bar.innerHTML='<button type="button" class="x" title="Закрити попередження">×</button>'
+      +'⚠ Серед вибраних <b>'+list.length+'</b> уже друкували'+tableHtml(list)
+      +'<div class="act"><button type="button" class="drop">✂ Зняти галочки з друкованих ('+list.length+')</button>'
+      +'<span class="hint">решта вибраних лишиться — друкуйте далі</span></div>';
+    var dr=bar.querySelector('.drop');
+    if(dr) dr.addEventListener('click', function(e){
+      e.preventDefault(); e.stopPropagation();
+      var n=uncheckPrinted();
+      dr.disabled=true; dr.textContent='✓ Знято: '+n;
+    });
+    var x=bar.querySelector('.x');
+    if(x) x.addEventListener('click', function(e){
+      e.preventDefault(); e.stopPropagation();
+      barHidden=sig; bar.remove();
+    });
+    fillWho(bar);        // імена дописуються поступово, смуга вже на екрані
   }
 
   // ── 3. підтвердження перед «Додати до реєстру» ────────────────────────────
@@ -9916,9 +10300,18 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     ov.innerHTML='<div id="lk-prg-box"><h3>⚠ Ці накладні вже друкували</h3>'
       +'<div>Серед вибраних заявок <b>'+list.length+'</b> уже позначені в СРМ як роздруковані. '
       +'Можливо, посилки вже здані.</div>'+tableHtml(list)
-      +'<div class="btns"><button class="no">Скасувати</button><button class="go">Все одно продовжити</button></div></div>';
+      +'<div class="btns"><button class="no">Скасувати</button>'
+      +'<button class="drop">✂ Зняти друковані і продовжити</button>'
+      +'<button class="go">Все одно продовжити</button></div></div>';
     document.body.appendChild(ov);
+    fillWho(ov);
     ov.querySelector('.no').onclick=function(){ ov.remove(); };
+    ov.querySelector('.drop').onclick=function(){
+      uncheckPrinted();
+      ov.remove(); passThrough=true;
+      // дати Angular перерахувати вибране, і лише тоді пускати штатну дію
+      setTimeout(function(){ onYes(); setTimeout(function(){ passThrough=false; },1500); }, 350);
+    };
     ov.querySelector('.go').onclick=function(){ ov.remove(); passThrough=true; onYes(); setTimeout(function(){ passThrough=false; },1500); };
   }
   document.addEventListener('click', function(e){
