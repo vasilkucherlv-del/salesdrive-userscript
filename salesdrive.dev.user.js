@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.44
+// @version      3.45
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -10148,7 +10148,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       sp.className='lk-prg-badge'; sp.textContent='🖨 друковано';
       var rec=localRec(nfo.ttn);
       sp.title='Накладна вже позначена в СРМ як роздрукована'
-        +(rec?('\nна цьому ПК: '+rec.n+'× , востаннє '+fmtDate(rec.t)):'');
+        +(rec?('\nостанній друк звідси: '+fmtDate(rec.t)):'');
       if(host){ host.appendChild(sp); return; }
       var a=tr.querySelector('a[href*="/order/update/"]'); if(!a) return;
       a.insertAdjacentElement('afterend', sp);
@@ -10167,12 +10167,61 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     });
     return out;
   }
+  /* ---- хто друкував накладну ----
+     Слід лишається в стрічці заявки: /comments/ віддає рядок type:"Ttn" з
+     текстом «Надруковано ТТН <номер>», часом і userId; імена — у
+     meta.fields.userId.options ТІЄЇ САМОЇ відповіді. Той самий розбір, що в
+     модулі lkTtnDouble (prints/grabUsers) — перевірений на живих даних, у т.ч.
+     на Укрпошті. Запит внутрішній (cookie), годинна квота API не витрачається. */
+  var whoCache={};                       // id → {name, at} або null, якщо запису немає
+  function whoFetch(id){
+    var key=String(id);
+    if(whoCache[key]!==undefined) return Promise.resolve(whoCache[key]);
+    return fetch('/comments/?formId=1&orderId='+encodeURIComponent(key),
+        {credentials:'include',headers:{'accept':'application/json, text/plain, */*'}})
+      .then(function(r){ return r.ok?r.json():null; })
+      .then(function(j){
+        var users={}, best=null;
+        var opts=j&&j.meta&&j.meta.fields&&j.meta.fields.userId&&j.meta.fields.userId.options;
+        (opts||[]).forEach(function(o){ if(o&&o.value!=null) users[String(o.value)]=String(o.text||''); });
+        (j&&j.data||[]).forEach(function(c){
+          if(c.type!=='Ttn') return;
+          var txt=String(c.body||'').replace(/<[^>]*>/g,' ');
+          if(!/Надруковано\s+ТТН\s*[0-9]+/i.test(txt)) return;
+          var at=String(c.createdAt||'');
+          if(!best || at>best.at) best={ name:(users[String(c.userId)]||('користувач '+c.userId)), at:at };
+        });
+        whoCache[key]=best;
+        return best;
+      })
+      .catch(function(){ whoCache[key]=null; return null; });
+  }
+  // дописуємо комірки поступово, пулом по 3 — смуга малюється одразу, не чекаючи мережі
+  function fillWho(root){
+    var cells=[].slice.call(root.querySelectorAll('td[data-who]'));
+    var i=0;
+    function next(){
+      if(i>=cells.length) return;
+      var td=cells[i++];
+      var id=td.getAttribute('data-who');
+      return whoFetch(id).then(function(w){
+        if(!td.isConnected) return;
+        td.textContent = w ? (w.name+' · '+String(w.at).slice(0,16)) : '—';
+      }).then(next);
+    }
+    for(var k=0;k<3;k++) next();
+  }
+
   function tableHtml(list){
-    var h='<table><tr><th>Заявка</th><th>ТТН</th><th>Перевізник</th><th>На цьому ПК</th></tr>';
+    // «На цьому ПК» показувало лічильник із памʼяті ЦЬОГО браузера — друкують із
+    // різних машин, тож там майже завжди було «—». Замість нього — хто друкував.
+    var h='<table><tr><th>Заявка</th><th>ТТН</th><th>Перевізник</th><th>Хто друкував</th></tr>';
     list.forEach(function(r){
+      var w=whoCache[String(r.id)];
+      var txt = (w===undefined) ? '…' : (w ? (w.name+' · '+String(w.at).slice(0,16)) : '—');
       h+='<tr><td><a href="/ua/index.html?formId=1#/order/update/'+esc(r.id)+'" target="_blank" rel="noopener">№'+esc(r.id)+'</a></td>'
         +'<td>'+esc(r.ttn||'—')+'</td><td>'+esc(r.provider||'—')+'</td>'
-        +'<td>'+(r.rec?esc(r.rec.n+'× '+fmtDate(r.rec.t)):'—')+'</td></tr>';
+        +'<td data-who="'+esc(r.id)+'">'+esc(txt)+'</td></tr>';
     });
     return h+'</table>';
   }
@@ -10198,6 +10247,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       e.preventDefault(); e.stopPropagation();
       barHidden=sig; bar.remove();
     });
+    fillWho(bar);        // імена дописуються поступово, смуга вже на екрані
   }
 
   // ── 3. підтвердження перед «Додати до реєстру» ────────────────────────────
@@ -10210,6 +10260,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       +'Можливо, посилки вже здані.</div>'+tableHtml(list)
       +'<div class="btns"><button class="no">Скасувати</button><button class="go">Все одно продовжити</button></div></div>';
     document.body.appendChild(ov);
+    fillWho(ov);
     ov.querySelector('.no').onclick=function(){ ov.remove(); };
     ov.querySelector('.go').onclick=function(){ ov.remove(); passThrough=true; onYes(); setTimeout(function(){ passThrough=false; },1500); };
   }
