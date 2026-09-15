@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.43
+// @version      3.44
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -10077,16 +10077,24 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     s.textContent=''
     +'.lk-prg-badge{display:block;width:fit-content;margin:3px 0 0;padding:1px 6px;border-radius:9px;white-space:nowrap;'
       +'background:#c0392b;color:#fff;font:700 10px/1.5 sans-serif;vertical-align:middle;white-space:nowrap}'
-    +'#lk-prg-bar{position:sticky;top:0;z-index:99997;margin:0 0 6px;padding:8px 12px;border-radius:8px;'
-      +'background:#fdecea;border:1px solid #c0392b;color:#7b241c;font:13px/1.4 -apple-system,Segoe UI,Roboto,sans-serif}'
+    // Була sticky з величезним z-index — через це смуга висіла ПОВЕРХ сторінки
+    // і перекривала випадне меню «Виберіть дію». Тепер вона в звичайному потоці
+    // (relative лише щоб тримати хрестик) і нічого собою не закриває.
+    // Ширину обмежуємо, інакше таблиця розтягувалась на весь екран і хрестик
+    // опинявся аж за кадром.
+    +'#lk-prg-bar{position:relative;margin:0 0 8px;padding:12px 44px 12px 14px;border-radius:12px;'
+      +'max-width:900px;box-sizing:border-box;'
+      +'background:#fdecea;border:1px solid #e6b0aa;border-left:4px solid #c0392b;color:#7b241c;'
+      +'box-shadow:0 1px 2px rgba(15,23,42,.06);font:13px/1.5 -apple-system,Segoe UI,Roboto,sans-serif}'
     +'#lk-prg-bar .x{position:absolute;top:6px;right:8px;width:28px;height:28px;padding:0;'
       +'border:none;background:none;cursor:pointer;font-size:19px;line-height:1;color:#a8564b;'
       +'border-radius:8px}'
     +'#lk-prg-bar .x:hover{background:rgba(192,57,43,.12);color:#7b241c}'
     +'#lk-prg-bar b{color:#c0392b}'
-    +'#lk-prg-bar table{width:100%;border-collapse:collapse;margin-top:6px;font-size:12px}'
-    +'#lk-prg-bar th{text-align:left;font-weight:600;padding:2px 8px 4px 0;color:#8a5a12}'
-    +'#lk-prg-bar td{padding:2px 8px 2px 0;font-family:ui-monospace,Menlo,Consolas,monospace}'
+    // width:auto — колонки тримаються тексту, а не розпихають смугу на весь екран
+    +'#lk-prg-bar table{width:auto;max-width:100%;border-collapse:collapse;margin-top:8px;font-size:12px}'
+    +'#lk-prg-bar th{text-align:left;font-weight:600;padding:2px 18px 5px 0;color:#8a5a12}'
+    +'#lk-prg-bar td{padding:3px 18px 3px 0;font-family:ui-monospace,Menlo,Consolas,monospace}'
     +'#lk-prg-ov{position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.45);display:flex;'
       +'align-items:flex-start;justify-content:center}'
     +'#lk-prg-box{background:#fff;width:760px;max-width:96vw;max-height:88vh;margin-top:6vh;overflow:auto;'
