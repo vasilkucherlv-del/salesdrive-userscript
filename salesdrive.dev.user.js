@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.45
+// @version      3.46
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -10090,6 +10090,15 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       +'border:none;background:none;cursor:pointer;font-size:19px;line-height:1;color:#a8564b;'
       +'border-radius:8px}'
     +'#lk-prg-bar .x:hover{background:rgba(192,57,43,.12);color:#7b241c}'
+    +'#lk-prg-bar .act{margin-top:10px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}'
+    +'#lk-prg-bar .act .drop{border:1px solid #c0392b;background:#fff;color:#a8342a;'
+      +'border-radius:8px;padding:7px 13px;font:600 12.5px/1.2 inherit;cursor:pointer;'
+      +'box-shadow:0 1px 2px rgba(15,23,42,.06);'
+      +'transition:background-color .18s ease,box-shadow .18s ease,transform .12s ease}'
+    +'#lk-prg-bar .act .drop:hover{background:#fdecea;box-shadow:0 4px 14px rgba(15,23,42,.09)}'
+    +'#lk-prg-bar .act .drop:active{transform:translateY(1px)}'
+    +'#lk-prg-bar .act .drop[disabled]{border-color:#e6b0aa;color:#b08;opacity:.7;cursor:default}'
+    +'#lk-prg-bar .act .hint{font-size:12px;color:#a06a63}'
     +'#lk-prg-bar b{color:#c0392b}'
     // width:auto — колонки тримаються тексту, а не розпихають смугу на весь екран
     +'#lk-prg-bar table{width:auto;max-width:100%;border-collapse:collapse;margin-top:8px;font-size:12px}'
@@ -10209,7 +10218,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
         td.textContent = w ? (w.name+' · '+String(w.at).slice(0,16)) : '—';
       }).then(next);
     }
-    for(var k=0;k<3;k++) next();
+    for(var k=0;k<4;k++) next();   // 4 потоки — виміряний оптимум для цієї СРМ
   }
 
   function tableHtml(list){
@@ -10225,6 +10234,24 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     });
     return h+'</table>';
   }
+  /* Зняти галочки саме з друкованих, лишивши решту вибраного.
+     Галочку знімаємо СПРАВЖНІМ кліком: у СРМ вона привʼязана до Angular-моделі,
+     і просто cb.checked=false модель не побачить — лічильник «ІЗ ВИБРАНИМИ»
+     лишився б старим, а на друк пішли б ті самі заявки. */
+  function uncheckPrinted(){
+    var boxes=[];
+    rows().forEach(function(tr){
+      var cb=tr.querySelector('input[type=checkbox]');
+      if(!cb||!cb.checked) return;
+      var id=rowId(tr); if(!id) return;
+      var nfo=info(id);
+      if(nfo&&nfo.printed) boxes.push(cb);
+    });
+    // спершу зібрали, потім клікаємо: Angular перемальовує рядки на ходу
+    boxes.forEach(function(cb){ try{ cb.click(); }catch(e){} });
+    return boxes.length;
+  }
+
   var barHidden='';                        // добірка, для якої смугу закрили хрестиком
   function renderBar(){
     var list=pickedPrinted();
@@ -10241,7 +10268,15 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     }
     bar.setAttribute('data-sig', sig);
     bar.innerHTML='<button type="button" class="x" title="Закрити попередження">×</button>'
-      +'⚠ Серед вибраних <b>'+list.length+'</b> уже друкували'+tableHtml(list);
+      +'⚠ Серед вибраних <b>'+list.length+'</b> уже друкували'+tableHtml(list)
+      +'<div class="act"><button type="button" class="drop">✂ Зняти галочки з друкованих ('+list.length+')</button>'
+      +'<span class="hint">решта вибраних лишиться — друкуйте далі</span></div>';
+    var dr=bar.querySelector('.drop');
+    if(dr) dr.addEventListener('click', function(e){
+      e.preventDefault(); e.stopPropagation();
+      var n=uncheckPrinted();
+      dr.disabled=true; dr.textContent='✓ Знято: '+n;
+    });
     var x=bar.querySelector('.x');
     if(x) x.addEventListener('click', function(e){
       e.preventDefault(); e.stopPropagation();
@@ -10258,10 +10293,18 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     ov.innerHTML='<div id="lk-prg-box"><h3>⚠ Ці накладні вже друкували</h3>'
       +'<div>Серед вибраних заявок <b>'+list.length+'</b> уже позначені в СРМ як роздруковані. '
       +'Можливо, посилки вже здані.</div>'+tableHtml(list)
-      +'<div class="btns"><button class="no">Скасувати</button><button class="go">Все одно продовжити</button></div></div>';
+      +'<div class="btns"><button class="no">Скасувати</button>'
+      +'<button class="drop">✂ Зняти друковані і продовжити</button>'
+      +'<button class="go">Все одно продовжити</button></div></div>';
     document.body.appendChild(ov);
     fillWho(ov);
     ov.querySelector('.no').onclick=function(){ ov.remove(); };
+    ov.querySelector('.drop').onclick=function(){
+      uncheckPrinted();
+      ov.remove(); passThrough=true;
+      // дати Angular перерахувати вибране, і лише тоді пускати штатну дію
+      setTimeout(function(){ onYes(); setTimeout(function(){ passThrough=false; },1500); }, 350);
+    };
     ov.querySelector('.go').onclick=function(){ ov.remove(); passThrough=true; onYes(); setTimeout(function(){ passThrough=false; },1500); };
   }
   document.addEventListener('click', function(e){
