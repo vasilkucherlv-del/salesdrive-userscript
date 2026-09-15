@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.47
+// @version      3.48
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -36,6 +36,7 @@
      • lkPayRequired   — ⛔ заборона зберігати заявку без «Способу оплати»
      • lkArrivalCount  — 📦 к-ть позицій та одиниць біля заголовка «Надходження товарів»
      • lkArrivalOpt    — 💰 опт-ціни товарів (×1.2/×1.25/×1.3↑5) із собівартості накладної
+     • lkArrivalRowNum — 🔢 порядковий номер рядка в «Надходженні товарів»
      • lkRoundPickup   — 🔟 заокруглення суми самовивозу вгору до 10 ₴ (99→100, 108→110)
      • lkOrderTier     — 💱 перерахунок цін заявки за типом ціни (опт/майстри) одним кліком     • lkSupplierBalance — ⇄ взаєморозрахунки з постачальниками (сальдо по кожному)
      • lkTtnDouble     — 🖨 заявки з подвійним друком ТТН (різні номери / передруки)
@@ -7532,6 +7533,65 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 })();
 }catch(e){ try{ console.warn("[SD] модуль «lkArrivalOpt» не запустився:", e); }catch(_){} }
 /* ▲▲▲ МОДУЛЬ-END • lkArrivalOpt ▲▲▲ */
+
+/* ▼▼▼ МОДУЛЬ-START • lkArrivalRowNum — 🔢 порядковий номер рядка в «Надходженні товарів» ▼▼▼ */
+/* ===== Василь дописував номери 1, 2, 3… олівцем на роздрукованому скріні — тепер вони
+   ставляться самі. Перша комірка рядка (з іконкою-олівцем) у СРМ нічим не зайнята
+   і вже має position:relative (перевірено живцем), тож номер кладемо туди
+   position:absolute у вільний кут — рядок фізично не займає місця в потоці,
+   сусідні колонки зсунути не може, а pointer-events:none лишає клік по олівцю
+   робочим. Нумерація — за DOM-порядком видимих рядків (те, що рахує людина);
+   якщо в таблиці ввімкнено фільтр пошуку, рахуються лише видимі рядки. ===== */
+try{ // SD-ізоляція: помилка цього модуля не зупинить решту
+(function lkArrivalRowNum(){
+  'use strict';
+  var css=''
+    +'.lk-arrnum{position:absolute;top:1px;left:2px;font:700 9px/1 -apple-system,Segoe UI,Roboto,sans-serif;'
+    +'  color:#8a94a3;pointer-events:none;user-select:none}';
+  var st=document.createElement('style'); st.textContent=css;
+  (document.head||document.documentElement).appendChild(st);
+
+  function onPage(){ return /#\/document\/arrival-product\/(update|create)/.test(location.hash||''); }
+
+  var drawn=false;   // чи є на сторінці наші номери — щоб не чистити порожнє
+  function scan(){
+    if(!onPage()){
+      // Скан усього документа тут бігав би на КОЖЕН пульс на будь-якій сторінці
+      // і завжди знаходив порожнечу (та сама пастка, що лікували в 3.34).
+      if(drawn){
+        [].forEach.call(document.querySelectorAll('.lk-arrnum'), function(n){ n.remove(); });
+        drawn=false;
+      }
+      return;
+    }
+    var t=document.querySelector('table.document-invoice-products'); if(!t) return;
+    var rows=t.querySelectorAll('tr[ng-repeat^="invoiceItem"]');
+    [].forEach.call(rows, function(tr, i){
+      var c0=tr.cells&&tr.cells[0]; if(!c0) return;
+      if(getComputedStyle(c0).position==='static') c0.style.position='relative';
+      var badge=c0.querySelector('.lk-arrnum');
+      var txt=String(i+1);
+      if(!badge){
+        badge=document.createElement('span'); badge.className='lk-arrnum';
+        c0.appendChild(badge);
+      }
+      // пишемо лише при зміні — інакше номер переписувався б на кожен пульс DOM (мигтів)
+      if(badge.textContent!==txt) badge.textContent=txt;
+      drawn=true;
+    });
+  }
+
+  var t=null;
+  function scanSoon(){
+    if(typeof window.sdSoon==='function') return window.sdSoon('arrivalRowNum', scan, 300);
+    clearTimeout(t); t=setTimeout(scan,300);
+  }
+  scan();
+  window.addEventListener('lkdom', scanSoon);
+  window.addEventListener('hashchange', scanSoon);
+})();
+}catch(e){ try{ console.warn("[SD] модуль «lkArrivalRowNum» не запустився:", e); }catch(_){} }
+/* ▲▲▲ МОДУЛЬ-END • lkArrivalRowNum ▲▲▲ */
 
 /* ▼▼▼ МОДУЛЬ-START • lkRoundPickup — 🔟 заокруглення суми самовивозу вгору до 10 ₴ ▼▼▼ */
 /* ===== На картці заявки з доставкою «Самовивіз»: кнопка під таблицею товарів доводить
