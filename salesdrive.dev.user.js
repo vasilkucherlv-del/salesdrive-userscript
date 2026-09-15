@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.42
+// @version      3.43
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -9997,7 +9997,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 try{ // SD-ізоляція: помилка цього модуля не зупинить решту
 (function lkPrintedGuardList(){
   'use strict';
-  var CKEY='lk_prguard_v1', CTTL=10*60*1000;   // кеш мапи друку, 10 хв
+  var CKEY='lk_prguard_v2', CTTL=10*60*1000;   // кеш мапи друку, 10 хв (v2: лише Укрпошта)
+  var UKR_SM=30;                               // доставка Укрпошта (як у lkUkrPromList)
   var PKEY='lk_ttnprint_v1';                   // лічильник друків на цьому ПК (спільний із lkTtnPrintGuard)
   var map=null, mapSig='', loading=false;
 
@@ -10050,7 +10051,12 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       return window.sdApi.orders(qs, page).then(function(res){
         (res.rows||[]).forEach(function(o){
           var d=(o.ord_delivery_data||[])[0]||{};
-          acc[String(o.id)]={ printed: Number(d.isPrinted)===1,
+          // Сторожа — ЛИШЕ для Укрпошти, як і в картці заявки (lkTtnPrintGuard).
+          // У Нової Пошти isPrinted означає інше й стоїть майже скрізь: без цієї
+          // перевірки попередження спрацьовувало на всі вибрані НП-заявки підряд.
+          var prov=String(d.provider||'').toLowerCase();
+          var isUkr = prov==='ukrposhta' || Number(o.shipping_method)===UKR_SM;
+          acc[String(o.id)]={ printed: isUkr && Number(d.isPrinted)===1,
                               ttn: String(d.trackingNumber||''),
                               provider: String(d.provider||'') };
         });
@@ -10073,6 +10079,10 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       +'background:#c0392b;color:#fff;font:700 10px/1.5 sans-serif;vertical-align:middle;white-space:nowrap}'
     +'#lk-prg-bar{position:sticky;top:0;z-index:99997;margin:0 0 6px;padding:8px 12px;border-radius:8px;'
       +'background:#fdecea;border:1px solid #c0392b;color:#7b241c;font:13px/1.4 -apple-system,Segoe UI,Roboto,sans-serif}'
+    +'#lk-prg-bar .x{position:absolute;top:6px;right:8px;width:28px;height:28px;padding:0;'
+      +'border:none;background:none;cursor:pointer;font-size:19px;line-height:1;color:#a8564b;'
+      +'border-radius:8px}'
+    +'#lk-prg-bar .x:hover{background:rgba(192,57,43,.12);color:#7b241c}'
     +'#lk-prg-bar b{color:#c0392b}'
     +'#lk-prg-bar table{width:100%;border-collapse:collapse;margin-top:6px;font-size:12px}'
     +'#lk-prg-bar th{text-align:left;font-weight:600;padding:2px 8px 4px 0;color:#8a5a12}'
@@ -10102,7 +10112,12 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   }
   function rows(){
     return Array.prototype.slice.call(document.querySelectorAll('tr'))
-      .filter(function(tr){ return !!tr.querySelector('a[href*="/order/update/"]'); });
+      .filter(function(tr){
+        // наші власні панелі теж містять посилання на заявки — інакше бейдж
+        // «друковано» малювався ще й усередині самого попередження (18 замість 9)
+        if(tr.closest && tr.closest('#lk-prg-bar,#lk-prg-ov')) return false;
+        return !!tr.querySelector('a[href*="/order/update/"]');
+      });
   }
   function info(id){ return (map&&map[id])||null; }
 
@@ -10153,11 +10168,14 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     });
     return h+'</table>';
   }
+  var barHidden='';                        // добірка, для якої смугу закрили хрестиком
   function renderBar(){
     var list=pickedPrinted();
     var sig=list.map(function(r){ return r.id; }).join(',');
     var bar=document.getElementById('lk-prg-bar');
     if(!list.length){ if(bar) bar.remove(); return; }
+    // закрили хрестиком — мовчимо, поки не зміниться набір вибраних заявок
+    if(barHidden===sig){ if(bar) bar.remove(); return; }
     if(bar && bar.getAttribute('data-sig')===sig) return;   // без змін — не перемальовуємо
     if(!bar){
       bar=document.createElement('div'); bar.id='lk-prg-bar';
@@ -10165,7 +10183,13 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       if(tb && tb.parentNode) tb.parentNode.insertBefore(bar, tb); else document.body.insertBefore(bar, document.body.firstChild);
     }
     bar.setAttribute('data-sig', sig);
-    bar.innerHTML='⚠ Серед вибраних <b>'+list.length+'</b> уже друкували'+tableHtml(list);
+    bar.innerHTML='<button type="button" class="x" title="Закрити попередження">×</button>'
+      +'⚠ Серед вибраних <b>'+list.length+'</b> уже друкували'+tableHtml(list);
+    var x=bar.querySelector('.x');
+    if(x) x.addEventListener('click', function(e){
+      e.preventDefault(); e.stopPropagation();
+      barHidden=sig; bar.remove();
+    });
   }
 
   // ── 3. підтвердження перед «Додати до реєстру» ────────────────────────────
