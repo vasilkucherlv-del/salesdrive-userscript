@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.46
+// @version      3.47
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -10183,10 +10183,15 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
      модулі lkTtnDouble (prints/grabUsers) — перевірений на живих даних, у т.ч.
      на Укрпошті. Запит внутрішній (cookie), годинна квота API не витрачається. */
   var whoCache={};                       // id → {name, at} або null, якщо запису немає
+  var whoBusy={};                        // id → проміс запиту, що ЗАРАЗ у польоті
   function whoFetch(id){
     var key=String(id);
     if(whoCache[key]!==undefined) return Promise.resolve(whoCache[key]);
-    return fetch('/comments/?formId=1&orderId='+encodeURIComponent(key),
+    // Поки відповідь не прийшла, кеш ще порожній — а смуга встигає
+    // перемалюватись і попросити те саме ще раз. Без цієї перевірки на 13
+    // рядків виходило 87 запитів замість 13 (зловлено на перевірці релізу).
+    if(whoBusy[key]) return whoBusy[key];
+    var p = fetch('/comments/?formId=1&orderId='+encodeURIComponent(key),
         {credentials:'include',headers:{'accept':'application/json, text/plain, */*'}})
       .then(function(r){ return r.ok?r.json():null; })
       .then(function(j){
@@ -10200,10 +10205,12 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
           var at=String(c.createdAt||'');
           if(!best || at>best.at) best={ name:(users[String(c.userId)]||('користувач '+c.userId)), at:at };
         });
-        whoCache[key]=best;
+        whoCache[key]=best; delete whoBusy[key];
         return best;
       })
-      .catch(function(){ whoCache[key]=null; return null; });
+      .catch(function(){ whoCache[key]=null; delete whoBusy[key]; return null; });
+    whoBusy[key]=p;
+    return p;
   }
   // дописуємо комірки поступово, пулом по 3 — смуга малюється одразу, не чекаючи мережі
   function fillWho(root){
