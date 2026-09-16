@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.51
+// @version      3.52
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -7535,7 +7535,12 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     var all=document.querySelectorAll('.btn-invoice-actions');
     var last=null;
     for(var i=0;i<all.length;i++){ if(!all[i].classList.contains('lk-arrtb')) last=all[i]; }
-    return (last&&last.parentElement)||null;
+    if(last&&last.parentElement) return last.parentElement;
+    // НЕЗБЕРЕЖЕНА накладна: друкувати/копіювати/видаляти ще нічого, тож штатних
+    // іконок немає взагалі — стаємо поруч із «Зберегти», у тому самому контейнері.
+    // (без цього фолбеку кнопки опт-цін зникали на /create — регрес 3.50)
+    var sv=document.querySelector('.save-invoice-item-btn');
+    return (sv&&sv.parentElement)||null;
   }
   // Кнопка — рідна іконка СРМ: значок, короткий підпис і чіп прогресу в куті;
   // повний опис — у підказці. Через це текст кнопки не можна перезаписувати
