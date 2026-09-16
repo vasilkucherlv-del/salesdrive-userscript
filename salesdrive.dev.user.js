@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.50
+// @version      3.51
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -6871,15 +6871,30 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     +'.lk-arropt-btn[disabled]{background:#9e9e9e;cursor:default}'
     /* Наші кнопки живуть у ШТАТНІЙ панелі іконок СРМ (поруч із друком і кошиком)
        і беруть її ж класи, тож розмір і колір збігаються самі. Тут — лише те,
-       чого в СРМ немає: значок плюс маленький рядок прогресу під ним. */
+       чого в СРМ немає: значок, підпис і маленький чіп прогресу. */
     /* display НЕ чіпаємо: рідна кнопка inline-block із власними відступами,
-       а flex-колонка збивала висоту з 34 до 30 px. Прогрес — маленьким числом
-       у куті, тож розмір кнопки не міняється, поки вона працює. */
-    /* емодзі ширші за рідні іконки-шрифти (51 проти 45) — вирівнюємо ряд */
-    +'.lk-arrtb{position:relative;text-decoration:none;'
-    +'  width:45px;padding-left:0;padding-right:0;text-align:center}'
+       а flex-колонка збивала висоту з 34 до 30 px. */
+    /* ширину НЕ задаємо: біля значка стоїть підпис («Опт», «Комплекти»,
+       «Повернути ціни»), тож кнопка росте під зміст на рідних відступах СРМ.
+       Повний опис (множники, дата знімка) лишається в підказці. */
+    /* горизонтальні відступи трохи менші за рідні 16 px: три підписи додають
+       ряду ~210 px, і на ноутбучних 1366 кнопка відкату падала на другий рядок */
+    /* клас подвоєно навмисно: у СРМ відступи .btn-invoice-actions задані
+       специфічнішим правилом і одинарний .lk-arrtb їх не перебиває */
+    +'.lk-arrtb.lk-arrtb{position:relative;text-decoration:none;white-space:nowrap;'
+    +'  padding-left:10px;padding-right:10px}'
+    /* значок і підпис — по базовій лінії: vertical-align:middle робив рядок
+       на 0,3 px вищим за рідні іконки і ряд переставав бути рівним */
     +'.lk-arrtb .ic{font-size:15px;line-height:1}'
-    +'.lk-arrtb .st{position:absolute;right:2px;bottom:1px;font-size:8px;line-height:1;opacity:.8}'
+    +'.lk-arrtb .lb{margin-left:6px;font-size:12px}'
+    /* на зовсім вузьких екранах підпис ховаємо — лишається компактний значок
+       із повною підказкою, як було до 3.51 */
+    +'@media (max-width:1400px){.lk-arrtb .lb{display:none}'
+    +'  .lk-arrtb.lk-arrtb{width:45px;padding-left:0;padding-right:0;text-align:center}}'
+    /* прогрес — маленьким чіпом у верхньому куті: не розпирає кнопку
+       й не зʼїдає підпис (фон під колір рідної .btn-default) */
+    +'.lk-arrtb .st{position:absolute;right:2px;top:0;font-size:8px;line-height:1.3;'
+    +'  padding:0 2px;border-radius:3px;background:#E9ECF0;opacity:.85}'
     // компактна панель дій над таблицею
     +'#lk-arropt-res{margin:8px 0;padding:9px 12px;border:1px solid #7bb3a9;border-left:4px solid #00897B;'
     +'  background:#eef8f6;border-radius:6px;font:13px/1.6 Arial,sans-serif;color:#0f3d39;'
@@ -7495,7 +7510,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       ub.className='btn btn-default btn-invoice-actions lk-arrtb lk-arropt-btn-undo';
       // колір — класом, НЕ інлайном: інлайн не перебивається оформленням
       // (та сама пастка, що з кнопкою «✕ Прибрати» у 3.46)
-      btnInit(ub,'↩','↩ Повернути ціни');
+      btnInit(ub,'↩','Повернути ціни','↩ Повернути ціни');
       ub.addEventListener('click',function(e){ e.preventDefault(); e.stopPropagation(); runUndo(ub); });
       host.appendChild(ub);
     }
@@ -7522,14 +7537,16 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     for(var i=0;i<all.length;i++){ if(!all[i].classList.contains('lk-arrtb')) last=all[i]; }
     return (last&&last.parentElement)||null;
   }
-  // Кнопка — рідна іконка СРМ: значок, під ним маленький рядок прогресу,
-  // повний підпис у підказці. Через це текст кнопки не можна перезаписувати
+  // Кнопка — рідна іконка СРМ: значок, короткий підпис і чіп прогресу в куті;
+  // повний опис — у підказці. Через це текст кнопки не можна перезаписувати
   // цілком (btn.textContent=…) — інакше злетить розмітка.
-  function btnInit(b, icon, label){
+  function btnInit(b, icon, short, full){
+    var label=full||short;
     b.setAttribute('data-label', label);
     b.title=label;
     b.textContent='';
     var i=document.createElement('span'); i.className='ic'; i.textContent=icon; b.appendChild(i);
+    var l=document.createElement('span'); l.className='lb'; l.textContent=short; b.appendChild(l);
     var s=document.createElement('span'); s.className='st'; b.appendChild(s);
   }
   function btnBusy(b, note){
@@ -7570,14 +7587,14 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     // Генеричного lk-arropt-btn НЕ даємо — він тягне бірюзу й радіус 14.
     btn=document.createElement('button'); btn.type='button';
     btn.className='btn btn-default btn-invoice-actions lk-arrtb lk-arropt-btn-main';
-    btnInit(btn,'💰','💰 Опт-ціни з собівартості — показати нові ціни (Великий ×1.2, середній ×1.25, майстри ×1.3↑5) колонкою біля товарів; запис окремою кнопкою');
+    btnInit(btn,'💰','Опт','💰 Опт-ціни з собівартості — показати нові ціни (Великий ×1.2, середній ×1.25, майстри ×1.3↑5) колонкою біля товарів; запис окремою кнопкою');
     btn.addEventListener('click',function(e){ e.preventDefault(); e.stopPropagation(); run(btn); });
     host.appendChild(btn);
 
     // друга кнопка: перерахунок комплектів, до складу яких входять товари накладної
     var kb=document.createElement('button'); kb.type='button';
     kb.className='btn btn-default btn-invoice-actions lk-arrtb lk-arropt-btn-kits';
-    btnInit(kb,'🧩','🧩 Ціни комплектів — знайти комплекти зі складниками з цієї накладної і перерахувати їхні ціни за новою закупкою');
+    btnInit(kb,'🧩','Комплекти','🧩 Ціни комплектів — знайти комплекти зі складниками з цієї накладної і перерахувати їхні ціни за новою закупкою');
     kb.addEventListener('click',function(e){ e.preventDefault(); e.stopPropagation(); runKits(kb); });
     host.appendChild(kb);
     syncUndo(host);
