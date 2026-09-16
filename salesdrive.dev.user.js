@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.48
+// @version      3.49
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -1724,7 +1724,8 @@ var UPSELL_MAP_DATA = []; // вбудований запас прибрано: �
       /* наші вікна перекривають наші ж плаваючі кнопки */
       'html.lk-ov-open #sd-kb-btn,html.lk-ov-open #sd-kb-panel,html.lk-ov-open #lk-cash-btn,'
       + 'html.lk-ov-open #lk-pick-btn,html.lk-ov-open #lk-ukp-btn,html.lk-ov-open #lk-where-btn,'
-      + 'html.lk-ov-open #lk-pay-tiles,html.lk-ov-open #sd-payreq-warn{display:none !important}'
+      + 'html.lk-ov-open #lk-pay-tiles,html.lk-ov-open #sd-payreq-warn,'
+      + 'html.lk-ov-open #lk-arrdock{display:none !important}'
       /* миттєвий відгук на натиск: без нього кнопка здається «не натиснутою»,
          особливо на трекпаді, де :hover майже не видно */
       + '#sd-kb-btn:active,#lk-cash-btn:active,#lk-pick-btn:active,#lk-ukp-btn:active,'
@@ -1936,6 +1937,17 @@ var UPSELL_MAP_DATA = []; // вбудований запас прибрано: �
     +   'font-weight:600!important;border-left:3px solid var(--sd-accent)!important}'
     + '.lk-arropt-chk{accent-color:var(--sd-accent)!important}'
 
+    /* Гама СРМ (прохання Василя). Аудит показав двох «чужинців» на сторінці
+       надходження: бейдж «📦 Позицій» — бірюзовий 173°, і кнопка
+       взаєморозрахунків — коричнева 14°. Решта наших елементів уже в родині
+       фірмового синього (204°). Семантику не чіпаємо: помаранчевий «+» наборів
+       і зелений аналогів лишаються як є. */
+    + '.lk-arrcnt{background:var(--sd-accent-soft)!important;color:var(--sd-accent-hov)!important;'
+    +   'border:1px solid var(--sd-accent-line)!important}'
+    + '.lk-sb-btn{background:var(--sd-surface)!important;color:var(--sd-ink-2)!important;'
+    +   'border:1px solid var(--sd-line)!important}'
+    + '.lk-sb-btn:hover{background:var(--sd-muted)!important;color:var(--sd-ink)!important}'
+
     /* панель дій над таблицею і плашка комплектів */
     + '#lk-arropt-res,#lk-kits-res{font-family:var(--sd-font)!important;'
     +   'background:var(--sd-surface)!important;color:var(--sd-ink-2)!important;'
@@ -1962,9 +1974,9 @@ var UPSELL_MAP_DATA = []; // вбудований запас прибрано: �
     +   'border:1px solid var(--sd-accent)!important}'
     + '.lk-arropt-btn:hover{background:var(--sd-accent-hov)!important;'
     +   'border-color:var(--sd-accent-hov)!important}'
-    + '.lk-arropt-btn-undo,.lk-arropt-btn-quiet{background:var(--sd-surface)!important;'
+    + '.lk-arropt-btn-undo,.lk-arropt-btn-quiet,.lk-arropt-btn-kits{background:var(--sd-surface)!important;'
     +   'color:var(--sd-ink-2)!important;border:1px solid var(--sd-line)!important}'
-    + '.lk-arropt-btn-undo:hover,.lk-arropt-btn-quiet:hover{background:var(--sd-muted)!important;'
+    + '.lk-arropt-btn-undo:hover,.lk-arropt-btn-quiet:hover,.lk-arropt-btn-kits:hover{background:var(--sd-muted)!important;'
     +   'border-color:var(--sd-line-2)!important;color:var(--sd-ink)!important}'
     + '.lk-arropt-btn[disabled]{background:var(--sd-muted)!important;color:var(--sd-ink-3)!important;'
     +   'border-color:var(--sd-line)!important;box-shadow:none!important}'
@@ -6856,6 +6868,34 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     +'  background:#00897B;color:#fff;font:700 13px/1.5 Arial,sans-serif;cursor:pointer;vertical-align:middle;white-space:nowrap}'
     +'.lk-arropt-btn:hover{background:#00695c}'
     +'.lk-arropt-btn[disabled]{background:#9e9e9e;cursor:default}'
+    /* Док: вузький стовпчик, прикріплений до правого краю екрана.
+       Раніше всі три кнопки ліпились у заголовок «Надходження товарів №…» і
+       розтягували його на 972 px. Збоку від таблиці колонку поставити не можна:
+       з опт-колонками таблиця росте з 768 до 1338 px і місця праворуч немає.
+       Fixed ще й рятує від гортання — таблиця буває на 2700 px заввишки. */
+    +'#lk-arrdock{position:fixed;right:14px;top:50%;transform:translateY(-50%);z-index:9998;'
+    +'  display:flex;flex-direction:column;gap:8px;align-items:center;padding:8px;'
+    +'  border-radius:14px;background:rgba(255,255,255,.94);border:1px solid #e2e8f0;'
+    +'  box-shadow:0 4px 14px rgba(15,23,42,.10)}'
+    +'#lk-arrdock .lk-arropt-btn{width:44px;height:44px;margin:0;padding:0;border-radius:12px;'
+    +'  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px}'
+    +'#lk-arrdock .lk-arropt-btn .ic{font-size:18px;line-height:1}'
+    +'#lk-arrdock .lk-arropt-btn .st{font-size:9px;line-height:1}'
+    /* головна дія зверху, далі комплекти, відкат — останній */
+    +'#lk-arrdock .lk-arropt-btn-main{order:1}'
+    +'#lk-arrdock .lk-arropt-btn-kits{order:2}'
+    +'#lk-arrdock .lk-arropt-btn-undo{order:3}'
+    /* На широкому екрані док стоїть правіше за таблицю й нікому не заважає.
+       Але з опт-колонками таблиця росте до 1338 px: на вузькому вікні вона
+       вилазить за екран, і док накрив би праву колонку. Тому там він притухає
+       і стає щільним, щойно до нього тягнешся. */
+    +'#lk-arrdock{transition:opacity .18s ease}'
+    /* Межа 1500 px порахована, а не вгадана: таблиця з опт-колонками закінчується
+       на x=1425, док займає 76 px від правого краю — вони торкаються рівно при
+       ширині вікна 1501. Клас .over ставиться ЛИШЕ коли опт-колонки показані,
+       інакше док притухав би там, де нічого не перекриває. */
+    +'@media (max-width:1500px){#lk-arrdock.over{opacity:.45}'
+    +'  #lk-arrdock.over:hover,#lk-arrdock.over:focus-within{opacity:1}}'
     // компактна панель дій над таблицею
     +'#lk-arropt-res{margin:8px 0;padding:9px 12px;border:1px solid #7bb3a9;border-left:4px solid #00897B;'
     +'  background:#eef8f6;border-radius:6px;font:13px/1.6 Arial,sans-serif;color:#0f3d39;'
@@ -7141,14 +7181,12 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     box.appendChild(x);
     var t=document.querySelector('table.document-invoice-products');
     if(t&&t.parentElement){ t.parentElement.insertBefore(box,t); return box; }
-    // на списку надходжень таблиці накладної немає (там звіт про відкат) — інакше
-    // панель падала в кінець document.body, і результату просто не було видно
-    var ub=document.querySelector('.lk-arropt-btn-undo');
-    if(ub && ub.parentElement) ub.parentElement.insertAdjacentElement('afterend', box);
-    else{
-      var host=document.querySelector('.white-main-container')||document.querySelector('.panel-body');
-      if(host) host.insertBefore(box, host.firstChild); else document.body.appendChild(box);
-    }
+    // На списку надходжень таблиці накладної немає (там звіт про відкат) — інакше
+    // панель падала б у кінець document.body й результату не було б видно.
+    // Раніше тут чіплялись до кнопки відкату, але відтоді вона переїхала у
+    // фіксований док — панель потрапила б УСЕРЕДИНУ дока, 56 px завширшки.
+    var host=document.querySelector('.white-main-container')||document.querySelector('.panel-body');
+    if(host) host.insertBefore(box, host.firstChild); else document.body.appendChild(box);
     return box;
   }
   function errLines(box, rows){
@@ -7163,9 +7201,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   // крок 1: ПЕРЕГЛЯД — нічого не пише; ціни зʼявляються колонкою біля товарів
   function run(btn){
     if(!rowsCount()) return;
-    btn.disabled=true; var orig=btn.textContent; btn.textContent='💰 Читаю…';
+    btn.disabled=true; btnBusy(btn,'…');
     invoke('preview', function(d){
-      btn.disabled=false; btn.textContent=orig;
+      btn.disabled=false; btnIdle(btn);
       if(!d || !d.ok){
         var b0=bar(); var h0=document.createElement('div'); h0.className='h';
         h0.textContent='✗ Не вийшло: '+((d&&d.err)||'нема відповіді'); b0.appendChild(h0); return;
@@ -7221,7 +7259,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       cl.addEventListener('click',function(){ clearView(); });
       box.appendChild(ap); box.appendChild(cl);
       updateApplyLabel();
-    }, function(p){ btn.textContent='💰 Читаю '+p+'…'; });
+    }, function(p){ btnBusy(btn, p); });
   }
 
   // ---- комплекти: склад беремо з того самого kits-API і того самого кешу, що lkNaboryInline ----
@@ -7393,13 +7431,13 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
 
   function runKits(btn){
     if(!rowsCount()) return;
-    btn.disabled=true; var old=btn.textContent; btn.textContent='шукаю комплекти…';
+    btn.disabled=true; btnBusy(btn,'…');
     var fresh=null;
     Promise.all([invoiceCosts(), kitsData()]).then(function(pair){
       fresh=pair[0]||{};
       var kitsObj=pair[1]||{};
       if(!Object.keys(fresh).length){
-        btn.disabled=false; btn.textContent=old;
+        btn.disabled=false; btnIdle(btn);
         var b0=kitBox(); var e0=document.createElement('div'); e0.className='er';
         e0.textContent='✗ не вдалося прочитати ціни накладної';
         b0.appendChild(e0); return;
@@ -7417,20 +7455,20 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
         var n=document.createElement('div'); n.className='h';
         n.textContent='Жоден комплект не містить товарів цієї накладної.';
         box.appendChild(n);
-        btn.disabled=false; btn.textContent=old; return;
+        btn.disabled=false; btnIdle(btn); return;
       }
       lastReq={kits:need, fresh:fresh};
       var h=document.createElement('div'); h.className='h';
       h.textContent='рахую '+need.length+' комплект(ів)…';
       box.appendChild(h);
       invokeKits('preview', need, fresh, [], function(res){
-        btn.disabled=false; btn.textContent=old;
+        btn.disabled=false; btnIdle(btn);
         if(!res||!res.ok){ h.textContent='✗ '+((res&&res.err)||'нема відповіді'); return; }
         kitView={rows:res.rows,applied:false};
         renderKits(box, res.rows, false);
       }, function(p){ h.textContent='рахую комплекти… '+p; });
     }).catch(function(e){
-      btn.disabled=false; btn.textContent=old;
+      btn.disabled=false; btnIdle(btn);
       var box=kitBox(); var er=document.createElement('div'); er.className='er';
       er.textContent='✗ склад комплектів недоступний: '+String(e&&e.message||e).slice(0,60);
       box.appendChild(er);
@@ -7461,7 +7499,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       errLines(box, d.rows);
       if(!bad.length) dropUndo();      // все повернулось — знімок більше не потрібен
       syncSoon();
-    }, function(p){ ub.textContent='↩ Повертаю '+p+'…'; });
+    }, function(p){ btnBusy(ub, p); });
   }
   function syncUndo(host){
     var ub=document.querySelector('.lk-arropt-btn-undo');
@@ -7471,50 +7509,92 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       if(!host) return;
       ub=document.createElement('button'); ub.type='button';
       ub.className='lk-arropt-btn lk-arropt-btn-undo';
-      ub.style.background='#8d6e63';
+      // колір — класом, НЕ інлайном: інлайн не перебивається оформленням
+      // (та сама пастка, що з кнопкою «✕ Прибрати» у 3.46)
+      btnInit(ub,'↩','↩ Повернути ціни');
       ub.addEventListener('click',function(e){ e.preventDefault(); e.stopPropagation(); runUndo(ub); });
       host.appendChild(ub);
     }
     var d=new Date(snap.ts);
-    var txt='↩ Повернути ціни ('+snap.doc+' · '+snap.rows.length+' тов. · '
-      +('0'+d.getHours()).slice(-2)+':'+('0'+d.getMinutes()).slice(-2)+')';
-    if(ub.textContent!==txt) ub.textContent=txt;   // без переписування — щоб не мигтіло
-    ub.title='Повернути ціни, якими вони були до запису цієї накладної';
+    // довгий підпис тепер живе в підказці — у доці кнопка це лише значок
+    var txt='↩ Повернути ціни, якими вони були до запису накладної '
+      +snap.doc+' · '+snap.rows.length+' тов. · '
+      +('0'+d.getHours()).slice(-2)+':'+('0'+d.getMinutes()).slice(-2);
+    if(ub.getAttribute('data-label')!==txt){   // без переписування — щоб не мигтіло
+      ub.setAttribute('data-label', txt);
+      ub.title=txt;
+    }
   }
 
   // ширша зона: сам документ + список надходжень (там кнопка відкату теж має бути)
   function onArrivalArea(){ return /#\/document\/arrival-product\//.test(location.hash||''); }
+
+  // ---- док і кнопки-значки ----
+  var dockDrawn=false;   // щоб на чужих сторінках не шукати те, чого там нема
+  function dock(){
+    var d=document.getElementById('lk-arrdock');
+    if(!d){ d=document.createElement('div'); d.id='lk-arrdock'; document.body.appendChild(d); }
+    dockDrawn=true;
+    return d;
+  }
+  function dropDock(){
+    if(!dockDrawn) return;
+    var d=document.getElementById('lk-arrdock'); if(d) d.remove();
+    dockDrawn=false;
+  }
+  // У доці кнопка — квадратик 44×44: значок зверху, короткий прогрес під ним,
+  // повний підпис у підказці. Через це текст кнопки більше не можна
+  // перезаписувати цілком (btn.textContent=…) — інакше злетить розмітка.
+  function btnInit(b, icon, label){
+    b.setAttribute('data-label', label);
+    b.title=label;
+    b.textContent='';
+    var i=document.createElement('span'); i.className='ic'; i.textContent=icon; b.appendChild(i);
+    var s=document.createElement('span'); s.className='st'; b.appendChild(s);
+  }
+  function btnBusy(b, note){
+    var s=b&&b.querySelector('.st'); if(!s) return;
+    note=String(note==null?'':note);
+    if(s.textContent!==note) s.textContent=note;
+    var lab=b.getAttribute('data-label')||'';
+    var t=lab+(note?(' — '+note):'');
+    if(b.title!==t) b.title=t;
+  }
+  function btnIdle(b){
+    var s=b&&b.querySelector('.st'); if(!s) return;
+    if(s.textContent!=='') s.textContent='';
+    var lab=b.getAttribute('data-label')||'';
+    if(b.title!==lab) b.title=lab;
+  }
+
   function sync(){
     var btn=document.querySelector('.lk-arropt-btn-main');
     if(!onPage()){
       if(btn) btn.remove(); clearViewIfAny();
-      syncUndo(onArrivalArea()
-        ? (document.querySelector('.white-main-container')||document.querySelector('.panel-body')||null)
-        : null);
+      // поза документом кнопка відкату лишається на області надходжень — у тому ж доці
+      if(onArrivalArea()) syncUndo(dock()); else { syncUndo(null); dropDock(); }
       return;
     }
     if(view) renderColumn();   // Angular перемалював рядки — повертаємо колонку
-    var host=null, hs=document.querySelectorAll('h1,h2,h3');
-    for(var i=0;i<hs.length;i++){ if(/^Надходження товарів/.test((hs[i].textContent||'').trim())){ host=hs[i]; break; } }
+    var host=dock();
+    // з опт-колонками таблиця ширша за екран — на вузькому вікні док притухає
+    if(host.classList.contains('over')!==!!view) host.classList.toggle('over', !!view);
     // кнопку відкату показуємо на будь-якій сторінці надходжень, навіть без рядків:
     // накладну могли видалити, а ціни в картках лишились
-    syncUndo(host || document.querySelector('.white-main-container') || null);
+    syncUndo(host);
     if(!rowsCount()){ if(btn) btn.remove(); return; }
     if(btn) return;
     btn=document.createElement('button'); btn.type='button'; btn.className='lk-arropt-btn lk-arropt-btn-main';
-    btn.textContent='💰 Опт-ціни з собівартості';
-    btn.title='Показати нові ціни (Великий ×1.2, середній ×1.25, майстри ×1.3↑5) колонкою біля товарів; запис — окремою кнопкою';
+    btnInit(btn,'💰','💰 Опт-ціни з собівартості — показати нові ціни (Великий ×1.2, середній ×1.25, майстри ×1.3↑5) колонкою біля товарів; запис окремою кнопкою');
     btn.addEventListener('click',function(e){ e.preventDefault(); e.stopPropagation(); run(btn); });
-    if(host) host.appendChild(btn);
-    else{ var t=document.querySelector('table.document-invoice-products'); if(t&&t.parentElement) t.parentElement.insertBefore(btn,t); }
+    host.appendChild(btn);
 
     // друга кнопка: перерахунок комплектів, до складу яких входять товари накладної
     var kb=document.createElement('button'); kb.type='button';
     kb.className='lk-arropt-btn lk-arropt-btn-kits';
-    kb.textContent='🧩 Ціни комплектів';
-    kb.title='Знайти комплекти зі складниками з цієї накладної і перерахувати їхні ціни за новою закупкою';
+    btnInit(kb,'🧩','🧩 Ціни комплектів — знайти комплекти зі складниками з цієї накладної і перерахувати їхні ціни за новою закупкою');
     kb.addEventListener('click',function(e){ e.preventDefault(); e.stopPropagation(); runKits(kb); });
-    if(host) host.appendChild(kb); else if(btn.parentElement) btn.parentElement.insertBefore(kb, btn.nextSibling);
+    host.appendChild(kb);
   }
   function clearViewIfAny(){
     var r0=document.getElementById('lk-arropt-res');
