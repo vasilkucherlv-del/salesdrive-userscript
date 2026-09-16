@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.49
+// @version      3.50
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -1724,8 +1724,7 @@ var UPSELL_MAP_DATA = []; // вбудований запас прибрано: �
       /* наші вікна перекривають наші ж плаваючі кнопки */
       'html.lk-ov-open #sd-kb-btn,html.lk-ov-open #sd-kb-panel,html.lk-ov-open #lk-cash-btn,'
       + 'html.lk-ov-open #lk-pick-btn,html.lk-ov-open #lk-ukp-btn,html.lk-ov-open #lk-where-btn,'
-      + 'html.lk-ov-open #lk-pay-tiles,html.lk-ov-open #sd-payreq-warn,'
-      + 'html.lk-ov-open #lk-arrdock{display:none !important}'
+      + 'html.lk-ov-open #lk-pay-tiles,html.lk-ov-open #sd-payreq-warn{display:none !important}'
       /* миттєвий відгук на натиск: без нього кнопка здається «не натиснутою»,
          особливо на трекпаді, де :hover майже не видно */
       + '#sd-kb-btn:active,#lk-cash-btn:active,#lk-pick-btn:active,#lk-ukp-btn:active,'
@@ -1913,7 +1912,7 @@ var UPSELL_MAP_DATA = []; // вбудований запас прибрано: �
     +   'background:var(--sd-muted)!important;padding:12px 14px!important}'
 
     /* кнопки-пігулки надходження і взаєморозрахунків */
-    + '.lk-arropt-btn,.lk-sb-btn,#lk-copy-ng{'
+    + '.lk-arropt-btn:not(.lk-arrtb),.lk-sb-btn,#lk-copy-ng{'
     +   'font-family:var(--sd-font)!important;font-weight:500!important;'
     +   'border-radius:var(--sd-r-sm)!important;box-shadow:var(--sd-sh-1)!important;'
     +   'transition:background-color .18s ease,box-shadow .18s ease,transform .12s ease!important}'
@@ -1970,13 +1969,15 @@ var UPSELL_MAP_DATA = []; // вбудований запас прибрано: �
     +   'color:var(--sd-ink)!important}'
 
     /* головна дія — індиго; «↩ Повернути ціни» не має з нею конкурувати */
-    + '.lk-arropt-btn{background:var(--sd-accent)!important;color:#fff!important;'
+    /* :not(.lk-arrtb) — кнопки, що стоять у ШТАТНІЙ панелі іконок СРМ, мають
+       лишатись точно такими, як рідні сусіди; наше оформлення їх не чіпає */
+    + '.lk-arropt-btn:not(.lk-arrtb){background:var(--sd-accent)!important;color:#fff!important;'
     +   'border:1px solid var(--sd-accent)!important}'
-    + '.lk-arropt-btn:hover{background:var(--sd-accent-hov)!important;'
+    + '.lk-arropt-btn:not(.lk-arrtb):hover{background:var(--sd-accent-hov)!important;'
     +   'border-color:var(--sd-accent-hov)!important}'
-    + '.lk-arropt-btn-undo,.lk-arropt-btn-quiet,.lk-arropt-btn-kits{background:var(--sd-surface)!important;'
+    + '.lk-arropt-btn-undo:not(.lk-arrtb),.lk-arropt-btn-quiet,.lk-arropt-btn-kits:not(.lk-arrtb){background:var(--sd-surface)!important;'
     +   'color:var(--sd-ink-2)!important;border:1px solid var(--sd-line)!important}'
-    + '.lk-arropt-btn-undo:hover,.lk-arropt-btn-quiet:hover,.lk-arropt-btn-kits:hover{background:var(--sd-muted)!important;'
+    + '.lk-arropt-btn-undo:not(.lk-arrtb):hover,.lk-arropt-btn-quiet:hover,.lk-arropt-btn-kits:not(.lk-arrtb):hover{background:var(--sd-muted)!important;'
     +   'border-color:var(--sd-line-2)!important;color:var(--sd-ink)!important}'
     + '.lk-arropt-btn[disabled]{background:var(--sd-muted)!important;color:var(--sd-ink-3)!important;'
     +   'border-color:var(--sd-line)!important;box-shadow:none!important}'
@@ -6868,34 +6869,17 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     +'  background:#00897B;color:#fff;font:700 13px/1.5 Arial,sans-serif;cursor:pointer;vertical-align:middle;white-space:nowrap}'
     +'.lk-arropt-btn:hover{background:#00695c}'
     +'.lk-arropt-btn[disabled]{background:#9e9e9e;cursor:default}'
-    /* Док: вузький стовпчик, прикріплений до правого краю екрана.
-       Раніше всі три кнопки ліпились у заголовок «Надходження товарів №…» і
-       розтягували його на 972 px. Збоку від таблиці колонку поставити не можна:
-       з опт-колонками таблиця росте з 768 до 1338 px і місця праворуч немає.
-       Fixed ще й рятує від гортання — таблиця буває на 2700 px заввишки. */
-    +'#lk-arrdock{position:fixed;right:14px;top:50%;transform:translateY(-50%);z-index:9998;'
-    +'  display:flex;flex-direction:column;gap:8px;align-items:center;padding:8px;'
-    +'  border-radius:14px;background:rgba(255,255,255,.94);border:1px solid #e2e8f0;'
-    +'  box-shadow:0 4px 14px rgba(15,23,42,.10)}'
-    +'#lk-arrdock .lk-arropt-btn{width:44px;height:44px;margin:0;padding:0;border-radius:12px;'
-    +'  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px}'
-    +'#lk-arrdock .lk-arropt-btn .ic{font-size:18px;line-height:1}'
-    +'#lk-arrdock .lk-arropt-btn .st{font-size:9px;line-height:1}'
-    /* головна дія зверху, далі комплекти, відкат — останній */
-    +'#lk-arrdock .lk-arropt-btn-main{order:1}'
-    +'#lk-arrdock .lk-arropt-btn-kits{order:2}'
-    +'#lk-arrdock .lk-arropt-btn-undo{order:3}'
-    /* На широкому екрані док стоїть правіше за таблицю й нікому не заважає.
-       Але з опт-колонками таблиця росте до 1338 px: на вузькому вікні вона
-       вилазить за екран, і док накрив би праву колонку. Тому там він притухає
-       і стає щільним, щойно до нього тягнешся. */
-    +'#lk-arrdock{transition:opacity .18s ease}'
-    /* Межа 1500 px порахована, а не вгадана: таблиця з опт-колонками закінчується
-       на x=1425, док займає 76 px від правого краю — вони торкаються рівно при
-       ширині вікна 1501. Клас .over ставиться ЛИШЕ коли опт-колонки показані,
-       інакше док притухав би там, де нічого не перекриває. */
-    +'@media (max-width:1500px){#lk-arrdock.over{opacity:.45}'
-    +'  #lk-arrdock.over:hover,#lk-arrdock.over:focus-within{opacity:1}}'
+    /* Наші кнопки живуть у ШТАТНІЙ панелі іконок СРМ (поруч із друком і кошиком)
+       і беруть її ж класи, тож розмір і колір збігаються самі. Тут — лише те,
+       чого в СРМ немає: значок плюс маленький рядок прогресу під ним. */
+    /* display НЕ чіпаємо: рідна кнопка inline-block із власними відступами,
+       а flex-колонка збивала висоту з 34 до 30 px. Прогрес — маленьким числом
+       у куті, тож розмір кнопки не міняється, поки вона працює. */
+    /* емодзі ширші за рідні іконки-шрифти (51 проти 45) — вирівнюємо ряд */
+    +'.lk-arrtb{position:relative;text-decoration:none;'
+    +'  width:45px;padding-left:0;padding-right:0;text-align:center}'
+    +'.lk-arrtb .ic{font-size:15px;line-height:1}'
+    +'.lk-arrtb .st{position:absolute;right:2px;bottom:1px;font-size:8px;line-height:1;opacity:.8}'
     // компактна панель дій над таблицею
     +'#lk-arropt-res{margin:8px 0;padding:9px 12px;border:1px solid #7bb3a9;border-left:4px solid #00897B;'
     +'  background:#eef8f6;border-radius:6px;font:13px/1.6 Arial,sans-serif;color:#0f3d39;'
@@ -7508,7 +7492,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     if(!ub){
       if(!host) return;
       ub=document.createElement('button'); ub.type='button';
-      ub.className='lk-arropt-btn lk-arropt-btn-undo';
+      ub.className='btn btn-default btn-invoice-actions lk-arrtb lk-arropt-btn-undo';
       // колір — класом, НЕ інлайном: інлайн не перебивається оформленням
       // (та сама пастка, що з кнопкою «✕ Прибрати» у 3.46)
       btnInit(ub,'↩','↩ Повернути ціни');
@@ -7529,22 +7513,18 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   // ширша зона: сам документ + список надходжень (там кнопка відкату теж має бути)
   function onArrivalArea(){ return /#\/document\/arrival-product\//.test(location.hash||''); }
 
-  // ---- док і кнопки-значки ----
-  var dockDrawn=false;   // щоб на чужих сторінках не шукати те, чого там нема
-  function dock(){
-    var d=document.getElementById('lk-arrdock');
-    if(!d){ d=document.createElement('div'); d.id='lk-arrdock'; document.body.appendChild(d); }
-    dockDrawn=true;
-    return d;
+  // ---- штатна панель іконок СРМ (завантажити / друк / копія / видалити) ----
+  // Кнопки стають ще трьома іконками в тому самому ряду. Хост шукаємо за
+  // останньою рідною іконкою — так не залежимо від назви контейнера.
+  function toolbar(){
+    var all=document.querySelectorAll('.btn-invoice-actions');
+    var last=null;
+    for(var i=0;i<all.length;i++){ if(!all[i].classList.contains('lk-arrtb')) last=all[i]; }
+    return (last&&last.parentElement)||null;
   }
-  function dropDock(){
-    if(!dockDrawn) return;
-    var d=document.getElementById('lk-arrdock'); if(d) d.remove();
-    dockDrawn=false;
-  }
-  // У доці кнопка — квадратик 44×44: значок зверху, короткий прогрес під ним,
-  // повний підпис у підказці. Через це текст кнопки більше не можна
-  // перезаписувати цілком (btn.textContent=…) — інакше злетить розмітка.
+  // Кнопка — рідна іконка СРМ: значок, під ним маленький рядок прогресу,
+  // повний підпис у підказці. Через це текст кнопки не можна перезаписувати
+  // цілком (btn.textContent=…) — інакше злетить розмітка.
   function btnInit(b, icon, label){
     b.setAttribute('data-label', label);
     b.title=label;
@@ -7571,30 +7551,36 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     var btn=document.querySelector('.lk-arropt-btn-main');
     if(!onPage()){
       if(btn) btn.remove(); clearViewIfAny();
-      // поза документом кнопка відкату лишається на області надходжень — у тому ж доці
-      if(onArrivalArea()) syncUndo(dock()); else { syncUndo(null); dropDock(); }
+      // На СПИСКУ надходжень штатної панелі іконок немає (перевірено живцем),
+      // тож кнопка відкату там іде в загальний контейнер — як було до дока.
+      syncUndo(onArrivalArea()
+        ? (toolbar()||document.querySelector('.white-main-container')||document.querySelector('.panel-body'))
+        : null);
       return;
     }
     if(view) renderColumn();   // Angular перемалював рядки — повертаємо колонку
-    var host=dock();
-    // з опт-колонками таблиця ширша за екран — на вузькому вікні док притухає
-    if(host.classList.contains('over')!==!!view) host.classList.toggle('over', !!view);
+    var host=toolbar();
+    if(!host) return;          // панель ще не намальована — спробуємо наступним пульсом
     // кнопку відкату показуємо на будь-якій сторінці надходжень, навіть без рядків:
-    // накладну могли видалити, а ціни в картках лишились
-    syncUndo(host);
-    if(!rowsCount()){ if(btn) btn.remove(); return; }
-    if(btn) return;
-    btn=document.createElement('button'); btn.type='button'; btn.className='lk-arropt-btn lk-arropt-btn-main';
+    // накладну могли видалити, а ціни в картках лишились.
+    // Чіпляємо її ПІСЛЯ основних, щоб у ряду був порядок 💰 · 🧩 · ↩
+    if(!rowsCount()){ if(btn) btn.remove(); syncUndo(host); return; }
+    if(btn){ syncUndo(host); return; }
+    // класи рідні: розмір, форма й колір збігаються зі штатними іконками самі.
+    // Генеричного lk-arropt-btn НЕ даємо — він тягне бірюзу й радіус 14.
+    btn=document.createElement('button'); btn.type='button';
+    btn.className='btn btn-default btn-invoice-actions lk-arrtb lk-arropt-btn-main';
     btnInit(btn,'💰','💰 Опт-ціни з собівартості — показати нові ціни (Великий ×1.2, середній ×1.25, майстри ×1.3↑5) колонкою біля товарів; запис окремою кнопкою');
     btn.addEventListener('click',function(e){ e.preventDefault(); e.stopPropagation(); run(btn); });
     host.appendChild(btn);
 
     // друга кнопка: перерахунок комплектів, до складу яких входять товари накладної
     var kb=document.createElement('button'); kb.type='button';
-    kb.className='lk-arropt-btn lk-arropt-btn-kits';
+    kb.className='btn btn-default btn-invoice-actions lk-arrtb lk-arropt-btn-kits';
     btnInit(kb,'🧩','🧩 Ціни комплектів — знайти комплекти зі складниками з цієї накладної і перерахувати їхні ціни за новою закупкою');
     kb.addEventListener('click',function(e){ e.preventDefault(); e.stopPropagation(); runKits(kb); });
     host.appendChild(kb);
+    syncUndo(host);
   }
   function clearViewIfAny(){
     var r0=document.getElementById('lk-arropt-res');
