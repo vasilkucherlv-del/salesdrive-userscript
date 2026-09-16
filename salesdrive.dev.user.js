@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.52
+// @version      3.53
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -7540,7 +7540,26 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     // іконок немає взагалі — стаємо поруч із «Зберегти», у тому самому контейнері.
     // (без цього фолбеку кнопки опт-цін зникали на /create — регрес 3.50)
     var sv=document.querySelector('.save-invoice-item-btn');
-    return (sv&&sv.parentElement)||null;
+    if(!sv){
+      // залежно від того, звідки відкрито накладну, клас у «Зберегти» інший —
+      // тож шукаємо ще й за текстом, беручи саме ВЕРХНЮ кнопку (унизу є дубль)
+      var bs=document.querySelectorAll('button,a.btn');
+      for(var j=0;j<bs.length;j++){
+        var b=bs[j];
+        if(!/^Зберегти$/i.test((b.textContent||'').trim())) continue;
+        if(!b.offsetParent) continue;
+        if(b.getBoundingClientRect().top>300) continue;
+        sv=b; break;
+      }
+    }
+    if(sv&&sv.parentElement) return sv.parentElement;
+    // останній шанс — контейнер заголовка «Надходження товарів №»: саме туди
+    // успішно чіпляється бейдж кількості, тож він є всюди, де є накладна
+    var hs=document.querySelectorAll('h1,h2,h3');
+    for(var k=0;k<hs.length;k++){
+      if(/^Надходження товарів/.test((hs[k].textContent||'').trim())) return hs[k].parentElement;
+    }
+    return null;
   }
   // Кнопка — рідна іконка СРМ: значок, короткий підпис і чіп прогресу в куті;
   // повний опис — у підказці. Через це текст кнопки не можна перезаписувати
