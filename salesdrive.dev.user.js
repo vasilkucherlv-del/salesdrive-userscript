@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.53
+// @version      3.54
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -1926,11 +1926,16 @@ var UPSELL_MAP_DATA = []; // вбудований запас прибрано: �
            більше повітря тут підняло б висоту кожного рядка накладної. */
     // смуга на КОЖНОМУ рядку зливається у суцільну лінію на всю висоту таблиці,
     // тож у комірках вона світла, а насичений індиго лишається в заголовку
-    + 'td.lk-arropt-td,td.lk-roz-td{background:var(--sd-muted)!important;'
+    /* :not(.warn)/:not(.er) — оформлення НЕ чіпає тривожні рядки: червоний
+       колір у них задано модулем, а !important тут його затирав, і головна
+       зміна («⚠ собів. … → …», «роздріб … → …») виглядала як сірий дріб'язок */
+    + 'td.lk-arropt-td:not(.er),td.lk-roz-td:not(.er){background:var(--sd-muted)!important;'
     +   'border-left:3px solid var(--sd-accent-line)!important;color:var(--sd-ink)!important}'
     + 'td.lk-arropt-td.blank{background:transparent!important;border-left:none!important}'
-    + 'td.lk-arropt-td .nw{color:var(--sd-ink)!important;font-weight:700!important}'
-    + 'td.lk-arropt-td .od,td.lk-roz-td .od{color:var(--sd-ink-3)!important}'
+    + 'td.lk-arropt-td .nw:not(.warn){color:var(--sd-ink)!important;font-weight:800!important}'
+    /* другий рядок («було: …») був --sd-ink-3 #94a3b8 — контраст 2,5:1,
+       очі ламались. --sd-ink-2 дає ~7:1 і лишається другорядним */
+    + 'td.lk-arropt-td .od:not(.warn),td.lk-roz-td .od:not(.warn){color:var(--sd-ink-2)!important}'
     + 'th.lk-arropt-td,th.lk-roz-th{background:var(--sd-muted)!important;'
     +   'color:var(--sd-ink-2)!important;font-family:var(--sd-font)!important;'
     +   'font-weight:600!important;border-left:3px solid var(--sd-accent)!important}'
@@ -6911,6 +6916,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     +'td.lk-arropt-td.er{color:#B71C1C;font-weight:700;font-size:13px;white-space:normal}'
     +'td.lk-arropt-td.blank{background:transparent;border-left:none}'
     +'td.lk-roz-td .warn{color:#B71C1C;font-weight:800}'
+    /* сам значок ⚠ — насиченіший і більший за текст рядка: це найважливіше,
+       що є на сторінці, його треба бачити, не вчитуючись */
+    +'td.lk-arropt-td .al{color:#C62828;font-weight:900;font-size:15px;margin-right:4px}'
     +'#lk-kits-res{margin:10px 0;padding:10px 12px;border:1px solid #b08cc7;border-left:4px solid #7b4fa0;'
     +'  background:#f7f1fb;border-radius:6px;font:13px/1.6 Arial,sans-serif;color:#3b2350;'
     +'  max-width:1100px;box-sizing:border-box;position:relative}'
@@ -7040,8 +7048,10 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
         if(r.costOld!=null){
           var cl=document.createElement('div');
           cl.className='od'+(r.alarm?' warn':'');
-          cl.textContent=(r.alarm?'⚠ ':'')+'собів. '+fmtN(r.costOld)+' → '+fmtN(r.base)
-            +(r.delta>0?(' (+'+fmtN(r.delta)+' грн'+(r.deltaPct!=null?', +'+fmtN(r.deltaPct)+'%':'')+')'):'');
+          // значок окремо від тексту — щоб його можна було підсилити кольором
+          if(r.alarm){ var al=document.createElement('span'); al.className='al'; al.textContent='⚠'; cl.appendChild(al); }
+          cl.appendChild(document.createTextNode('собів. '+fmtN(r.costOld)+' → '+fmtN(r.base)
+            +(r.delta>0?(' (+'+fmtN(r.delta)+' грн'+(r.deltaPct!=null?', +'+fmtN(r.deltaPct)+'%':'')+')'):'')));
           cl.title='Стара собівартість — з опт-цін картки (Великий опт ÷ 1.2). Якщо їх правили руками, оцінка приблизна.';
           td2.appendChild(cl);
         }
