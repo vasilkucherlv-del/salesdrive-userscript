@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.55
+// @version      3.56
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -8398,6 +8398,15 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       var m=/\(([^()]+)\)/.exec(String(sp.textContent||'').replace(/\s+/g,' '));
       if(!m) return;
       var code=m[1];
+      // сам код теж клікабельний — як у списку заявок (3.55); кнопка ⧉ лишається.
+      // Пишемо ЛИШЕ за потреби: span стає нашим елементом, і безумовний запис
+      // атрибута рахувався б як мутація в тесті спокою.
+      if(!sp.classList.contains('lk-skuhot')) sp.classList.add('lk-skuhot');
+      // data-sku оновлюємо разом із кодом: Angular перевикористовує рядок під
+      // інший товар, інакше копіювався б код попереднього
+      if(sp.getAttribute('data-sku')!==code) sp.setAttribute('data-sku', code);
+      var ttl='Натисніть, щоб скопіювати код '+code;
+      if(sp.title!==ttl) sp.title=ttl;
       var known=hrefGet(code);
       if(known===undefined) loadHref(code);    // ще не знаємо адреси — спитаємо і перемалюємо
       // ШУКАЄМО ПО ВСІЙ КОМІРЦІ, а не «одразу за кодом»: модуль аналогів вставляє свій
