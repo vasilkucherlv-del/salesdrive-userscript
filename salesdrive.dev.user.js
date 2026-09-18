@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.56
+// @version      3.57
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -10831,7 +10831,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       try{ res=await sdOrders(qs,page); }catch(e){ break; }
       all=all.concat(res.rows||[]);
       pages=res.pageCount||1; page++;
-      if(page<=pages) await sleep(200);
+      // це ВНУТРІШНІЙ запит СРМ (cookie, без годинного ліміту) — довга пауза
+      // між сторінками тут лише сповільнювала відкриття каси
+      if(page<=pages) await sleep(60);
     }
     return all;
   }
@@ -10902,6 +10904,58 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       +'<div class="lk-unpaid-hint">Відкрийте заявку та проставте спосіб оплати — після цього вона зайде в касу.</div>';
   }
 
+  /* ---- «хвіст» каси: від стартової точки до дня перед вибраним періодом ----
+     Щоб показати «💰 Готівка в касі», треба сума продажів і видатків ВІД
+     стартової точки. Раніше для цього щоразу вантажився весь діапазон: у
+     Василя стартова точка стоїть із 31 липня, тож відкриття «Дня» тягло
+     19 сторінок заявок і займало ~15 с. Але поза вибраним періодом із того
+     набору потрібні ЛИШЕ два числа — тож тримаємо їх у кеші, а живими
+     запитами беремо тільки сам період.
+     Кеш у localStorage — спільний для вкладок (правило 4 CLAUDE.md). */
+  var TAILKEY='lk_cash_tail_v1', TAILTTL=10*60*1000;
+  function tailRaw(){ try{ return JSON.parse(localStorage.getItem(TAILKEY)||'null'); }catch(e){ return null; } }
+  function tailRead(key){
+    var r=tailRaw();
+    return (r && r.key===key) ? r : null;
+  }
+  // Наступного дня межа хвоста зсувається на день уперед, і ключ уже інший.
+  // Щоб не перераховувати всі сім тижнів заново, беремо вчорашній кеш і
+  // ДОРАХОВУЄМО лише ті дні, яких у ньому бракує.
+  async function tailGrow(bdate,tailTo){
+    var r=tailRaw(); if(!r || !r.key) return null;
+    var parts=String(r.key).split('|');
+    if(parts[0]!==bdate) return null;            // інша стартова точка — кеш не підходить
+    var had=parts[1];
+    if(!(had<tailTo)) return null;               // кеш не старіший — доростати нічого
+    var from=ymd(new Date(new Date(had+'T00:00:00').getTime()+86400000));
+    var add=await tailCalc(from,tailTo);         // лише кілька днів
+    var cash=num(r.cash)+add.cash, out=num(r.out)+add.out;
+    tailWrite(bdate+'|'+tailTo, cash, out);
+    return {cash:cash, out:out, ts:Date.now()};
+  }
+  function tailWrite(key,cash,out){
+    try{ localStorage.setItem(TAILKEY, JSON.stringify({key:key,cash:cash,out:out,ts:Date.now()})); }catch(e){}
+  }
+  // порахувати хвіст живими запитами
+  async function tailCalc(bdate,tailTo){
+    var od=await Promise.all([ fetchOrders(bdate,tailTo), fetchOutcoming(bdate,tailTo) ]);
+    var cash=0; od[0].forEach(function(o){ if(payId(o)===CASH_ID && payDate(o)>=bdate) cash+=amount(o); });
+    var out=0;  od[1].items.forEach(function(x){ if(x.date>=bdate) out+=x.amount; });
+    return {cash:cash, out:out};
+  }
+  var _tailBusy=null;
+  // тиха звірка у фоні — як revalidateBaseline: показали з кешу, перевіряємо потім
+  function revalidateTail(key,bdate,tailTo,seqAtStart){
+    if(_tailBusy===key) return; _tailBusy=key;
+    tailCalc(bdate,tailTo).then(function(t){
+      _tailBusy=null;
+      var old=tailRead(key);
+      tailWrite(key,t.cash,t.out);
+      var changed=!old || old.cash!==t.cash || old.out!==t.out;   // хтось правив стару заявку
+      if(changed && seqAtStart===renderSeq && document.getElementById('lk-cash-box')) render();
+    }).catch(function(){ _tailBusy=null; });
+  }
+
   /* ---- видаткові касові ордери: newest-first, стоп на from ---- */
   async function fetchOutcoming(from,to){
     var page=1,items=[],sum=0,guard=0,stop=false;
@@ -10918,7 +10972,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
         items.push({id:o.id,date:dt,ts:String(o.date||''),amount:a,comment:String(o.comment||'').trim(),number:o.number});
       }
       var pg=j.pagination||{}; if(pg.currentPage>=pg.pageCount) break;
-      page++; await sleep(300);
+      page++; await sleep(60);
     }
     return {sum:sum,items:items};
   }
@@ -11041,9 +11095,28 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     }
     var bdate=String(base.date).slice(0,10);
 
-    // ── Один запит на обʼєднаний діапазон, далі рахуємо і залишок, і період ──
+    // ── Діапазон ділимо надвоє: «хвіст» (від стартової точки) — з кешу двома
+    //    сумами, сам період — живими запитами. Для «Дня» це 1 сторінка замість 19.
     var hasBal=(span.to>=bdate);
-    var uFrom=hasBal?(bdate<span.from?bdate:span.from):span.from;
+    var tailTo=null, tailKey=null, tail=null;
+    if(hasBal && bdate<span.from){
+      tailTo=ymd(new Date(new Date(span.from+'T00:00:00').getTime()-86400000));  // день перед періодом
+      tailKey=bdate+'|'+tailTo;
+      tail=tailRead(tailKey);
+      if(!tail){
+        // кеш із попереднього дня? — дорахуємо лише різницю
+        try{ tail=await tailGrow(bdate,tailTo); }catch(e){ tail=null; }
+        if(myseq!==renderSeq) return;
+      }
+      if(!tail){
+        // кешу ще немає — рахуємо один раз (довго), далі відкриття буде миттєвим
+        try{ var tc=await tailCalc(bdate,tailTo); tailWrite(tailKey,tc.cash,tc.out); tail={cash:tc.cash,out:tc.out,ts:Date.now()}; }
+        catch(e){ tail=null; }
+        if(myseq!==renderSeq) return;
+      }
+    }
+    // з хвостом у руках живими запитами беремо ЛИШЕ період; без нього — як раніше
+    var uFrom=tail?span.from:(hasBal?(bdate<span.from?bdate:span.from):span.from);
     var uTo=span.to;
     // Кеш orders+видатків (Рівень 1, 90с). Каса рендериться ОДРАЗУ (як у 1.59),
     // а чеки (для «📝 чернетка») довантажуються У ФОНІ й оновлюють бейджі потім —
@@ -11071,6 +11144,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     // чеки: беремо з фонового кешу, якщо вже є; інакше стартуємо фонове завантаження
     var checkStatus = (_checksCache && _checksCache.key===okey) ? (_checksCache.map||{}) : {};
     if(!(_checksCache && _checksCache.key===okey)) loadChecksBg(okey, uFrom, uTo, myseq);
+    // хвіст показали з кешу — якщо він застарів, тихо перевіряємо у фоні
+    if(tail && tailKey && (Date.now()-(tail.ts||0))>=TAILTTL) revalidateTail(tailKey,bdate,tailTo,myseq);
 
     function inPeriod(d){ return d>=span.from && d<=span.to; }
 
@@ -11082,8 +11157,10 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       // залишок = опорний (на початок дня перерахунку) + готівкові продажі − видатки,
       // від дати перерахунку. Опорний уже враховує сьогоднішні до-перерахункові операції,
       // тож подвійного рахунку немає, а нові продажі одразу збільшують залишок.
-      var cashCum=0; allOrders.forEach(function(o){ if(payId(o)===CASH_ID && payDate(o)>=bdate) cashCum+=amount(o); });
-      var outCum=0; allOut.items.forEach(function(x){ if(x.date>=bdate) outCum+=x.amount; });
+      // хвіст (до періоду) + те, що в завантаженому діапазоні
+      var cashCum=tail?tail.cash:0, outCum=tail?tail.out:0;
+      allOrders.forEach(function(o){ if(payId(o)===CASH_ID && payDate(o)>=bdate) cashCum+=amount(o); });
+      allOut.items.forEach(function(x){ if(x.date>=bdate) outCum+=x.amount; });
       var balance=num(base.amount)+cashCum-outCum;
       balanceTxt='<div id="lk-cash-bal"><span class="l">💰 Готівка в касі<br><span class="sub">станом на '+dstr(span.to)+'</span></span><span class="v">'+fmt(balance)+'</span></div>';
     }
