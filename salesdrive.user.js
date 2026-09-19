@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань
 // @namespace    lartek-komplektom
-// @version      3.47
+// @version      3.48
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -12,8 +12,8 @@
 // @connect      docs.google.com
 // @connect      railway.app
 // @grant        GM_setClipboard
-// @updateURL    https://raw.githubusercontent.com/vasilkucherlv-del/salesdrive-userscript/main/salesdrive.user.js
-// @downloadURL  https://raw.githubusercontent.com/vasilkucherlv-del/salesdrive-userscript/main/salesdrive.user.js
+// @updateURL    https://barcode-printer-production-2b32.up.railway.app/s/salesdrive.user.js?k=sd_tRSX0LThcw0OiZvWTaGDXiJMTfPj4QW6
+// @downloadURL  https://barcode-printer-production-2b32.up.railway.app/s/salesdrive.user.js?k=sd_tRSX0LThcw0OiZvWTaGDXiJMTfPj4QW6
 // ==/UserScript==
 
 /* ╔══════════════════════ КАРТА МОДУЛІВ (TOC) ══════════════════════╗
