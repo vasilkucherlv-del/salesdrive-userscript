@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.59
+// @version      3.60
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -8981,7 +8981,16 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     +'#lk-td-box .act{border:1px solid #455A64;background:#fff;color:#455A64;border-radius:7px;'
     +'  padding:5px 12px;cursor:pointer;font-weight:700}'
     +'#lk-td-box .act:hover{background:#eceff1}'
-    +'#lk-td-box .act[disabled]{border-color:#b0bec5;color:#90a4ae;cursor:default;background:#fff}';
+    +'#lk-td-box .act[disabled]{border-color:#b0bec5;color:#90a4ae;cursor:default;background:#fff}'
+    /* вибір статусів: складений список галочок просто під кнопкою */
+    +'#lk-td-box .sts{position:relative;display:inline-block}'
+    +'#lk-td-box .sts .lst{display:none;position:absolute;left:0;top:100%;z-index:3;background:#fff;'
+    +'  border:1px solid #b0bec5;border-radius:8px;box-shadow:0 6px 20px rgba(0,0,0,.18);'
+    +'  padding:6px 4px;max-height:260px;overflow:auto;min-width:230px}'
+    +'#lk-td-box .sts.on .lst{display:block}'
+    +'#lk-td-box .sts .lst label{display:flex;gap:7px;align-items:center;padding:3px 8px;cursor:pointer;white-space:nowrap}'
+    +'#lk-td-box .sts .lst label:hover{background:#eceff1}'
+    +'#lk-td-box .sts .lst .clr{color:#455A64;font-weight:700;cursor:pointer;padding:4px 8px;border-top:1px solid #eceff1;margin-top:4px}';
   var st=document.createElement('style'); st.textContent=css;
   (document.head||document.documentElement).appendChild(st);
 
@@ -9056,31 +9065,81 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   // список заявок за період (внутрішній запит СРМ, без ліміту публічного API)
   // обгортка ядра (як в інших модулях), із запасним прямим запитом
   function sdOrders(qs, page){
-    if(window.sdApi && window.sdApi.orders) return window.sdApi.orders(qs, page);
+    // ядро віддає ще й meta — статуси беремо звідти, без окремого запиту
+    if(window.sdApi && window.sdApi.orders) return window.sdApi.orders(qs, page).then(function(res){
+      if(res && res.meta) grabStatuses({meta:res.meta});
+      return res;
+    });
     var u='/orders/?formId=1&mobileMode=0&mode=orderList&page='+(page||1)+(qs?('&'+qs):'');
     return jget(u).then(function(j){
       var b=(j&&(j.response||j))||{};
+      grabStatuses(b); grabStatuses(j);      // meta буває і в корені, і в response
       return { rows:b.data||[], pageCount:((b.pagination||{}).pageCount)||1 };
     });
   }
-  function loadOrders(from, to, onProg){
-    var qs='filter[statusId][]=__NOTDELETED__'
-      +'&filter[orderTime][from]='+from+'&filter[orderTime][to]='+to;   // лише ISO-дати!
+  /* ---- фільтр за кодом товару ----
+     Рядок списку вже містить products (sku, кількість) — тож відбір суто на
+     клієнті, без жодного зайвого запиту. Набори: код може піти у складі
+     комплекту, і тоді в заявці стоїть SKU набору, а не складника. Карта
+     комплектів уже лежить у GM-сховищі (lknb_cache2) — читаємо готову. */
+  function kitsOf(sku){
     var out=[];
-    function take(res){ (res.rows||[]).forEach(function(r){ if(hasTtn(r)) out.push(r); }); }
+    try{
+      var raw=GM_getValue('lknb_cache2',null);
+      var c=raw?((typeof raw==='string')?JSON.parse(raw):raw):null;
+      var kits=c&&c.kits; if(!kits) return out;
+      Object.keys(kits).forEach(function(kitSku){
+        ((kits[kitSku]||{}).comps||[]).forEach(function(cp){
+          if(String(cp.sku==null?'':cp.sku).trim()===sku) out.push(String(kitSku));
+        });
+      });
+    }catch(e){}
+    return out;
+  }
+  function wantSkus(sku){
+    sku=String(sku||'').trim();
+    if(!sku) return null;                       // без фільтра
+    var m={}; m[sku]=1;
+    kitsOf(sku).forEach(function(k){ m[k]=1; });  // + набори, куди код входить
+    return m;
+  }
+  function hasSku(r, want){
+    if(!want) return true;
+    var ps=r&&r.products;
+    if(typeof ps==='string'){ try{ ps=JSON.parse(ps); }catch(e){ ps=null; } }
+    if(!ps||!ps.length) return false;
+    for(var i=0;i<ps.length;i++){
+      if(want[String(ps[i].sku==null?'':ps[i].sku).trim()]) return true;
+    }
+    return false;
+  }
+  function loadOrders(from, to, onProg, statuses, want){
+    var stq=(statuses&&statuses.length)
+      ? statuses.map(function(v){ return 'filter[statusId][]='+encodeURIComponent(v); }).join('&')
+      : 'filter[statusId][]=__NOTDELETED__';
+    var qs=stq
+      +'&filter[orderTime][from]='+from+'&filter[orderTime][to]='+to;   // лише ISO-дати!
+    var out=[], withTtn=0;
+    function take(res){ (res.rows||[]).forEach(function(r){
+      if(!hasTtn(r)) return;
+      withTtn++;
+      if(hasSku(r, want)) out.push(r);
+    }); }
     // перша сторінка дає кількість решти — далі тягнемо їх тим самим пулом із 4 потоків
     // (тиждень — це 25 сторінок, послідовно вони читались ~30 с)
     return sdOrders(qs, 1).then(function(first){
       take(first);
       var total=Math.min(first.pageCount||1, MAX_PAGES);
-      if(onProg) onProg('сторінка 1 із '+total+', із ТТН: '+out.length);
+      function note(){ return want? (', із ТТН: '+withTtn+' · із товаром: '+out.length)
+                                  : (', із ТТН: '+out.length); }
+      if(onProg) onProg('сторінка 1 із '+total+note());
       if(stop || total<2) return out;
       var pages=[]; for(var p=2;p<=total;p++) pages.push(p);
       var got=1;
       return pool(pages, 4, function(pg){
         return sdOrders(qs, pg).then(function(res){
           take(res); got++;
-          if(onProg) onProg('сторінка '+got+' із '+total+', із ТТН: '+out.length);
+          if(onProg) onProg('сторінка '+got+' із '+total+note());
         });
       }).then(function(){ return out; });
     });
@@ -9094,6 +9153,17 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     }catch(e){}
   }
   function userName(id){ return users[String(id)] || ('користувач '+id); }
+
+  // статуси беремо з тієї самої відповіді, що вже приходить, — окремого запиту не треба
+  var statusOpts=[];
+  function grabStatuses(j){
+    try{
+      var opts=j && j.meta && j.meta.fields && j.meta.fields.statusId && j.meta.fields.statusId.options;
+      if(opts && opts.length) statusOpts=opts.map(function(o){
+        return { v:String(o.value), t:String(o.text||o.value) };
+      });
+    }catch(e){}
+  }
 
   // друки ТТН однієї заявки: type==='Ttn' І текст саме «Надруковано»
   // (той самий type має і «Створена ТТН» — тому фільтр по тексту обовʼязковий)
@@ -9178,6 +9248,15 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     head.textContent='🖨 Подвійний друк ТТН · '+dmy(data.from)+' — '+dmy(data.to)
       +' · перевірено заявок із ТТН: '+data.checked;
     b.appendChild(head);
+    // видно, з якими фільтрами порахований результат — інакше легко сплутати
+    // вузьку вибірку з повною
+    if(data.sku || (data.sts&&data.sts.length)){
+      var fl=document.createElement('div'); fl.className='note';
+      fl.textContent='Фільтри: '
+        +(data.sku? ('товар '+data.sku+(data.kits? (' (+'+data.kits+' набор'+(data.kits===1?'':'и')+')') : '')) : 'товар не заданий')
+        +' · '+((data.sts&&data.sts.length)? ('статусів обрано: '+data.sts.length) : 'усі статуси');
+      b.appendChild(fl);
+    }
     data.fixed=data.fixed||[];
     if(!data.diff.length && !data.same.length && !data.fixed.length){
       var n=document.createElement('div'); n.className='note';
@@ -9190,7 +9269,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     table(b, 'Передруки того самого номера', data.same, false);
   }
 
-  function run(btn, b, from, to){
+  function run(btn, b, from, to, statuses, skuRaw){
     if(busy) return;
     busy=true; stop=false;
     var prog=document.createElement('div'); prog.className='h';
@@ -9199,7 +9278,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     b.appendChild(prog);
     btn.disabled=true;
 
-    loadOrders(from, to, function(txt){ prog.textContent='читаю список заявок: '+txt; })
+    var want=wantSkus(skuRaw);
+    loadOrders(from, to, function(txt){ prog.textContent='читаю список заявок: '+txt; }, statuses, want)
       .then(function(orders){
         var diff=[], fixed=[], same=[];
         function classify(o, ps){
@@ -9222,7 +9302,9 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
             +(cached?(' · з кешу: '+cached):'');
         }).then(function(st){
           ocacheFlush();
-          var data={ from:from, to:to, checked:st.done, diff:diff, fixed:fixed, same:same, ts:Date.now() };
+          var data={ from:from, to:to, checked:st.done, diff:diff, fixed:fixed, same:same, ts:Date.now(),
+                     sku:String(skuRaw||'').trim(), sts:(statuses||[]).slice(0),
+                     kits:want? Object.keys(want).length-1 : 0 };
           try{ localStorage.setItem(CKEY, JSON.stringify(data)); }catch(e){}
           render(b, data);
           if(stop){
@@ -9237,6 +9319,15 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
         prog.textContent='✗ не вдалося: '+String((e&&e.message)||e).slice(0,60);
         btn.disabled=false; busy=false;
       });
+  }
+
+  // памʼять фільтрів — окремо від кеша результату
+  var FKEY='lk_ttndbl_flt_v1';
+  function prefs(){ try{ return JSON.parse(localStorage.getItem(FKEY)||'{}')||{}; }catch(e){ return {}; } }
+  function prefSku(){ return String(prefs().sku||''); }
+  function prefStatuses(){ var a=prefs().sts; return Array.isArray(a)?a.slice(0):[]; }
+  function savePrefs(sku, sts){
+    try{ localStorage.setItem(FKEY, JSON.stringify({sku:String(sku||'').trim(), sts:(sts||[]).slice(0)})); }catch(e){}
   }
 
   function open(){
@@ -9265,12 +9356,76 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     line.appendChild(sp);
     b.appendChild(line);
 
+    /* ---- другий рядок: товар і статуси ----
+       Обидва фільтри необовʼязкові: порожні — поведінка рівно як була. */
+    var line2=document.createElement('div'); line2.className='row2';
+    line2.appendChild(document.createTextNode('Товар (код): '));
+    var sku=document.createElement('input'); sku.type='text'; sku.placeholder='напр. 01278';
+    sku.style.width='120px'; sku.value=prefSku();
+    line2.appendChild(sku);
+
+    var wrap=document.createElement('div'); wrap.className='sts';
+    var stBtn=document.createElement('button'); stBtn.type='button'; stBtn.className='act';
+    var lst=document.createElement('div'); lst.className='lst';
+    var chosen=prefStatuses();
+    function stLabel(){
+      stBtn.textContent='Статуси: '+(chosen.length? (chosen.length+' обр.') : 'усі')+' ▾';
+    }
+    var stLoading=false;
+    function fillList(){
+      lst.textContent='';
+      if(!statusOpts.length){
+        // статуси лежать у meta списку заявок — беремо їх одним легким запитом
+        // і саме тоді, коли вперше знадобились (а не при кожному відкритті)
+        var n=document.createElement('div'); n.className='clr';
+        n.textContent=stLoading?'читаю список статусів…':'натисніть ще раз — читаю статуси…';
+        lst.appendChild(n);
+        if(!stLoading){
+          stLoading=true;
+          sdOrders('', 1).then(function(){ stLoading=false; if(statusOpts.length) fillList(); })
+                         .catch(function(){ stLoading=false; });
+        }
+        return;
+      }
+      statusOpts.forEach(function(o){
+        var lab=document.createElement('label');
+        var cb=document.createElement('input'); cb.type='checkbox'; cb.value=o.v;
+        cb.checked=chosen.indexOf(o.v)>=0;
+        cb.addEventListener('change',function(){
+          chosen=chosen.filter(function(x){ return x!==o.v; });
+          if(cb.checked) chosen.push(o.v);
+          savePrefs(sku.value, chosen); stLabel();
+        });
+        lab.appendChild(cb);
+        lab.appendChild(document.createTextNode(o.t));
+        lst.appendChild(lab);
+      });
+      var clr=document.createElement('div'); clr.className='clr'; clr.textContent='× зняти всі';
+      clr.addEventListener('click',function(){ chosen=[]; savePrefs(sku.value, chosen); stLabel(); fillList(); });
+      lst.appendChild(clr);
+    }
+    stBtn.addEventListener('click',function(e){
+      e.stopPropagation();
+      if(!wrap.classList.contains('on')) fillList();
+      wrap.classList.toggle('on');
+    });
+    lst.addEventListener('click',function(e){ e.stopPropagation(); });
+    b.addEventListener('click',function(){ wrap.classList.remove('on'); });
+    stLabel();
+    wrap.appendChild(stBtn); wrap.appendChild(lst);
+    line2.appendChild(wrap);
+    b.appendChild(line2);
+
     var hint=document.createElement('div'); hint.className='note';
     hint.textContent='СРМ не вміє шукати по коментарях, тож кожну заявку з ТТН доводиться '
-      +'питати окремо (~0,6 с). Тиждень — це кілька хвилин; «Стоп» покаже знайдене.';
+      +'питати окремо (~0,6 с). Тиждень — це кілька хвилин; «Стоп» покаже знайдене. '
+      +'Код товару різко звужує перевірку — заявок лишаються одиниці; набори враховуються.';
     b.appendChild(hint);
 
-    go.addEventListener('click',function(){ run(go, b, f.value, t.value); });
+    go.addEventListener('click',function(){
+      savePrefs(sku.value, chosen);
+      run(go, b, f.value, t.value, chosen, sku.value);
+    });
 
     if(cached){
       render(b, cached);
