@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.61
+// @version      3.62
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -8311,43 +8311,15 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       ? window.sdItemRowsPage()
       : !/#\/(order|product)\/index/.test(location.hash||'');
   }
-  /* ---- код товару в СПИСКУ заявок ----
-     Колонка «Товари/Послуги»: «Назва товару (01850) - 1». Обгортаємо КОД
-     у свій span, щоб клік по ньому копіював. Рядки товарів тут не скануємо
-     (список — найважча сторінка СРМ), працюємо тільки з цими клітинками. */
-  var CODE_RE=/\((\d{2,8})\)/g;   // лише цифри: у назвах бувають дужки зі словами
-  function wrapCodes(cell){
-    // підпис стану: текст клітинки. Обгортання його НЕ міняє, тож наступний
-    // тик побачить той самий підпис і нічого не перемальовуватиме
-    var sig=String(cell.textContent||'');
-    if(cell.getAttribute('data-sd-sku')===sig) return;
-    var nodes=[].slice.call(cell.childNodes);
-    nodes.forEach(function(n){
-      if(n.nodeType!==3) return;                 // тільки текстові вузли
-      var txt=n.nodeValue||''; CODE_RE.lastIndex=0;
-      if(!CODE_RE.test(txt)) return;
-      CODE_RE.lastIndex=0;
-      var frag=document.createDocumentFragment(), last=0, m;
-      while((m=CODE_RE.exec(txt))){
-        if(m.index>last) frag.appendChild(document.createTextNode(txt.slice(last,m.index)));
-        var sp=document.createElement('span');
-        sp.className='lk-skuhot'; sp.setAttribute('data-sku', m[1]);
-        sp.title='Натисніть, щоб скопіювати код '+m[1];
-        sp.textContent=m[0];                     // з дужками — вигляд не міняється
-        frag.appendChild(sp);
-        last=m.index+m[0].length;
-      }
-      if(last<txt.length) frag.appendChild(document.createTextNode(txt.slice(last)));
-      n.parentNode.replaceChild(frag, n);
-    });
-    cell.setAttribute('data-sd-sku', sig);
-  }
-  function listScan(){
-    var cells=document.querySelectorAll('.products-inner');
-    if(!cells.length) return;                    // дешевий вихід на решті сторінок
-    [].forEach.call(cells, wrapCodes);
-  }
-  // один слухач на документ, а не на кожен код: їх у списку сотні
+  /* У СПИСКУ заявок (#/order/index) коду НЕ чіпаємо. Була така гілка (3.55):
+     обгортали код у колонці «Товари/Послуги» у свій span. Прибрано у 3.62 —
+     Василь: «глючее». Клітинка там — редактор самої СРМ
+     (p-editable-products + dblclick-commentdate-init): вона сама
+     перемальовує свій вміст і сама ловить кліки, тож наш stopPropagation
+     відбирав у неї клік, а підміна текстових вузлів воювала з її рендером.
+     Це той самий клас проблем, через який ядро вже виключає цю сторінку
+     з sdItemRowsPage(). Не повертати. */
+  // один слухач на документ, а не на кожен код: у заявці їх десятки
   document.addEventListener('click', function(e){
     var t=e.target;
     if(!t || !t.classList || !t.classList.contains('lk-skuhot')) return;
@@ -8360,7 +8332,6 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
   }, true);
 
   function scan(){
-    listScan();
     var rows=rowsPage();
     // 1) режим редагування картки: input[ng-model="viewModel.item.sku"]
     if(rows) [].forEach.call(document.querySelectorAll('input[ng-model="viewModel.item.sku"]'), function(inp){
@@ -8398,7 +8369,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       var m=/\(([^()]+)\)/.exec(String(sp.textContent||'').replace(/\s+/g,' '));
       if(!m) return;
       var code=m[1];
-      // сам код теж клікабельний — як у списку заявок (3.55); кнопка ⧉ лишається.
+      // сам код теж клікабельний; кнопка ⧉ лишається. Тут це безпечно, на відміну
+      // від списку заявок: span — власний елемент Ангуляра, ми лише вішаємо клас.
       // Пишемо ЛИШЕ за потреби: span стає нашим елементом, і безумовний запис
       // атрибута рахувався б як мутація в тесті спокою.
       if(!sp.classList.contains('lk-skuhot')) sp.classList.add('lk-skuhot');
