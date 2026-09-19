@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.58
+// @version      3.59
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -10944,6 +10944,17 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     try{ localStorage.setItem(TAILKEY, JSON.stringify({key:key,cash:cash,out:out,ids:ids||null,ts:Date.now()})); }catch(e){}
   }
   // порахувати хвіст живими запитами
+  // Підпис складу заявки: «0282x1,174x2» — відсортовані коди й кількості.
+  // Потрібен, щоб побачити ПІДМІНУ товару, коли сума лишилась тією самою
+  // (гроші в касі сходяться, а зі складу пішло інше).
+  function itemsSig(o){
+    var p=o&&o.products;
+    if(typeof p==='string'){ try{ p=JSON.parse(p); }catch(e){ p=null; } }
+    if(!p||!p.length) return '';
+    return p.map(function(it){
+      return String(it.sku||it.productId||'?')+'x'+(num(it.amount)||0);
+    }).sort().join(',');
+  }
   async function tailCalc(bdate,tailTo){
     var od=await Promise.all([ fetchOrders(bdate,tailTo), fetchOutcoming(bdate,tailTo) ]);
     // ids: {номер заявки: сума} — поіменний список готівки, з якої склався залишок.
@@ -10951,7 +10962,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     // заднім числом (видалять, змінять статус або суму).
     var cash=0, ids={};
     od[0].forEach(function(o){
-      if(payId(o)===CASH_ID && payDate(o)>=bdate){ cash+=amount(o); ids[o.id]=amount(o); }
+      if(payId(o)===CASH_ID && payDate(o)>=bdate){ cash+=amount(o); ids[o.id]={s:amount(o), p:itemsSig(o)}; }
     });
     var out=0;  od[1].items.forEach(function(x){ if(x.date>=bdate) out+=x.amount; });
     return {cash:cash, out:out, ids:ids};
@@ -10972,29 +10983,44 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     list.forEach(function(x){ if(!seen[x.id+'|'+x.was]) a.push(x); });
     goneWrite(a);
   }
+  // старий кеш зберігав просто число — читаємо обидва формати
+  function recSum(v){ return (v&&typeof v==='object')? num(v.s) : num(v); }
+  function recItems(v){ return (v&&typeof v==='object')? String(v.p||'') : ''; }
   function tailDiff(oldIds,newIds){
     var out=[];
     if(!oldIds) return out;
+    var now=new Date();
     Object.keys(oldIds).forEach(function(id){
-      var was=num(oldIds[id]), now=(newIds&&newIds[id]!=null)?num(newIds[id]):null;
-      if(now===null) out.push({id:id, was:was, now:null, ts:ymdhms(new Date())});
-      else if(now!==was) out.push({id:id, was:was, now:now, ts:ymdhms(new Date())});
+      var o=oldIds[id], n=(newIds&&newIds[id]!=null)?newIds[id]:null;
+      if(n===null){ out.push({id:id, was:recSum(o), now:null, ts:ymdhms(now)}); return; }
+      var wasS=recSum(o), nowS=recSum(n);
+      if(nowS!==wasS){ out.push({id:id, was:wasS, now:nowS, ts:ymdhms(now)}); return; }
+      // сума не змінилась — але могли підмінити товар
+      var wasP=recItems(o), nowP=recItems(n);
+      if(wasP && nowP && wasP!==nowP)
+        out.push({id:id, was:wasS, now:nowS, wasP:wasP, nowP:nowP, ts:ymdhms(now)});
     });
     return out;
   }
   function goneHtml(){
     var a=goneRead(); if(!a.length) return '';
     var sum=0; a.forEach(function(x){ sum += (x.now===null? x.was : (x.was-x.now)); });
+    var nItems=a.filter(function(x){ return x.wasP!=null; }).length;
     var items=a.slice().reverse().slice(0,12).map(function(x){
       var what=(x.now===null)
         ? 'зникла з каси'
-        : ('сума змінилась: '+fmt(x.was)+' → '+fmt(x.now));
+        : (x.wasP!=null
+            ? ('склад змінили: '+x.wasP+' → '+x.nowP)
+            : ('сума змінилась: '+fmt(x.was)+' → '+fmt(x.now)));
+      var money=(x.wasP!=null)? 'сума та сама' : ('−'+fmt(x.now===null?x.was:(x.was-x.now)));
       return '<a href="/ua/index.html?formId=1#/order/update/'+x.id+'" target="_blank" title="Відкрити заявку">'
            + '<span>№'+x.id+' · '+what+'<span style="color:#a06">'+(x.ts?(' · '+dstr(String(x.ts).slice(0,10))+' '+String(x.ts).slice(11,16)):'')+'</span></span>'
-           + '<span class="am">−'+fmt(x.now===null?x.was:(x.was-x.now))+'</span></a>';
+           + '<span class="am">'+money+'</span></a>';
     }).join('');
     return '<div id="lk-cash-gone"><button class="x" id="lk-cash-gone-x" title="Прибрати попередження">✕</button>'
-         + '<div class="ttl">⚠️ Правки заднім числом: '+a.length+' на '+fmt(sum)+'</div>'
+         + '<div class="ttl">⚠️ Правки заднім числом: '+a.length
+         + (sum? (' на '+fmt(sum)) : '')
+         + (nItems? (' · з них підміна товару: '+nItems) : '')+'</div>'
          + items
          + '<div style="margin-top:6px;color:#9a5a52;font-size:12px">Ці заявки раніше були в касі як готівка. '
          + 'Перевірте, чи гроші повернули — залишок уже перераховано без них.</div></div>';
