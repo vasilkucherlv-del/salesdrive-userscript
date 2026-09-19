@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SalesDrive — Допродажі + База знань (ТЕСТ)
 // @namespace    lartek-komplektom
-// @version      3.57
+// @version      3.58
 // @description  Підказки допродажу в заявці SalesDrive (додавання супутнього товару одним кліком) + База знань з відповідями клієнтам. Дані з Google-таблиць. Автооновлення.
 // @author       Vasyl
 // @match        https://*.salesdrive.me/*
@@ -10925,24 +10925,81 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     var r=tailRaw(); if(!r || !r.key) return null;
     var parts=String(r.key).split('|');
     if(parts[0]!==bdate) return null;            // інша стартова точка — кеш не підходить
+    // кеш від старішої версії — без поіменного списку. Доростити його можна,
+    // але тоді список так і лишився б порожнім і контроль правок заднім числом
+    // мовчки не працював би. Тож краще один раз перерахувати повністю.
+    if(!r.ids) return null;
     var had=parts[1];
     if(!(had<tailTo)) return null;               // кеш не старіший — доростати нічого
     var from=ymd(new Date(new Date(had+'T00:00:00').getTime()+86400000));
     var add=await tailCalc(from,tailTo);         // лише кілька днів
     var cash=num(r.cash)+add.cash, out=num(r.out)+add.out;
-    tailWrite(bdate+'|'+tailTo, cash, out);
-    return {cash:cash, out:out, ts:Date.now()};
+    var ids=null;
+    if(r.ids){ ids={}; Object.keys(r.ids).forEach(function(k){ ids[k]=r.ids[k]; });
+               Object.keys(add.ids).forEach(function(k){ ids[k]=add.ids[k]; }); }
+    tailWrite(bdate+'|'+tailTo, cash, out, ids);
+    return {cash:cash, out:out, ids:ids, ts:Date.now()};
   }
-  function tailWrite(key,cash,out){
-    try{ localStorage.setItem(TAILKEY, JSON.stringify({key:key,cash:cash,out:out,ts:Date.now()})); }catch(e){}
+  function tailWrite(key,cash,out,ids){
+    try{ localStorage.setItem(TAILKEY, JSON.stringify({key:key,cash:cash,out:out,ids:ids||null,ts:Date.now()})); }catch(e){}
   }
   // порахувати хвіст живими запитами
   async function tailCalc(bdate,tailTo){
     var od=await Promise.all([ fetchOrders(bdate,tailTo), fetchOutcoming(bdate,tailTo) ]);
-    var cash=0; od[0].forEach(function(o){ if(payId(o)===CASH_ID && payDate(o)>=bdate) cash+=amount(o); });
+    // ids: {номер заявки: сума} — поіменний список готівки, з якої склався залишок.
+    // Саме він дає змогу назвати КОНКРЕТНУ заявку, якщо її потім приберуть
+    // заднім числом (видалять, змінять статус або суму).
+    var cash=0, ids={};
+    od[0].forEach(function(o){
+      if(payId(o)===CASH_ID && payDate(o)>=bdate){ cash+=amount(o); ids[o.id]=amount(o); }
+    });
     var out=0;  od[1].items.forEach(function(x){ if(x.date>=bdate) out+=x.amount; });
-    return {cash:cash, out:out};
+    return {cash:cash, out:out, ids:ids};
   }
+  /* ---- правки заднім числом ----
+     Порівнюємо поіменний список готівки «як було» з тим, що СРМ віддає зараз.
+     Заявка могла зникнути (видалили чи вивели зі статусу «Оплачено САМОВИВІЗ»)
+     або змінити суму — і те, й те лишилось би непоміченим, бо в касі просто
+     стало б менше грошей. Знайдене складаємо в GM-сховище: воно живе в
+     розширенні, а не в сайті, тож чисткою кешу браузера його не прибрати. */
+  var GONEKEY='lk_cash_gone_v1';
+  function goneRead(){ try{ var v=GM_getValue(GONEKEY,null); var a=v?JSON.parse(v):[]; return Array.isArray(a)?a:[]; }catch(e){ return []; } }
+  function goneWrite(a){ try{ GM_setValue(GONEKEY, JSON.stringify(a.slice(-100))); }catch(e){} }
+  function goneAdd(list){
+    if(!list.length) return;
+    var a=goneRead(), seen={};
+    a.forEach(function(x){ seen[x.id+'|'+x.was]=1; });
+    list.forEach(function(x){ if(!seen[x.id+'|'+x.was]) a.push(x); });
+    goneWrite(a);
+  }
+  function tailDiff(oldIds,newIds){
+    var out=[];
+    if(!oldIds) return out;
+    Object.keys(oldIds).forEach(function(id){
+      var was=num(oldIds[id]), now=(newIds&&newIds[id]!=null)?num(newIds[id]):null;
+      if(now===null) out.push({id:id, was:was, now:null, ts:ymdhms(new Date())});
+      else if(now!==was) out.push({id:id, was:was, now:now, ts:ymdhms(new Date())});
+    });
+    return out;
+  }
+  function goneHtml(){
+    var a=goneRead(); if(!a.length) return '';
+    var sum=0; a.forEach(function(x){ sum += (x.now===null? x.was : (x.was-x.now)); });
+    var items=a.slice().reverse().slice(0,12).map(function(x){
+      var what=(x.now===null)
+        ? 'зникла з каси'
+        : ('сума змінилась: '+fmt(x.was)+' → '+fmt(x.now));
+      return '<a href="/ua/index.html?formId=1#/order/update/'+x.id+'" target="_blank" title="Відкрити заявку">'
+           + '<span>№'+x.id+' · '+what+'<span style="color:#a06">'+(x.ts?(' · '+dstr(String(x.ts).slice(0,10))+' '+String(x.ts).slice(11,16)):'')+'</span></span>'
+           + '<span class="am">−'+fmt(x.now===null?x.was:(x.was-x.now))+'</span></a>';
+    }).join('');
+    return '<div id="lk-cash-gone"><button class="x" id="lk-cash-gone-x" title="Прибрати попередження">✕</button>'
+         + '<div class="ttl">⚠️ Правки заднім числом: '+a.length+' на '+fmt(sum)+'</div>'
+         + items
+         + '<div style="margin-top:6px;color:#9a5a52;font-size:12px">Ці заявки раніше були в касі як готівка. '
+         + 'Перевірте, чи гроші повернули — залишок уже перераховано без них.</div></div>';
+  }
+
   var _tailBusy=null;
   // тиха звірка у фоні — як revalidateBaseline: показали з кешу, перевіряємо потім
   function revalidateTail(key,bdate,tailTo,seqAtStart){
@@ -10950,9 +11007,13 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     tailCalc(bdate,tailTo).then(function(t){
       _tailBusy=null;
       var old=tailRead(key);
-      tailWrite(key,t.cash,t.out);
+      var diff=tailDiff(old&&old.ids, t.ids);
+      if(diff.length) goneAdd(diff);
+      tailWrite(key,t.cash,t.out,t.ids);
       var changed=!old || old.cash!==t.cash || old.out!==t.out;   // хтось правив стару заявку
-      if(changed && seqAtStart===renderSeq && document.getElementById('lk-cash-box')) render();
+      // знахідки показуємо навіть якщо користувач за цей час перемкнув період:
+      // render() намалює актуальний стан, а попередження втрачати не можна
+      if((changed||diff.length) && document.getElementById('lk-cash-box')) render();
     }).catch(function(){ _tailBusy=null; });
   }
 
@@ -11002,6 +11063,16 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
     +'#lk-cash-nav .today{font-size:12px;color:#ad2fb6;cursor:pointer;text-decoration:underline;width:auto;height:auto;border:none;background:none}'
     +'#lk-cash-nav #lk-cash-span{min-width:150px;text-align:center;color:#333}'
     +'#lk-cash-bal{margin:2px 16px 6px;padding:15px 16px;border-radius:11px;background:#fbeffc;border:1px solid #e8b9ed;display:flex;justify-content:space-between;align-items:baseline}'
+    /* правки заднім числом — найважливіше попередження в касі */
+    +'#lk-cash-gone{margin:2px 16px 8px;padding:11px 13px;border-radius:9px;background:#fdecea;'
+    +'  border:1px solid #f0b3ab;border-left:4px solid #B71C1C;font:13px/1.5 Arial,sans-serif;color:#7f1d1d}'
+    +'#lk-cash-gone .ttl{font-weight:700;color:#B71C1C;margin-bottom:5px}'
+    +'#lk-cash-gone a{display:flex;justify-content:space-between;gap:10px;padding:3px 0;'
+    +'  border-top:1px dashed #f0c4bd;color:#7f1d1d;text-decoration:none}'
+    +'#lk-cash-gone a:first-of-type{border-top:none}'
+    +'#lk-cash-gone a:hover{color:#B71C1C;text-decoration:underline}'
+    +'#lk-cash-gone .am{white-space:nowrap;font-weight:700}'
+    +'#lk-cash-gone .x{float:right;border:none;background:none;cursor:pointer;font-size:15px;color:#B71C1C;padding:0 0 0 8px}'
     +'#lk-cash-bal .l{font-size:14px;color:#7a2a80;font-weight:600}'
     +'#lk-cash-bal .v{font-size:24px;font-weight:800;color:#7a2a80}'
     +'#lk-cash-bal .sub{font-size:11px;color:#a06aa6;font-weight:400}'
@@ -11110,7 +11181,7 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       }
       if(!tail){
         // кешу ще немає — рахуємо один раз (довго), далі відкриття буде миттєвим
-        try{ var tc=await tailCalc(bdate,tailTo); tailWrite(tailKey,tc.cash,tc.out); tail={cash:tc.cash,out:tc.out,ts:Date.now()}; }
+        try{ var tc=await tailCalc(bdate,tailTo); tailWrite(tailKey,tc.cash,tc.out,tc.ids); tail={cash:tc.cash,out:tc.out,ids:tc.ids,ts:Date.now()}; }
         catch(e){ tail=null; }
         if(myseq!==renderSeq) return;
       }
@@ -11164,6 +11235,8 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       var balance=num(base.amount)+cashCum-outCum;
       balanceTxt='<div id="lk-cash-bal"><span class="l">💰 Готівка в касі<br><span class="sub">станом на '+dstr(span.to)+'</span></span><span class="v">'+fmt(balance)+'</span></div>';
     }
+    // попередження про правки заднім числом — над залишком, щоб не прогледіти
+    balanceTxt = goneHtml() + balanceTxt;
 
     // Обороти за вибраний період (з того самого набору)
     var orders=allOrders.filter(function(o){ return inPeriod(payDate(o)); });
@@ -11221,6 +11294,13 @@ try{ // SD-ізоляція: помилка цього модуля не зуп�
       +'<div id="lk-cash-adj">⚙️ Задати стартовий залишок каси (під PIN)</div>'
       +adjLogHtml();
     box.querySelector('#lk-cash-adj').onclick=adjust;
+    // «✕» на попередженні: менеджер розібрався — прибираємо список,
+    // але наступна правка заднім числом покаже плашку знову
+    var gx=box.querySelector('#lk-cash-gone-x');
+    if(gx) gx.onclick=function(){
+      if(!confirm('Прибрати попередження про правки заднім числом?')) return;
+      goneWrite([]); render();
+    };
     adjLogSync(base); // коригування з іншого ПК → у журнал
     var lt=box.querySelector('#lk-cash-adjlog-t');
     if(lt) lt.onclick=function(){
